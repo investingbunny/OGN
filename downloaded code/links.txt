@@ -1,0 +1,5 @@
+Link to stocktrend github page
+
+https://github.com/ChillarAnand/stocktrends
+
+https://github.com/jackluo/py-quantmod

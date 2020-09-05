@@ -1,0 +1,87 @@
+import pandas as pd
+
+#Read excel file into data frame
+df = pd.read_excel("2018.xlsx", "Sheet1")
+
+#Creating strike List
+strike = []
+#Adding values to list
+strike = list(df['Strike Price'])
+#Removing duplicates in list
+strike = list(dict.fromkeys(strike))
+#Sorting list
+strike.sort()
+
+#Creating Expiry date List
+expiry = []
+#Adding values to list
+expiry = list(df['Expiry'])
+#Removing duplicates in list
+expiry = list(dict.fromkeys(expiry))
+#Sorting list
+expiry.sort()
+
+
+#Creating date List
+date = []
+#Adding values to list
+date = list(df['Date'])
+#Removing duplicates in list
+date = list(dict.fromkeys(date))
+#Sorting list
+date.sort()
+
+for p in expiry:
+    for z in date:
+        if p.month == z.month:
+            valCE = {}
+            #Call value computation
+            for i in range(len(strike)):
+                toival = 0
+                a = strike[i]
+                for b in strike:
+                    if a > b:
+                        oidf = df.loc[ (df['Strike Price']==b) & (df['Option Type']=='CE') & (df['Expiry']==p) & (df['Date']==z) ]
+                        if oidf.empty == True:
+                            oi = 0
+                        else:
+                            oi = int(oidf['Open Int'])
+                        oival = oi * (a-b)
+                        toival = toival + oival
+                    else:
+                        break
+                valCE[a] = toival
+
+
+            strike.sort(reverse=True)
+
+            valPE = {}
+            #Put value computation
+            for i in range(len(strike)):
+                toival = 0
+                a = strike[i]
+                for b in strike:
+                    if a < b:
+                        oidf = df.loc[ (df['Strike Price']==b) & (df['Option Type']=='PE') & (df['Expiry']==p) & (df['Date']==z) ]
+                        if oidf.empty == True:
+                            oi = 0
+                        else:
+                            oi = int(oidf['Open Int'])
+                        oival = oi * (b-a)
+                        toival = toival + oival
+                    else:
+                        break
+                valPE[a] = toival
+                
+
+            valCEPE = {}
+            for c in strike:
+                valCEPE[c] = valCE[c] + valPE[c]
+
+
+            temp = min(valCEPE.values()) 
+            res = [key for key in valCEPE if valCEPE[key] == temp] 
+            print(p,z,res)
+            strike.sort()
+            res = 0
+            temp = 0
