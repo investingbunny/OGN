@@ -228,7 +228,7 @@ def OBV(DF):
     df['direction'][0] = 0
     df['vol_adj'] = df['Volume'] * df['direction']
     df['obv'] = df['vol_adj'].cumsum()
-    return df['obv']
+    return df
             
 def ATR(DF,n):
     "function to calculate True Range and Average True Range"
@@ -739,7 +739,10 @@ def TechAnalysis():
             
             Indicatordf["RSI"] = RSI(Indicatordf,14)
             
-            Indicatordf["OBV"] = OBV(Indicatordf)
+            OBVdf = OBV(Indicatordf)
+            Indicatordf["OBV"] = OBVdf["obv"]
+            Indicatordf["Daily_Ret"] = OBVdf['daily_ret']
+            Indicatordf["Log_Ret"] = np.log(1+ OBVdf['daily_ret'])
             
             Indicatordf["Slope"] = slope(Indicatordf["Close"],5)
             
