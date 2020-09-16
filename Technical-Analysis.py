@@ -324,7 +324,7 @@ def plot_chart(DF, n, ticker):
     # ticker = "REDINGTON"
     # data = Indicatordf.copy()
     data = DF.copy()
-    data = data.reset_index()
+    # data = data.reset_index()
     Renkodata = Renko_DF(data)
     #DF amd number of latest bricks
     PlotRenko(Renkodata,100)
@@ -696,7 +696,7 @@ def TechAnalysis():
     for Scrip in NSE500ScripList:        
         OHLCdf = None
         Indicatordf = None
-        # Scrip = "NIFTY"
+        # Scrip = "SYNGENE"
         print('Now for '+ Scrip)
         OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
         #Read from feather
@@ -763,17 +763,17 @@ def TechAnalysis():
             Indicatordf.reset_index(level=0, inplace=True)
             
 ###################################################################################################
-            feather.write_feather(Indicatordf, './TechnicalFrames/'+Scrip+'-dataframe.ftr')
+            # feather.write_feather(Indicatordf, './TechnicalFrames/'+Scrip+'-dataframe.ftr')
 # ###################################################################################################            
-            # plot_chart(Indicatordf,200,Scrip)
+            plot_chart(Indicatordf,200,Scrip)
 ###################################################################################################
-            ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)
-            # ReturnMLdf.to_csv(r'./OutputFrames/pandas.txt', header=None, index=None, sep=' ', mode='a')
-            Finaldf = Finaldf.append(ReturnMLdf, ignore_index=True)
+    #         ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)
+    #         # ReturnMLdf.to_csv(r'./OutputFrames/pandas.txt', header=None, index=None, sep=' ', mode='a')
+    #         Finaldf = Finaldf.append(ReturnMLdf, ignore_index=True)
             
-    Focusdate = ReturnMLdf['Date'].values[0]
-    if not Finaldf.empty:
-        feather.write_feather(Finaldf, './OutputFrames/'+str(Focusdate)+'-G1dataframe.ftr')
+    # Focusdate = ReturnMLdf['Date'].values[0]
+    # if not Finaldf.empty:
+    #     feather.write_feather(Finaldf, './OutputFrames/'+str(Focusdate)+'-G1dataframe.ftr')
 ###################################################################################################
 
 def main():
