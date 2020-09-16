@@ -126,13 +126,76 @@ NSEFnOList = ["BANKNIFTY","NIFTY","ACC","ADANIENT","ADANIPORTS","AMARAJABAT","AM
 Scriplist = ["TCS","TATAPOWER","REDINGTON","SAIL"]
 YahooScriplist = ["RELIANCE.NS", "HDFCBANK.NS", "TATASTEEL.NS", "TCS.NS", "TATAMOTORS.NS","TATAPOWER.NS","INDIGO.NS","IDEA.NS","OIL.NS","AUROPHARMA.NS","CIPLA.NS","FEDERALBNK.NS","AXISBANK.NS","ZEEL.NS"]
 IndexList = ["NIFTY","NIFTYIT","BANKNIFTY","INDIAVIX"]
-
+#################################Global Variables
+#Creating strike List
+strike = []
+expiry = []
+date = []
 #Check for file
 
 def FindFeather(name, path):
     for root, dirs, files in os.walk(path):
         if name in files:
             return os.path.join(root, name)
+
+def call_otm(df, date):
+	copy_df = df
+	copy_df = copy_df[copy_df['Option type'] == 'CE']
+	copy_df = copy_df[copy_df['Date'] == date]
+	copy_df.sort_values('Strike Price', axis=0, ascending = False, inplace = True)
+	copy_df['cumsum_c'] = pd.Series.cumsum(copy_df['Open Int'])
+	return copy_df        
+        
+def put_otm(df, date):
+	copy_df = df
+	copy_df = copy_df[copy_df['Option type'] == 'PE']
+	copy_df = copy_df[copy_df['Date'] == date]
+	copy_df.sort_values('Strike Price', axis=0, ascending = True, inplace = True)
+	copy_df['cumsum_p'] = pd.Series.cumsum(copy_df['Open Int'])
+	return copy_df       
+        
+# (5) Find strike with maximum cumulative options OTM.
+def max_pain_strike(call_sums, put_sums):
+	cumulative = pd.merge(call_sums,put_sums, on = 'Strike Price', how = 'inner') #Merge or join?
+	cumulative['cp_sum'] = cumulative['cumsum_c'] + cumulative['cumsum_p']
+	mpp = cumulative['Strike Price'][cumulative['cp_sum'].idxmax()]
+	return mpp    
+
+def GetMaxPain(Scrip): #Depth is considered in months to see historical expiry and pain
+    # for Scrip in NSEFnOList:
+    # Scrip = 'RELIANCE'
+    OptionsFileName = Scrip + '_' + MonthlyOptionsFilePath
+    # FromWhen = 500 #How much back in time. 1 is default minimum
+    # MLdf = Tempdf.tail(1)
+
+    #Read from feather
+    if (FindFeather(OptionsFileName, './Datastore')):
+        ReadOptionsdf = feather.read_feather('./Datastore/'+OptionsFileName)
+        OptionsSlice = ReadOptionsdf.copy()
+        MaxPaindf = pd.DataFrame()
+        # MLdf = ReadOptionsdf[(ReadOptionsdf['Date'] ==  SelectDate)]
+        # ExpiryDate = MLdf['Expiry'].values[0] #The month in focus
+        # OptionsSlice = ReadOptionsdf[(ReadOptionsdf['Expiry'] ==  ExpiryDate)]
+        
+        date = []
+        #Adding values to list
+        date = list(OptionsSlice['Date'])
+        #Removing duplicates in list
+        date = list(dict.fromkeys(date))
+        #Sorting list
+        date.sort()
+        
+        for Focusdate in date:
+            call_sums = call_otm(OptionsSlice, Focusdate)
+            put_sums = put_otm(OptionsSlice, Focusdate)
+            PCR = put_sums['Open Int'].sum()/call_sums['Open Int'].sum()
+            MP = max_pain_strike(call_sums, put_sums)
+            MaxPaindf['Date'] = Focusdate
+            MaxPaindf['MaxPain'] = MP
+            MaxPaindf['Expiry'] = ExpiryDate
+            MaxPaindf['PCR'] = PCR
+            # print(Scrip,ExpiryDate,Focusdate,MP,PCR)
+        return MaxPaindf
         
 def MACD(DF,a,b,c):
     """function to calculate MACD
@@ -696,7 +759,7 @@ def TechAnalysis():
     for Scrip in NSE500ScripList:        
         OHLCdf = None
         Indicatordf = None
-        # Scrip = "SYNGENE"
+        Scrip = "HDFCBANK"
         print('Now for '+ Scrip)
         OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
         #Read from feather
@@ -762,18 +825,21 @@ def TechAnalysis():
             #Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip) 
             Indicatordf.reset_index(level=0, inplace=True)
             
-###################################################################################################
-            # feather.write_feather(Indicatordf, './TechnicalFrames/'+Scrip+'-dataframe.ftr')
-# ###################################################################################################            
-            plot_chart(Indicatordf,200,Scrip)
-###################################################################################################
-    #         ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)
-    #         # ReturnMLdf.to_csv(r'./OutputFrames/pandas.txt', header=None, index=None, sep=' ', mode='a')
-    #         Finaldf = Finaldf.append(ReturnMLdf, ignore_index=True)
+            Mpdf = GetMaxPain(Scrip)
+            OHLCOptdf = pd.merge(Indicatordf,Mpdf, on = 'Date', how = 'inner')
             
-    # Focusdate = ReturnMLdf['Date'].values[0]
-    # if not Finaldf.empty:
-    #     feather.write_feather(Finaldf, './OutputFrames/'+str(Focusdate)+'-G1dataframe.ftr')
+###################################################################################################
+            feather.write_feather(Indicatordf, 'E:/Harish/nsepywork/TechnicalFrames/'+Scrip+'-dataframe.ftr')
+# ###################################################################################################            
+            # plot_chart(Indicatordf,200,Scrip)
+###################################################################################################
+            ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)
+            # ReturnMLdf.to_csv(r'./OutputFrames/pandas.txt', header=None, index=None, sep=' ', mode='a')
+            Finaldf = Finaldf.append(ReturnMLdf, ignore_index=True)
+            
+    Focusdate = ReturnMLdf['Date'].values[0]
+    if not Finaldf.empty:
+        feather.write_feather(Finaldf, './OutputFrames/'+str(Focusdate)+'-G1dataframe.ftr')
 ###################################################################################################
 
 def main():

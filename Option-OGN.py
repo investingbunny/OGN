@@ -70,35 +70,43 @@ def max_pain_strike(call_sums, put_sums):
 	mpp = cumulative['Strike Price'][cumulative['cp_sum'].idxmax()]
 	return mpp    
 
-def GetMaxPain(Scrip,FromWhen): #Depth is considered in months to see historical expiry and pain
-    for Scrip in NSEFnOList:
-        OptionsFileName = Scrip + '_' + MonthlyOptionsFilePath
-        FromWhen = 5000 #How much back in time. 1 is default minimum
-        # MLdf = Tempdf.tail(1)
+def GetMaxPain(Scrip,FirstDate): #Depth is considered in months to see historical expiry and pain
+    # for Scrip in NSEFnOList:
+    # Scrip = 'RELIANCE'
+    OptionsFileName = Scrip + '_' + MonthlyOptionsFilePath
+    # FromWhen = 500 #How much back in time. 1 is default minimum
+    # MLdf = Tempdf.tail(1)
+
+    #Read from feather
+    if (FindFeather(OptionsFileName, './Datastore')):
+        ReadOptionsdf = feather.read_feather('./Datastore/'+OptionsFileName)
+        OptionsSlice = ReadOptionsdf.copy()
+
+        # MLdf = ReadOptionsdf[(ReadOptionsdf['Date'] ==  SelectDate)]
+        # ExpiryDate = MLdf['Expiry'].values[0] #The month in focus
+        # OptionsSlice = ReadOptionsdf[(ReadOptionsdf['Expiry'] ==  ExpiryDate)]
+        d = FirstDate - timedelta(days=1)
+        OptionsSlice[OptionsSlice.Date > d]
+        
+        date = []
+        #Adding values to list
+        date = list(OptionsSlice['Date'])
+        #Removing duplicates in list
+        date = list(dict.fromkeys(date))
+        #Sorting list
+        date.sort()
+        
+        for Focusdate in date:
+            call_sums = call_otm(OptionsSlice, Focusdate)
+            put_sums = put_otm(OptionsSlice, Focusdate)
+            PCR = put_sums['Open Int'].sum()/call_sums['Open Int'].sum()
+            MP = max_pain_strike(call_sums, put_sums)
+            MaxPaindf['Date'] = Focusdate
+            MaxPaindf['MaxPain'] = MP
+            MaxPaindf['Expiry'] = ExpiryDate
+            MaxPaindf['PCR'] = PCR
+            # print(Scrip,ExpiryDate,Focusdate,MP,PCR)
+        return MaxPaindf
     
-        #Read from feather
-        if (FindFeather(OptionsFileName, './Datastore')):
-            ReadOptionsdf = feather.read_feather('./Datastore/'+OptionsFileName)
-            ReadOptionsdf['Date'] = ReadOptionsdf['Date'].dt.date
-            ReadOptionsdf['Expiry'] = ReadOptionsdf['Expiry'].dt.date
-            MLdf = ReadOptionsdf.iloc[[-FromWhen]]
-            # MLdf.reset_index(level=0, inplace=True)
-            ExpiryDate = MLdf['Expiry'].values[0] #The date in focus
-                   
-            OptionsSlice = ReadOptionsdf[(ReadOptionsdf['Expiry'] ==  ExpiryDate)]
-            
-            date = []
-            #Adding values to list
-            date = list(OptionsSlice['Date'])
-            #Removing duplicates in list
-            date = list(dict.fromkeys(date))
-            #Sorting list
-            date.sort()
-            
-            for Focusdate in date:
-                call_sums = call_otm(OptionsSlice, Focusdate)
-                put_sums = put_otm(OptionsSlice, Focusdate)
-                PCR = put_sums['Open Int'].sum()/call_sums['Open Int'].sum()
-                MP = max_pain_strike(call_sums, put_sums)
-                print(Scrip,ExpiryDate,Focusdate,MP,PCR)
-    
+
+Mpdf = GetMaxPain(ScripName)
