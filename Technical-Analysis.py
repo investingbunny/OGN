@@ -66,7 +66,7 @@ NSE500ScripList = ["3MINDIA","ACC","AIAENG","APLAPOLLO","AUBANK","AARTIIND","AAV
                     "GARFIBRES","GAYAPROJ","GICRE","GILLETTE","GLAXO","GLENMARK","GODFRYPHLP","GODREJAGRO",
                     "GODREJCP","GODREJIND","GODREJPROP","GRANULES","GRAPHITE","GRASIM","GESHIP","GREAVESCOT",
                     "GRINDWELL","GUJALKALI","GUJGASLTD","GMDCLTD","GNFC","GPPL","GSFC","GSPL","GULFOILLUB",
-                    "HEG","HCLTECH","HDFCAMC","HDFCBANK","HDFCLIFE","HFCL","HATSUN","HAVELLS","HEIDELBERG",
+                    "HAPMIN","HEG","HCLTECH","HDFCAMC","HDFCBANK","HDFCLIFE","HFCL","HATSUN","HAVELLS","HEIDELBERG",
                     "HERITGFOOD","HEROMOTOCO","HEXAWARE","HSCL","HIMATSEIDE","HINDALCO","HAL","HINDCOPPER",
                     "HINDPETRO","HINDUNILVR","HINDZINC","HONAUT","HUDCO","HDFC","ICICIBANK","ICICIGI",
                     "ICICIPRULI","ISEC","ICRA","IDBI","IDFCFIRSTB","IDFC","IFBIND","IFCI","IIFL","IRB",
@@ -130,7 +130,7 @@ IndexList = ["NIFTY","NIFTYIT","BANKNIFTY","INDIAVIX"]
 #Creating strike List
 strike = []
 expiry = []
-date = []
+Optdatelist = []
 #Check for file
 
 def FindFeather(name, path):
@@ -161,7 +161,7 @@ def max_pain_strike(call_sums, put_sums):
 	mpp = cumulative['Strike Price'][cumulative['cp_sum'].idxmax()]
 	return mpp    
 
-def GetMaxPain(Scrip): #Depth is considered in months to see historical expiry and pain
+def GetMaxPain(Scrip,OptionsFrameStart): #Depth is considered in months to see historical expiry and pain
     # for Scrip in NSEFnOList:
     # Scrip = 'RELIANCE'
     OptionsFileName = Scrip + '_' + MonthlyOptionsFilePath
@@ -172,29 +172,32 @@ def GetMaxPain(Scrip): #Depth is considered in months to see historical expiry a
     if (FindFeather(OptionsFileName, './Datastore')):
         ReadOptionsdf = feather.read_feather('./Datastore/'+OptionsFileName)
         OptionsSlice = ReadOptionsdf.copy()
-        MaxPaindf = pd.DataFrame()
-        # MLdf = ReadOptionsdf[(ReadOptionsdf['Date'] ==  SelectDate)]
-        # ExpiryDate = MLdf['Expiry'].values[0] #The month in focus
-        # OptionsSlice = ReadOptionsdf[(ReadOptionsdf['Expiry'] ==  ExpiryDate)]
+        d = OptionsFrameStart - datetime.timedelta(days=1)
+        OptionsSlice = OptionsSlice[OptionsSlice.Date > d]
         
-        date = []
+        Optdatelist = []
         #Adding values to list
-        date = list(OptionsSlice['Date'])
+        Optdatelist = list(OptionsSlice['Date'])
         #Removing duplicates in list
-        date = list(dict.fromkeys(date))
+        Optdatelist = list(dict.fromkeys(Optdatelist))
         #Sorting list
-        date.sort()
+        Optdatelist.sort()
         
-        for Focusdate in date:
+        Focusdatelist = []
+        MaxPainlist = []
+        PCRlist = []
+        
+        for Focusdate in Optdatelist:
             call_sums = call_otm(OptionsSlice, Focusdate)
             put_sums = put_otm(OptionsSlice, Focusdate)
             PCR = put_sums['Open Int'].sum()/call_sums['Open Int'].sum()
             MP = max_pain_strike(call_sums, put_sums)
-            MaxPaindf['Date'] = Focusdate
-            MaxPaindf['MaxPain'] = MP
-            MaxPaindf['Expiry'] = ExpiryDate
-            MaxPaindf['PCR'] = PCR
+            Focusdatelist.append(Focusdate)
+            MaxPainlist.append(MP)
+            PCRlist.append(PCR)
             # print(Scrip,ExpiryDate,Focusdate,MP,PCR)
+            
+        MaxPaindf = pd.DataFrame({'Date': Focusdatelist,'MaxPain': MaxPainlist,'PCR': PCRlist})
         return MaxPaindf
         
 def MACD(DF,a,b,c):
@@ -322,10 +325,13 @@ def slope(ser,n):
     slope_angle = (np.rad2deg(np.arctan(np.array(slopes))))
     return np.array(slope_angle)
 
-def Renko_DF(DF):
+def Renko_DF(DF,ticker):
     "function to convert ohlc data into renko bricks"
     df = DF.copy()
-    df = df.iloc[:,[0,5,6,4,8,10]]
+    if (ticker =="NIFTY" or ticker == "BANKNIFTY"):
+        df = df.iloc[:,[0,2,3,1,4,5]]
+    else:    
+        df = df.iloc[:,[0,5,6,4,8,10]]
     df.rename(columns = {"Date" : "date", "High" : "high","Low" : "low", "Open" : "open","Close" : "close", "Volume" : "volume"}, inplace = True)
     df2 = Renko(df)
     df2.brick_size = round(ATR(DF,120)["ATR"].iloc[-1],0)
@@ -383,17 +389,25 @@ def BollBnd(DF,n):
 
 def plot_chart(DF, n, ticker):
     # Filter number of observations to plot
-    # n = 300
-    # ticker = "REDINGTON"
+    # n = 200
+    # ticker = "NIFTY"
     # data = Indicatordf.copy()
     data = DF.copy()
     # data = data.reset_index()
-    Renkodata = Renko_DF(data)
+    Renkodata = Renko_DF(data,ticker)
     #DF amd number of latest bricks
     PlotRenko(Renkodata,100)
-    
-    data.drop(data.iloc[:, [1,2,3,7]], inplace = True, axis = 1) 
-    data = data.iloc[-n:]
+
+    data = data.iloc[-n:]    
+    if(ticker != "NIFTY"):
+        data.drop(data.iloc[:, [1,2,3,7]], inplace = True, axis = 1) #This line is required for candles
+
+    OptionsFileName = ticker + '_' + MonthlyOptionsFilePath
+    #Read from feather
+    if (FindFeather(OptionsFileName, './Datastore/')):
+        OptionsFrameStart = data.iloc[0].Date
+        Mpdf = GetMaxPain(ticker,OptionsFrameStart)
+        data = pd.merge(data,Mpdf, on = 'Date', how = 'outer')
     
     data.index = data["Date"].apply(lambda x: pd.Timestamp(x))
     data.drop("Date", axis=1, inplace=True)
@@ -455,7 +469,8 @@ def plot_chart(DF, n, ticker):
     
     # Show volume in millions
     ax_vol.bar(data.index, data["Volume"] / 100000, label="Volume")
-    ax_vol.bar(data.index, data["Deliverable Volume"] / 100000, label="Deliverable")
+    if(ticker != "NIFTY"):
+        ax_vol.bar(data.index, data["Deliverable Volume"] / 100000, label="Deliverable")
     ax_vol.set_ylabel("(Lakh(s))")
     ax_vol.legend()
 
@@ -485,7 +500,8 @@ def plot_chart(DF, n, ticker):
     # Above 70% = overbought, below 30% = oversold
     #ax_beta.set_ylabel("Beta")
     ax_beta.plot(data.index, data["Beta"], label="Beta")
-    ax_beta.plot(data.index, data["%Deliverble"], label="% Deliverable")
+    if(ticker != "NIFTY"):    
+        ax_beta.plot(data.index, data["%Deliverble"], label="% Deliverable")
     ax_beta.legend()    
 
     # Save the chart as PNG
@@ -509,7 +525,7 @@ def plot_chart(DF, n, ticker):
     
     ax_ema = fig2.add_axes((0.51, 0.72, 0.49, 0.32), sharex=ax_sma)
     ax_turnover = fig2.add_axes((0.51, 0.48, 0.49, 0.2), sharex=ax_sma)
-    ax_fibadv = fig2.add_axes((0.51, 0.24, 0.49, 0.2), sharex=ax_sma)
+    ax_maxpain = fig2.add_axes((0.51, 0.24, 0.49, 0.2), sharex=ax_sma)
       
     ax_sma.xaxis_date()
     
@@ -531,8 +547,9 @@ def plot_chart(DF, n, ticker):
     ax_ema.plot(data.index, data["140DMA-E"], label="140DMA-E")       
     ax_ema.legend()
     
-    ax_trades.plot(data.index, data["Trades"], label="Trades")
-    ax_trades.legend()
+    if(ticker != "NIFTY"): 
+        ax_trades.plot(data.index, data["Trades"], label="Trades")
+        ax_trades.legend()
     
     ax_turnover.plot(data.index, data["Turnover"]/ 100000, label="Turnover")
     ax_turnover.set_ylabel("(Lakh(s))")
@@ -599,17 +616,28 @@ def plot_chart(DF, n, ticker):
     # ax_fibret.plot(data.index, level4 * len(data.index), label=str(level4))
     # ax_fibret.plot(data.index, level5 * len(data.index), label=str(level5))
     candlestick_ohlc(ax_fibret, ohlc, colorup="g", colordown="r", width=0.8)
-    
-    ax_fibadv.axhspan(level6, price_max, alpha=0.4, color='limegreen', label=str(level6)+ ' (1.272)')
-    ax_fibadv.axhspan(level7, level6, alpha=0.5, color='lime', label=str(level7)+ ' (1.382)')
-    ax_fibadv.axhspan(level8, level7, alpha=0.5, color='deepskyblue', label=str(level8)+ ' (1.5)')
-    ax_fibadv.axhspan(level9, level8, alpha=0.5, color='powderblue', label=str(level9)+ ' (1.618)')
-    ax_fibadv.legend()
-    # ax_fibadv.plot(data.index, level6 * len(data.index), label=str(level6))
-    # ax_fibadv.plot(data.index, level7 * len(data.index), label=str(level7))
-    # ax_fibadv.plot(data.index, level8 * len(data.index), label=str(level8))
-    # ax_fibadv.plot(data.index, level9 * len(data.index), label=str(level9))
-    candlestick_ohlc(ax_fibadv, ohlc, colorup="g", colordown="r", width=0.8)    
+
+    if (FindFeather(OptionsFileName, './Datastore/')):
+        ax_maxpain.plot(data.index, data["Close"], label="Price")
+        ax_maxpain.plot(data.index, data["MaxPain"],color="blue",marker="o", label="MaxPain")
+        ax_pcr = ax_maxpain.twinx()
+        ax_pcr.plot(data.index, data["PCR"],color="black",marker="*", label="PCR")
+        ax_maxpain.set_ylabel('Price')
+        ax_pcr.set_ylabel('PCR')
+        ax_pcr.grid(b=False) # turn off grid #2
+        # ax_maxpain.plot(data.index, data["Close"], label="Price")
+        ax_maxpain.legend()
+    else:
+        ax_maxpain.axhspan(level6, price_max, alpha=0.4, color='limegreen', label=str(level6)+ ' (1.272)')
+        ax_maxpain.axhspan(level7, level6, alpha=0.5, color='lime', label=str(level7)+ ' (1.382)')
+        ax_maxpain.axhspan(level8, level7, alpha=0.5, color='deepskyblue', label=str(level8)+ ' (1.5)')
+        ax_maxpain.axhspan(level9, level8, alpha=0.5, color='powderblue', label=str(level9)+ ' (1.618)')
+        ax_maxpain.legend()
+        # ax_fibadv.plot(data.index, level6 * len(data.index), label=str(level6))
+        # ax_fibadv.plot(data.index, level7 * len(data.index), label=str(level7))
+        # ax_fibadv.plot(data.index, level8 * len(data.index), label=str(level8))
+        # ax_fibadv.plot(data.index, level9 * len(data.index), label=str(level9))
+        candlestick_ohlc(ax_maxpain, ohlc, colorup="g", colordown="r", width=0.8)    
     
     plt.show()
     
@@ -759,7 +787,7 @@ def TechAnalysis():
     for Scrip in NSE500ScripList:        
         OHLCdf = None
         Indicatordf = None
-        Scrip = "HDFCBANK"
+        Scrip = "INDIGO"
         print('Now for '+ Scrip)
         OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
         #Read from feather
@@ -824,22 +852,17 @@ def TechAnalysis():
             Indicatordf["140DMA-E"] = Indicatordf["Close"].ewm(span=140, adjust=False).mean()
             #Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip) 
             Indicatordf.reset_index(level=0, inplace=True)
-            
-            Mpdf = GetMaxPain(Scrip)
-            OHLCOptdf = pd.merge(Indicatordf,Mpdf, on = 'Date', how = 'inner')
-            
-###################################################################################################
-            feather.write_feather(Indicatordf, 'E:/Harish/nsepywork/TechnicalFrames/'+Scrip+'-dataframe.ftr')
 # ###################################################################################################            
-            # plot_chart(Indicatordf,200,Scrip)
+            plot_chart(Indicatordf,200,Scrip)
 ###################################################################################################
-            ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)
-            # ReturnMLdf.to_csv(r'./OutputFrames/pandas.txt', header=None, index=None, sep=' ', mode='a')
-            Finaldf = Finaldf.append(ReturnMLdf, ignore_index=True)
+    #         feather.write_feather(Indicatordf, 'E:/Harish/nsepywork/TechnicalFrames/'+Scrip+'-dataframe.ftr')
+    #         ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)
+    #         # ReturnMLdf.to_csv(r'./OutputFrames/pandas.txt', header=None, index=None, sep=' ', mode='a')
+    #         Finaldf = Finaldf.append(ReturnMLdf, ignore_index=True)
             
-    Focusdate = ReturnMLdf['Date'].values[0]
-    if not Finaldf.empty:
-        feather.write_feather(Finaldf, './OutputFrames/'+str(Focusdate)+'-G1dataframe.ftr')
+    # Focusdate = ReturnMLdf['Date'].values[0]
+    # if not Finaldf.empty:
+    #     feather.write_feather(Finaldf, './OutputFrames/'+str(Focusdate)+'-G1dataframe.ftr')
 ###################################################################################################
 
 def main():
