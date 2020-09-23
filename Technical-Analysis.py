@@ -66,7 +66,7 @@ NSE500ScripList = ["3MINDIA","ACC","AIAENG","APLAPOLLO","AUBANK","AARTIIND","AAV
                     "GARFIBRES","GAYAPROJ","GICRE","GILLETTE","GLAXO","GLENMARK","GODFRYPHLP","GODREJAGRO",
                     "GODREJCP","GODREJIND","GODREJPROP","GRANULES","GRAPHITE","GRASIM","GESHIP","GREAVESCOT",
                     "GRINDWELL","GUJALKALI","GUJGASLTD","GMDCLTD","GNFC","GPPL","GSFC","GSPL","GULFOILLUB",
-                    "HAPMIN","HEG","HCLTECH","HDFCAMC","HDFCBANK","HDFCLIFE","HFCL","HATSUN","HAVELLS","HEIDELBERG",
+                    "HEG","HCLTECH","HDFCAMC","HDFCBANK","HDFCLIFE","HFCL","HATSUN","HAVELLS","HEIDELBERG",
                     "HERITGFOOD","HEROMOTOCO","HEXAWARE","HSCL","HIMATSEIDE","HINDALCO","HAL","HINDCOPPER",
                     "HINDPETRO","HINDUNILVR","HINDZINC","HONAUT","HUDCO","HDFC","ICICIBANK","ICICIGI",
                     "ICICIPRULI","ISEC","ICRA","IDBI","IDFCFIRSTB","IDFC","IFBIND","IFCI","IIFL","IRB",
@@ -390,7 +390,7 @@ def BollBnd(DF,n):
 def plot_chart(DF, n, ticker):
     # Filter number of observations to plot
     # n = 200
-    # ticker = "NIFTY"
+    # ticker = "BANKNIFTY"
     # data = Indicatordf.copy()
     data = DF.copy()
     # data = data.reset_index()
@@ -399,7 +399,7 @@ def plot_chart(DF, n, ticker):
     PlotRenko(Renkodata,100)
 
     data = data.iloc[-n:]    
-    if(ticker != "NIFTY"):
+    if(ticker != "NIFTY" and ticker != "BANKNIFTY"):
         data.drop(data.iloc[:, [1,2,3,7]], inplace = True, axis = 1) #This line is required for candles
 
     OptionsFileName = ticker + '_' + MonthlyOptionsFilePath
@@ -408,6 +408,21 @@ def plot_chart(DF, n, ticker):
         OptionsFrameStart = data.iloc[0].Date
         Mpdf = GetMaxPain(ticker,OptionsFrameStart)
         data = pd.merge(data,Mpdf, on = 'Date', how = 'outer')
+        
+    FuturesFileName = ticker + '_' + MonthlyFuturesFilePath
+    #Read from feather
+    if (FindFeather(FuturesFileName, './Datastore/')):
+        ReadFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
+       
+        d = OptionsFrameStart - datetime.timedelta(days=1)
+        FuturesSlice = ReadFuturesdf[ReadFuturesdf.Date > d]
+        
+        FuturesSlice["FuturesOISlope"] = slope(FuturesSlice["Open Interest"],5)
+        FuturesSlice["ContractsSlope"] = slope(FuturesSlice["Number of Contracts"],5)
+        
+        Futdf = FuturesSlice[['Date', 'FuturesOISlope', 'ContractsSlope','Settle Price']].copy()
+        
+        data = pd.merge(data,Futdf, on = 'Date', how = 'outer')
     
     data.index = data["Date"].apply(lambda x: pd.Timestamp(x))
     data.drop("Date", axis=1, inplace=True)
@@ -469,7 +484,7 @@ def plot_chart(DF, n, ticker):
     
     # Show volume in millions
     ax_vol.bar(data.index, data["Volume"] / 100000, label="Volume")
-    if(ticker != "NIFTY"):
+    if(ticker != "NIFTY" and ticker != "BANKNIFTY"):
         ax_vol.bar(data.index, data["Deliverable Volume"] / 100000, label="Deliverable")
     ax_vol.set_ylabel("(Lakh(s))")
     ax_vol.legend()
@@ -500,7 +515,7 @@ def plot_chart(DF, n, ticker):
     # Above 70% = overbought, below 30% = oversold
     #ax_beta.set_ylabel("Beta")
     ax_beta.plot(data.index, data["Beta"], label="Beta")
-    if(ticker != "NIFTY"):    
+    if(ticker != "NIFTY" and ticker != "BANKNIFTY"):    
         ax_beta.plot(data.index, data["%Deliverble"], label="% Deliverable")
     ax_beta.legend()    
 
@@ -524,7 +539,7 @@ def plot_chart(DF, n, ticker):
     ax_slope = fig2.add_axes((0, 0, 1, 0.2), sharex=ax_sma)
     
     ax_ema = fig2.add_axes((0.51, 0.72, 0.49, 0.32), sharex=ax_sma)
-    ax_turnover = fig2.add_axes((0.51, 0.48, 0.49, 0.2), sharex=ax_sma)
+    ax_futures = fig2.add_axes((0.51, 0.48, 0.49, 0.2), sharex=ax_sma)
     ax_maxpain = fig2.add_axes((0.51, 0.24, 0.49, 0.2), sharex=ax_sma)
       
     ax_sma.xaxis_date()
@@ -546,15 +561,26 @@ def plot_chart(DF, n, ticker):
     ax_ema.plot(data.index, data["80DMA-E"], label="80DMA-E")
     ax_ema.plot(data.index, data["140DMA-E"], label="140DMA-E")       
     ax_ema.legend()
-    
-    if(ticker != "NIFTY"): 
+
+    #Read from feather
+    if (FindFeather(FuturesFileName, './Datastore/')):
+        ax_futures.plot(data.index, data["FuturesOISlope"], label="FuturesOISlope")
+        ax_futures.plot(data.index, data["ContractsSlope"], label="ContractsSlope")
+        ax_settleprice = ax_futures.twinx()
+        ax_settleprice.plot(data.index, data["Settle Price"],color="blue",marker="o", label="Settle Price")
+        # ax_settleprice.plot(data.index, data["Close"], label="Price")
+        ax_futures.set_ylabel('Futures Slope')
+        ax_settleprice.set_ylabel('Settle Price')
+        ax_settleprice.grid(b=False) # turn off grid #2
+        # ax_slope.plot(data.index, data["Close"], label="Price")
+        ax_futures.legend()
+
+    if(ticker != "NIFTY" and ticker != "BANKNIFTY"):
         ax_trades.plot(data.index, data["Trades"], label="Trades")
-        ax_trades.legend()
-    
-    ax_turnover.plot(data.index, data["Turnover"]/ 100000, label="Turnover")
-    ax_turnover.set_ylabel("(Lakh(s))")
-    ax_turnover.legend()
-    
+    ax_trades.plot(data.index, data["Turnover"]/ 100000, label="Turnover")
+    # ax_trades.set_ylabel("(Lakh(s))")
+    ax_trades.legend()
+   
     ax_slope.plot(data.index, data["Slope"], label="Slope")
     ax_close = ax_slope.twinx()
     ax_close.plot(data.index, data["Close"],color="blue",marker="o", label="Price")
@@ -787,7 +813,7 @@ def TechAnalysis():
     for Scrip in NSE500ScripList:        
         OHLCdf = None
         Indicatordf = None
-        Scrip = "INDIGO"
+        Scrip = "BANKNIFTY"
         print('Now for '+ Scrip)
         OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
         #Read from feather
@@ -853,7 +879,7 @@ def TechAnalysis():
             #Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip) 
             Indicatordf.reset_index(level=0, inplace=True)
 # ###################################################################################################            
-            plot_chart(Indicatordf,200,Scrip)
+            plot_chart(Indicatordf,100,Scrip)
 ###################################################################################################
     #         feather.write_feather(Indicatordf, 'E:/Harish/nsepywork/TechnicalFrames/'+Scrip+'-dataframe.ftr')
     #         ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)
@@ -870,4 +896,9 @@ def main():
    
    
 # G1MLdf = feather.read_feather('./Datastore/PEHistory.ftr')
+# FuturesFileName = Scrip + '_' + MonthlyFuturesFilePath
+# #Read from feather
+# if (FindFeather(FuturesFileName, './Datastore/')):
+#     ReadFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
+#     ReadFuturesdf.info()
 
