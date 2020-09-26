@@ -23,6 +23,7 @@ import os
 DailyOHLCFilePath = "ohlc.ftr";
 IntradayFilePath = "intraday.ftr"
 MonthlyFuturesFilePath = "monthly-futures.ftr"
+FullFuturesFilePath = "full-futures.ftr"
 MonthlyOptionsFilePath = "monthly-options.ftr"
 FXHistory = "FXHistory.ftr"
 PEHistory = "PEHistory.ftr"
@@ -209,7 +210,7 @@ FuturesScriplist = ["RELIANCE", "HDFCBANK", "TATASTEEL", "TCS", "TATAMOTORS","TA
              "HINDALCO","ADANIENT","BANKINDIA","MANAPPURAM","ITC","MOTHERSUMI","ICICIBANK",
              "BAJFINANCE","LUPIN","REDINGTON","CONCOR","EICHERMOT","RBLBANK"]
 
-FuturesIndexList = ["NIFTY","NIFTYIT","BANKNIFTY"]
+FuturesIndexList = ["INDIGO"]#,"NIFTYIT","BANKNIFTY"]
 
 #Check for file
 
@@ -312,6 +313,197 @@ def FXPEUpdate():
         if not FXPEdf.empty:
             feather.write_feather(FXPEdf, './Datastore/'+f)
 
+def FullFuturesUpdate():
+    FullFuturesExpirydf = pd.DataFrame()
+    for Scrip in FuturesIndexList:
+        # Scrip = "INDIGO"
+        FullFuturesdf = None
+        CurrentDate = datetime.date.today()
+        CurrentMonth = CurrentDate.month
+        CurrentYear = CurrentDate.year
+        FullFuturesFileName = Scrip + '_' + FullFuturesFilePath
+        #Read from feather
+        if (FindFeather(FullFuturesFileName, './Datastore')):
+            FullFuturesdf = feather.read_feather('./Datastore/'+FullFuturesFileName)
+            
+            if FullFuturesdf.empty:
+                continue
+            
+            LastDateFullFutures = ((FullFuturesdf.tail(1)).iloc[0]['Date'])
+            FuturesExpiry = ((FullFuturesdf.tail(1)).iloc[0]['Expiry'])
+            
+            if LastDateFullFutures == FuturesExpiry:
+                LastDateFullFutures += relativedelta(months=1)
+                LastDateFullFutures = LastDateFullFutures.replace(day=1)    
+            else:
+                LastDateFullFutures += datetime.timedelta(days=1) #Added this to start from the next day - TBV
+                
+            LastYearFullFutures = LastDateFullFutures.year
+            LastMonthFullFutures = LastDateFullFutures.month
+            ExpiryMonth = LastMonthFullFutures
+            ExpiryYear = LastYearFullFutures
+            if(CurrentDate > LastDateFullFutures):
+                #Update Dataframe
+                print(FullFuturesFileName + ' is being updated from' + LastDateFullFutures.strftime("%Y-%m-%d %H:%M") )
+                if(CurrentMonth == LastMonthFullFutures): #works unless you don't update for a year
+                    NextExpiryDate = CurrentDate
+                    for x in range(3):
+                        if Scrip == "BANKNIFTY" or Scrip == "NIFTY":
+                            FreshFullFutures = get_history(symbol=Scrip, start=LastDateFullFutures, 
+                                            end=CurrentDate,index = True, futures=True,
+                                            expiry_date=max(get_expiry_date(ExpiryYear,ExpiryMonth)))
+                        else:
+                            FreshFullFutures = get_history(symbol=Scrip, start=LastDateFullFutures, 
+                                            end=CurrentDate,futures=True,
+                                            expiry_date=max(get_expiry_date(ExpiryYear,ExpiryMonth)))
+                        
+                        NextExpiryDate = NextExpiryDate + relativedelta(months=1)
+                        ExpiryMonth = NextExpiryDate.month
+                        ExpiryYear = NextExpiryDate.year
+                        FullFuturesExpirydf = FullFuturesExpirydf.append(FreshFullFutures)
+
+					#Attempt to add mid month and far month in addition to existing near month FullFutures    
+                    FullFuturesExpirydf = FullFuturesExpirydf.sort_index()
+                    FullFuturesExpirydf.reset_index(level=0, inplace=True)
+                    FullFuturesdf = FullFuturesdf.append(FullFuturesExpirydf, ignore_index=True)                    
+					################################################################
+                    
+                    print(FullFuturesFileName + ' is being updated for same month' + 
+                          LastDateFullFutures.strftime("%Y-%m-%d %H:%M"))
+                else:
+                    FreshFullFutures = None
+                    LastDateFullFutures = ((FullFuturesdf.tail(1)).iloc[0]['Date'])
+                    FuturesExpiry = ((FullFuturesdf.tail(1)).iloc[0]['Expiry'])
+                    
+                    if LastDateFullFutures == FuturesExpiry:
+                        LastDateFullFutures += relativedelta(months=1)
+                        LastDateFullFutures = LastDateFullFutures.replace(day=1)    
+                    else:
+                        LastDateFullFutures += datetime.timedelta(days=1)
+
+                    while True:
+                        LastYearFullFutures = LastDateFullFutures.year
+                        LastMonthFullFutures = LastDateFullFutures.month
+                        
+                        NextExpiryDate = LastDateFullFutures
+                        ExpiryMonth = LastMonthFullFutures
+                        ExpiryYear = LastYearFullFutures
+                        
+                        for x in range(3):
+                            if Scrip == "BANKNIFTY" or Scrip == "NIFTY":
+                                FreshFullFutures = get_history(symbol=Scrip, start=LastDateFullFutures, 
+                                end=LastDateFullFutures + relativedelta(day=31),index = True, futures=True,
+                                expiry_date=max(get_expiry_date(ExpiryYear,ExpiryMonth)))
+                            else:
+                                FreshFullFutures = get_history(symbol=Scrip, start=LastDateFullFutures, 
+                                end=LastDateFullFutures + relativedelta(day=31),futures=True,
+                                expiry_date=max(get_expiry_date(ExpiryYear,ExpiryMonth)))
+                            
+                            NextExpiryDate = NextExpiryDate + relativedelta(months=1)
+                            ExpiryMonth = NextExpiryDate.month
+                            ExpiryYear = NextExpiryDate.year
+                            FullFuturesExpirydf = FullFuturesExpirydf.append(FreshFullFutures)
+
+                        FullFuturesExpirydf = FullFuturesExpirydf.sort_index()
+                        FullFuturesExpirydf.reset_index(level=0, inplace=True)
+                        FullFuturesdf = FullFuturesdf.append(FullFuturesExpirydf, ignore_index=True)
+						
+                        print(FullFuturesFileName + ' is being updated for '
+                              + LastDateFullFutures.strftime("%Y-%m-%d %H:%M"))
+                        LastDateFullFutures += relativedelta(months=1)
+                        LastDateFullFutures = LastDateFullFutures.replace(day=1)
+                        if(LastDateFullFutures > CurrentDate):
+                            break
+            else:
+                print(FullFuturesFileName + 'is upto date')
+                continue
+        else:
+            #Create Dataframe for new Scrip added
+            FullFuturesStartDate = date(2011,1,1)
+            LastDateFullFutures = FullFuturesStartDate
+            print(FullFuturesFileName + ' is being created from' + FullFuturesStartDate.strftime("%Y-%m-%d %H:%M")) 
+
+            NextExpiryDate = LastDateFullFutures
+            ExpiryMonth = LastDateFullFutures.month
+            ExpiryYear = LastDateFullFutures.year
+            
+            for x in range(3):            
+                if Scrip == "BANKNIFTY" or Scrip == "NIFTY":
+                    FreshFullFutures = get_history(symbol=Scrip, start=FullFuturesStartDate, 
+                                            end=FullFuturesStartDate + relativedelta(day=31),index = True, futures=True,
+                                            expiry_date=max(get_expiry_date(ExpiryYear,ExpiryMonth)))
+                else:
+                    FreshFullFutures = get_history(symbol=Scrip, start=FullFuturesStartDate, 
+                                            end=FullFuturesStartDate + relativedelta(day=31),futures=True,
+                                            expiry_date=max(get_expiry_date(ExpiryYear,ExpiryMonth)))
+                    
+                NextExpiryDate = NextExpiryDate + relativedelta(months=1)
+                ExpiryMonth = NextExpiryDate.month
+                ExpiryYear = NextExpiryDate.year
+                FullFuturesExpirydf = FullFuturesExpirydf.append(FreshFullFutures)   
+            
+            FullFuturesdf = FullFuturesExpirydf.sort_index()
+            FullFuturesdf.reset_index(level=0, inplace=True) # Required for any new data fetch
+            
+            if not FullFuturesdf.empty:
+                LastDateFullFutures = ((FullFuturesdf.tail(1)).iloc[0]['Date'])
+                
+            LastDateFullFutures += relativedelta(months=1)
+            LastDateFullFutures = LastDateFullFutures.replace(day = 1) #Start from the month beginning
+            LastYearFullFutures = LastDateFullFutures.year
+            LastMonthFullFutures = LastDateFullFutures.month
+            NextExpiryDate = LastDateFullFutures
+            ExpiryMonth = LastMonthFullFutures
+            ExpiryYear = LastYearFullFutures
+            #now to fill it up - TBD - can be done recursively            
+            if(CurrentDate > LastDateFullFutures):
+                #Update Dataframe
+                print(FullFuturesFileName + ' is being updated from ' + LastDateFullFutures.strftime("%Y-%m-%d %H:%M"))
+                while True:
+                    FreshFullFutures = None
+                    for x in range(3):    
+                        if Scrip == "BANKNIFTY" or Scrip == "NIFTY":
+                            FreshFullFutures = get_history(symbol=Scrip, start=LastDateFullFutures, 
+                                            end=LastDateFullFutures+ relativedelta(day=31),index = True, futures=True,
+                                            expiry_date=max(get_expiry_date(ExpiryYear,ExpiryMonth)))
+                        else:
+                            FreshFullFutures = get_history(symbol=Scrip, start=LastDateFullFutures, 
+                                            end=LastDateFullFutures+ relativedelta(day=31),futures=True,
+                                            expiry_date=max(get_expiry_date(ExpiryYear,ExpiryMonth)))
+                            
+                        NextExpiryDate = NextExpiryDate + relativedelta(months=1)
+                        ExpiryMonth = NextExpiryDate.month
+                        ExpiryYear = NextExpiryDate.year
+                        if FreshFullFutures.empty:
+                            continue
+                        FullFuturesExpirydf = FullFuturesExpirydf.append(FreshFullFutures) 
+                        
+                    LastDateFullFutures += relativedelta(months=1)
+                    LastDateFullFutures = LastDateFullFutures.replace(day = 1)  
+                    LastYearFullFutures = LastDateFullFutures.year
+                    LastMonthFullFutures = LastDateFullFutures.month
+                    
+                    NextExpiryDate = LastDateFullFutures
+                    ExpiryMonth = NextExpiryDate.month
+                    ExpiryYear = NextExpiryDate.year
+                    print(FullFuturesFileName + ' is being updated for ' + LastDateFullFutures.strftime("%Y-%m-%d %H:%M"))
+
+                    if FullFuturesExpirydf.empty:
+                        continue
+
+                    FullFuturesExpirydf = FullFuturesExpirydf.sort_index()
+                    #Not a good idea to check for empty frame here. Filters out newer Scrips                       
+                    FullFuturesExpirydf.reset_index(level=0, inplace=True)
+                    FullFuturesdf = FullFuturesdf.append(FullFuturesExpirydf, ignore_index=True)
+                    
+                    if(LastDateFullFutures > CurrentDate):
+                        break
+        
+        #Update Feather
+        if not FullFuturesdf.empty:
+            feather.write_feather(FullFuturesdf, './Datastore/'+ FullFuturesFileName)
+
+
 def MonthlyFuturesUpdate():
     for Scrip in NSEFnOList:
         # Scrip = "NIFTY"
@@ -342,7 +534,7 @@ def MonthlyFuturesUpdate():
                 #Update Dataframe
                 print(FuturesFileName + ' is being updated from' + LastDateFutures.strftime("%Y-%m-%d %H:%M") )
                 if(CurrentMonth == LastMonthFutures): #works unless you don't update for a year
-                    
+
                     if Scrip == "BANKNIFTY" or Scrip == "NIFTY":
                         FreshFutures = get_history(symbol=Scrip, start=LastDateFutures, 
                                         end=CurrentDate,index = True, futures=True,
@@ -354,7 +546,8 @@ def MonthlyFuturesUpdate():
                     
                     FreshFutures = FreshFutures.sort_index()
                     FreshFutures.reset_index(level=0, inplace=True)
-                    Futuresdf = Futuresdf.append(FreshFutures, ignore_index=True)
+                    Futuresdf = Futuresdf.append(FreshFutures, ignore_index=True)                    
+                    
                     print(FuturesFileName + ' is being updated for same month' + 
                           LastDateFutures.strftime("%Y-%m-%d %H:%M"))
                 else:
@@ -774,6 +967,7 @@ def IntradayUpdate():
 def main():
     OHLCUpdate()
     MonthlyFuturesUpdate()
+    FullFuturesUpdate()
     IntradayUpdate()
     FXPEUpdate()
     MonthlyOptionsUpdate()
