@@ -90,19 +90,20 @@ NSE500ScripList = ["BANKNIFTY","NIFTY","3MINDIA","ACC","AIAENG","APLAPOLLO","AUB
                    "WIPRO","WOCKPHARMA","YESBANK","ZEEL","ZENSARTECH","ZYDUSWELL","ECLERX","TATACONSUM",
                    "DEEPAKFERT","ADANIENT","CGPOWER","PENIND"]
 
-NSEFnOList = ["BANKNIFTY","NIFTY","ACC","ADANIENT","ADANIPORTS","AMARAJABAT","AMBUJACEM","APOLLOHOSP",
-              "APOLLOTYRE","ASHOKLEY","ASIANPAINT","AUROPHARMA","AXISBANK","BAJAJ-AUTO","BAJAJFINSV",
-              "BAJFINANCE","BALKRISIND","BANDHANBNK","BANKBARODA","BATAINDIA","BEL","BERGEPAINT","BHARATFORG",
-              "BHARTIARTL","BHEL","BIOCON","BOSCHLTD","BPCL","BRITANNIA","CADILAHC","CANBK","CENTURYTEX",
-              "CHOLAFIN","CIPLA","COALINDIA","COLPAL","CONCOR","CUMMINSIND","DABUR","DIVISLAB","DLF",
-              "DRREDDY","EICHERMOT","EQUITAS","ESCORTS","EXIDEIND","FEDERALBNK","GAIL","GLENMARK","GMRINFRA",
-              "GODREJCP","GODREJPROP","GRASIM","HAVELLS","HCLTECH","HDFC","HDFCBANK","HDFCLIFE","HEROMOTOCO",
-              "HINDALCO","HINDPETRO","HINDUNILVR","IBULHSGFIN","ICICIBANK","ICICIPRULI","IDEA","IDFCFIRSTB",
-              "IGL","INDIGO","INDUSINDBK","INFRATEL","INFY","IOC","ITC","JINDALSTEL","JSWSTEEL","JUBLFOOD",
-              "JUSTDIAL","KOTAKBANK","L&TFH","LICHSGFIN","LT","LUPIN","M&M","M&MFIN","MANAPPURAM","MARICO",
-              "MARUTI","MCDOWELL-N","MFSL","MGL","MINDTREE","MOTHERSUMI","MRF","MUTHOOTFIN","NATIONALUM",
-              "NAUKRI","NCC","NESTLEIND","NIITTECH","NMDC","NTPC","ONGC","PAGEIND","PEL","PETRONET","PFC",
-              "PIDILITIND","PNB","POWERGRID","PVR","RAMCOCEM","RBLBANK","RECLTD","RELIANCE","SAIL","SBILIFE",
+# NSEFnOList = ["BANKNIFTY","NIFTY","ACC","ADANIENT","ADANIPORTS","AMARAJABAT","AMBUJACEM","APOLLOHOSP",
+#               "APOLLOTYRE","ASHOKLEY","ASIANPAINT","AUROPHARMA","AXISBANK","BAJAJ-AUTO","BAJAJFINSV",
+#               "BAJFINANCE","BALKRISIND","BANDHANBNK","BANKBARODA","BATAINDIA","BEL","BERGEPAINT","BHARATFORG",
+#               "BHARTIARTL","BHEL","BIOCON","BOSCHLTD","BPCL","BRITANNIA","CADILAHC","CANBK","CENTURYTEX",
+#               "CHOLAFIN","CIPLA","COALINDIA","COLPAL","CONCOR","CUMMINSIND","DABUR","DIVISLAB","DLF",
+#               "DRREDDY","EICHERMOT","EQUITAS","ESCORTS","EXIDEIND","FEDERALBNK","GAIL","GLENMARK","GMRINFRA",
+#               "GODREJCP","GODREJPROP","GRASIM","HAVELLS","HCLTECH","HDFC","HDFCBANK","HDFCLIFE","HEROMOTOCO",
+#               "HINDALCO","HINDPETRO","HINDUNILVR","IBULHSGFIN","ICICIBANK","ICICIPRULI","IDEA","IDFCFIRSTB",
+#               "IGL","INDIGO","INDUSINDBK","INFRATEL","INFY","IOC","ITC","JINDALSTEL","JSWSTEEL","JUBLFOOD",
+#               "JUSTDIAL","KOTAKBANK","L&TFH","LICHSGFIN","LT","LUPIN","M&M","M&MFIN","MANAPPURAM","MARICO",
+#               "MARUTI","MCDOWELL-N","MFSL","MGL","MINDTREE","MOTHERSUMI","MRF","MUTHOOTFIN","NATIONALUM",
+              # "NAUKRI","NCC","NESTLEIND","NIITTECH","NMDC","NTPC","ONGC","PAGEIND","PEL","PETRONET","PFC",
+              # "PIDILITIND","PNB","POWERGRID","PVR","RAMCOCEM",
+NSEFnOList = ["RBLBANK","RECLTD","RELIANCE","SAIL","SBILIFE",
               "SBIN","SHREECEM","SIEMENS","SRF","SRTRANSFIN","SUNPHARMA","SUNTV","TATACHEM","TATACONSUM",
               "TATAMOTORS","TATAPOWER","TATASTEEL","TCS","TECHM","TITAN","TORNTPHARM","TORNTPOWER","TVSMOTOR",
               "UBL","UJJIVAN","ULTRACEMCO","UPL","VEDL","VOLTAS","WIPRO","ZEEL"]
@@ -412,8 +413,8 @@ def FullFuturesUpdate():
                         LastDateFullFutures += relativedelta(months=1)
                         LastDateFullFutures = LastDateFullFutures.replace(day=1)
                         
-                        if FullFuturesExpirydf.empty:
-                            continue                        
+                        # if FullFuturesExpirydf.empty:
+                        #     continue                        
 
                         FullFuturesExpirydf = FullFuturesExpirydf.sort_index()
                         FullFuturesExpirydf.reset_index(level=0, inplace=True)
@@ -506,8 +507,10 @@ def FullFuturesUpdate():
                     ExpiryYear = NextExpiryDate.year
                     print(FullFuturesFileName + ' is being updated for ' + LastDateFullFutures.strftime("%Y-%m-%d %H:%M"))
 
-                    if FullFuturesExpirydf.empty:
-                        continue
+                    #Ideally it is required to prevent empty frame append but including this
+                    #results in infinite loop as dates increment without limit
+                    # if FullFuturesExpirydf.empty:
+                    #     continue
 
                     FullFuturesExpirydf = FullFuturesExpirydf.sort_index()
                     #Not a good idea to check for empty frame here. Filters out newer Scrips                       
@@ -991,4 +994,4 @@ def main():
     FXPEUpdate()
     MonthlyOptionsUpdate()
     
-# hhhhhhhhhhhh = feather.read_feather('./Datastore/'+FullFuturesFileName)    
+# hhhhhhhhhhhh = feather.read_feather('./Datastore/'+'CENTURYTEX_monthly-futures.ftr')    

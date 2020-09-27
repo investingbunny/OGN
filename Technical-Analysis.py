@@ -19,6 +19,7 @@ import numpy as np
 import statsmodels.api as sm
 import copy
 import sys
+import math
 import talib
 %matplotlib inline
 import seaborn as sns
@@ -40,9 +41,12 @@ talib.get_function_groups()
 DailyOHLCFilePath = "ohlc.ftr";
 IntradayFilePath = "intraday.ftr"
 MonthlyFuturesFilePath = "monthly-futures.ftr"
+FullFuturesFilePath = "full-futures.ftr"
 MonthlyOptionsFilePath = "monthly-options.ftr"
 FXHistory = "FXHistory.ftr"
 PEHistory = "PEHistory.ftr"
+RiskFreeRate = 0.033578 #https://www.rbi.org.in/
+Dividend = 0
 
 NSE500ScripList = ["3MINDIA","ACC","AIAENG","APLAPOLLO","AUBANK","AARTIIND","AAVAS","ABBOTINDIA",
                     "ADANIGAS","ADANIGREEN","ADANIPORTS","ADANIPOWER","ADANITRANS","ABCAPITAL","ABFRL",
@@ -387,13 +391,13 @@ def BollBnd(DF,n):
     df.dropna(inplace=True)
     return df
 
-def plot_chart(DF, n, ticker):
-    # Filter number of observations to plot
-    # n = 200
-    # ticker = "BANKNIFTY"
-    # data = Indicatordf.copy()
-    data = DF.copy()
-    # data = data.reset_index()
+def plot_chart(DF, n, ticker, Dividend):
+
+    n = 100
+    ticker = "AXISBANK"
+    data = Indicatordf.copy()
+    # data = DF.copy()
+
     Renkodata = Renko_DF(data,ticker)
     #DF amd number of latest bricks
     PlotRenko(Renkodata,100)
@@ -409,20 +413,18 @@ def plot_chart(DF, n, ticker):
         Mpdf = GetMaxPain(ticker,OptionsFrameStart)
         data = pd.merge(data,Mpdf, on = 'Date', how = 'outer')
         
-    FuturesFileName = ticker + '_' + MonthlyFuturesFilePath
+    FuturesFileName = ticker + '_' + FullFuturesFilePath
     #Read from feather
     if (FindFeather(FuturesFileName, './Datastore/')):
         ReadFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
        
-        d = OptionsFrameStart - datetime.timedelta(days=1)
+        d = OptionsFrameStart - datetime.timedelta(days=1) #Date to start from for axis alignment
         FuturesSlice = ReadFuturesdf[ReadFuturesdf.Date > d]
+   
+        Futdf = FuturesSlice[['Date', 'Expiry','Settle Price','Open Interest']].copy()
         
-        FuturesSlice["FuturesOISlope"] = slope(FuturesSlice["Open Interest"],5)
-        FuturesSlice["ContractsSlope"] = slope(FuturesSlice["Number of Contracts"],5)
-        
-        Futdf = FuturesSlice[['Date', 'FuturesOISlope', 'ContractsSlope','Settle Price']].copy()
-        
-        data = pd.merge(data,Futdf, on = 'Date', how = 'outer')
+        Futdf = pd.merge(data,Futdf, on = 'Date', how = 'inner')
+        # Futdf.reset_index(level=0, inplace=True)
     
     data.index = data["Date"].apply(lambda x: pd.Timestamp(x))
     data.drop("Date", axis=1, inplace=True)
@@ -564,16 +566,54 @@ def plot_chart(DF, n, ticker):
 
     #Read from feather
     if (FindFeather(FuturesFileName, './Datastore/')):
-        ax_futures.plot(data.index, data["FuturesOISlope"], label="FuturesOISlope")
-        ax_futures.plot(data.index, data["ContractsSlope"], label="ContractsSlope")
-        ax_settleprice = ax_futures.twinx()
-        ax_settleprice.plot(data.index, data["Settle Price"],color="blue",marker="o", label="Settle Price")
-        # ax_settleprice.plot(data.index, data["Close"], label="Price")
-        ax_futures.set_ylabel('Futures Slope')
-        ax_settleprice.set_ylabel('Settle Price')
-        ax_settleprice.grid(b=False) # turn off grid #2
-        # ax_slope.plot(data.index, data["Close"], label="Price")
+
+        StdDev = data['Log_Ret'].std() # Daily Std Deviation for volatility
+        DailyRet = data['Log_Ret'].mean()
+        days = np.busday_count( OptionsFrameStart, datetime.date.today()) # Business days
+        # Volatility = (StdDev*100) * math.sqrt(days)
+        Futdf["FuturesFormula"] = Futdf["Close"] * (1+ (RiskFreeRate * (np.busday_count( Futdf['Date'], Futdf['Expiry'])/365))) - Dividend
+        Futdf["OISlope"] = slope(Futdf["Open Interest"],10)
+        Average = DailyRet * days
+        SD = StdDev * math.sqrt(days)
+        
+        SD1up = Average + SD
+        SD1down = Average - SD
+        SD2up = Average + (2 * SD)
+        SD2down = Average - (2 * SD)
+        SD3up = Average + (3 * SD)
+        SD3down = Average - (3 * SD)
+        
+        StartingPrice = data.iloc[0].Close
+        
+        SD1upLevel = StartingPrice * math.exp(SD1up)
+        SD1downLevel = StartingPrice * math.exp(SD1down)
+        SD2upLevel = StartingPrice * math.exp(SD2up)
+        SD2downLevel = StartingPrice * math.exp(SD2down)
+        SD3upLevel = StartingPrice * math.exp(SD3up)
+        SD3downLevel = StartingPrice * math.exp(SD3down)
+        
+        Futdf.index = Futdf["Date"]
+        Futdf.drop("Date", axis=1, inplace=True)
+
+        ax_futures.plot(Futdf.index, Futdf["Close"], color="black",label="Price")
+        ax_oi= ax_futures.twinx()
+        ax_oi.plot(Futdf.index, Futdf["Open Interest"],color="oldlace", alpha = 0.3, label="OpenInterest")
+        ax_futures.set_ylabel('Price')
+        ax_oi.set_ylabel('Open Interest')
+        ax_oi.grid(b=False)
         ax_futures.legend()
+        # ax_oi.legend()
+        ax_futures.plot(Futdf.index, Futdf["FuturesFormula"],color="blue", label="FuturesFormula")
+        ax_futures.plot(Futdf.index, Futdf["Settle Price"],color="green", label="SettlePrice")
+
+        ax_futures.plot(data.index, [StartingPrice] * len(data.index))
+        # ax_futures.axhspan(SD2downLevel, SD3downLevel, alpha=0.5, color='lightcoral', label=str(SD3downLevel) + ' -SD3')
+        ax_futures.axhspan(SD1downLevel, SD2downLevel, alpha=0.5, color='lightsalmon', label=str(SD2downLevel)+ ' -SD2')
+        ax_futures.axhspan(StartingPrice, SD1downLevel, alpha=0.5, color='mistyrose', label=str(SD1downLevel)+ ' -SD1')
+        ax_futures.axhspan(SD1upLevel, StartingPrice, alpha=0.5, color='greenyellow', label=str(SD1upLevel)+ ' +SD1')
+        ax_futures.axhspan(SD2upLevel, SD1upLevel, alpha=0.5, color='lime', label=str(SD2upLevel)+ ' +SD2')
+        # ax_futures.axhspan(SD3upLevel, SD2upLevel, alpha=0.5, color='green', label = str(SD3upLevel)+ ' +SD3')
+        # ax_futures.legend()
 
     if(ticker != "NIFTY" and ticker != "BANKNIFTY"):
         ax_trades.plot(data.index, data["Trades"], label="Trades")
@@ -610,25 +650,12 @@ def plot_chart(DF, n, ticker):
     level4 = price_min + 0.618 * diff
     level5 = price_min + 0.786 * diff    
     
-    #Extensons
-    level6 = price_max - 1.272 * diff    
-    level7 = price_max - 1.382 * diff 
-    level8 = price_max - 1.5 * diff 
-    level9 = price_max - 1.618 * diff 
-    level10 = price_max - 2.618 * diff
-    level11 = price_max - 4.236 * diff
-    # level6 = price_min + 1.272 * diff    
-    # level7 = price_min + 1.382 * diff 
-    # level8 = price_min + 1.5 * diff 
-    # level9 = price_min + 1.618 * diff 
-    # level10 = price_min + 2.618 * diff
-    # level11 = price_min + 4.236 * diff    
     ax_fibret.axhspan(level1, price_min, alpha=0.4, color='lightcoral', label=str(level1) + ' (0.236)')
     ax_fibret.axhspan(level2, level1, alpha=0.5, color='lightsalmon', label=str(level2)+ ' (0.382)')
     ax_fibret.axhspan(level3, level2, alpha=0.5, color='mistyrose', label=str(level3)+ ' (0.5)')
-    ax_fibret.axhspan(level4, level3, alpha=0.5, color='lightcyan', label=str(level4)+ ' (0.618)')
-    ax_fibret.axhspan(level5, level4, alpha=0.5, color='powderblue', label=str(level5)+ ' (0.786)')
-    ax_fibret.axhspan(price_max, level5, alpha=0.5, color='deepskyblue', label = str(price_max)+ ' (1)')
+    ax_fibret.axhspan(level4, level3, alpha=0.5, color='greenyellow', label=str(level4)+ ' (0.618)')
+    ax_fibret.axhspan(level5, level4, alpha=0.5, color='lime', label=str(level5)+ ' (0.786)')
+    ax_fibret.axhspan(price_max, level5, alpha=0.5, color='green', label = str(price_max)+ ' (1)')
     ax_fibret.legend()
     # ax_fibret.axhspan(level1, price_min, alpha=0.4, color='lightcoral', label=str(level1) + ' (0.236)')
     # ax_fibret.axhspan(level2, level1, alpha=0.5, color='lightsalmon', label=str(level2)+ ' (0.382)')
@@ -643,6 +670,21 @@ def plot_chart(DF, n, ticker):
     # ax_fibret.plot(data.index, level5 * len(data.index), label=str(level5))
     candlestick_ohlc(ax_fibret, ohlc, colorup="g", colordown="r", width=0.8)
 
+
+    #Extensons
+    level6 = price_max - 1.272 * diff    
+    level7 = price_max - 1.382 * diff 
+    level8 = price_max - 1.5 * diff 
+    level9 = price_max - 1.618 * diff 
+    level10 = price_max - 2.618 * diff
+    level11 = price_max - 4.236 * diff
+    # level6 = price_min + 1.272 * diff    
+    # level7 = price_min + 1.382 * diff 
+    # level8 = price_min + 1.5 * diff 
+    # level9 = price_min + 1.618 * diff 
+    # level10 = price_min + 2.618 * diff
+    # level11 = price_min + 4.236 * diff
+    
     if (FindFeather(OptionsFileName, './Datastore/')):
         ax_maxpain.plot(data.index, data["Close"], label="Price")
         ax_maxpain.plot(data.index, data["MaxPain"],color="blue",marker="o", label="MaxPain")
@@ -654,7 +696,7 @@ def plot_chart(DF, n, ticker):
         # ax_maxpain.plot(data.index, data["Close"], label="Price")
         ax_maxpain.legend()
     else:
-        ax_maxpain.axhspan(level6, price_max, alpha=0.4, color='limegreen', label=str(level6)+ ' (1.272)')
+        ax_maxpain.axhspan(level6, price_max, alpha=0.5, color='limegreen', label=str(level6)+ ' (1.272)')
         ax_maxpain.axhspan(level7, level6, alpha=0.5, color='lime', label=str(level7)+ ' (1.382)')
         ax_maxpain.axhspan(level8, level7, alpha=0.5, color='deepskyblue', label=str(level8)+ ' (1.5)')
         ax_maxpain.axhspan(level9, level8, alpha=0.5, color='powderblue', label=str(level9)+ ' (1.618)')
@@ -813,7 +855,7 @@ def TechAnalysis():
     for Scrip in NSE500ScripList:        
         OHLCdf = None
         Indicatordf = None
-        Scrip = "BANKNIFTY"
+        Scrip = "AXISBANK"
         print('Now for '+ Scrip)
         OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
         #Read from feather
@@ -879,7 +921,7 @@ def TechAnalysis():
             #Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip) 
             Indicatordf.reset_index(level=0, inplace=True)
 # ###################################################################################################            
-            plot_chart(Indicatordf,100,Scrip)
+            plot_chart(Indicatordf,100,Scrip,0)
 ###################################################################################################
     #         feather.write_feather(Indicatordf, 'E:/Harish/nsepywork/TechnicalFrames/'+Scrip+'-dataframe.ftr')
     #         ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)
