@@ -31,6 +31,7 @@ import trendln
 import pylab
 matplotlib.rcParams.update({'font.size': 9})
 import os
+from functools import reduce
 
 sns.set(style='darkgrid', context='talk', palette='Dark2')
 
@@ -141,6 +142,15 @@ def FindFeather(name, path):
     for root, dirs, files in os.walk(path):
         if name in files:
             return os.path.join(root, name)
+
+def business_days(start, end):
+    mask = pd.notnull(start) & pd.notnull(end)
+    start = start.values.astype('datetime64[D]')[mask]
+    end = end.values.astype('datetime64[D]')[mask]
+    result = np.empty(len(mask), dtype=float)
+    result[mask] = np.busday_count(start, end)
+    result[~mask] = np.nan
+    return result
 
 def call_otm(df, date):
 	copy_df = df
@@ -393,10 +403,10 @@ def BollBnd(DF,n):
 
 def plot_chart(DF, n, ticker, Dividend):
 
-    n = 100
-    ticker = "AXISBANK"
-    data = Indicatordf.copy()
-    # data = DF.copy()
+    # n = 100
+    # ticker = "AXISBANK"
+    # data = Indicatordf.copy()
+    data = DF.copy()
 
     Renkodata = Renko_DF(data,ticker)
     #DF amd number of latest bricks
@@ -420,11 +430,26 @@ def plot_chart(DF, n, ticker, Dividend):
        
         d = OptionsFrameStart - datetime.timedelta(days=1) #Date to start from for axis alignment
         FuturesSlice = ReadFuturesdf[ReadFuturesdf.Date > d]
-   
         Futdf = FuturesSlice[['Date', 'Expiry','Settle Price','Open Interest']].copy()
+        Futdf = Futdf.sort_values(by=['Date', 'Expiry'])
+        Futdf = Futdf.reset_index(drop=True)
         
-        Futdf = pd.merge(data,Futdf, on = 'Date', how = 'inner')
-        # Futdf.reset_index(level=0, inplace=True)
+        SettlePricedf = Futdf.groupby('Date')['Settle Price'].apply(lambda x: pd.Series(list(x))).unstack()
+        OpenInterestdf = Futdf.groupby('Date')['Open Interest'].apply(lambda x: pd.Series(list(x))).unstack()
+        ExpiryDatedf = Futdf.groupby('Date')['Expiry'].apply(lambda x: pd.Series(list(x))).unstack()
+
+        ExpiryDatedf = ExpiryDatedf.reset_index(level=0)
+        ExpiryDatedf = ExpiryDatedf.rename(columns={0: 'NearExpiry',1:'MidExpiry',2:'FarExpiry'})
+        
+        OpenInterestdf = OpenInterestdf.reset_index(level=0)
+        OpenInterestdf = OpenInterestdf.rename(columns={0: 'NearOpenInterest',1:'MidOpenInterest',2:'FarOpenInterest'})        
+        
+        SettlePricedf = SettlePricedf.reset_index(level=0)
+        SettlePricedf = SettlePricedf.rename(columns={0: 'NearSettlePrice',1:'MidSettlePrice',2:'FarSettlePrice'})
+        
+        dfs = [ExpiryDatedf, OpenInterestdf, SettlePricedf]
+        Futdf = reduce(lambda left,right: pd.merge(left,right,on='Date'), dfs)
+        Futdf = pd.merge(data,Futdf, on = 'Date', how = 'outer')
     
     data.index = data["Date"].apply(lambda x: pd.Timestamp(x))
     data.drop("Date", axis=1, inplace=True)
@@ -538,11 +563,11 @@ def plot_chart(DF, n, ticker, Dividend):
     ax_sma = fig2.add_axes((0, 0.72, 0.49, 0.32))
     ax_trades = fig2.add_axes((0, 0.48, 0.49, 0.2), sharex=ax_sma)
     ax_fibret = fig2.add_axes((0, 0.24, 0.49, 0.2), sharex=ax_sma)
-    ax_slope = fig2.add_axes((0, 0, 1, 0.2), sharex=ax_sma)
+    ax_slope = fig2.add_axes((0, 0, 0.49, 0.2), sharex=ax_sma)
     
     ax_ema = fig2.add_axes((0.51, 0.72, 0.49, 0.32), sharex=ax_sma)
-    ax_futures = fig2.add_axes((0.51, 0.48, 0.49, 0.2), sharex=ax_sma)
-    ax_maxpain = fig2.add_axes((0.51, 0.24, 0.49, 0.2), sharex=ax_sma)
+    ax_maxpain = fig2.add_axes((0.51, 0.48, 0.49, 0.2), sharex=ax_sma)
+    ax_futures = fig2.add_axes((0.51, 0, 0.49, 0.45), sharex=ax_sma)
       
     ax_sma.xaxis_date()
     
@@ -566,13 +591,18 @@ def plot_chart(DF, n, ticker, Dividend):
 
     #Read from feather
     if (FindFeather(FuturesFileName, './Datastore/')):
-
         StdDev = data['Log_Ret'].std() # Daily Std Deviation for volatility
         DailyRet = data['Log_Ret'].mean()
+        pd.to_datetime(Futdf['Date'])
+        # Futdf.info()
+        # np.busday_count( pd.to_datetime(Futdf['Date']).values.astype('datetime64[D]'), pd.to_datetime(Futdf['NearExpiry']).values.astype('datetime64[D]'))
+        # np.busday_count(np.datetime64('2011-07-11'), np.datetime64('2011-07-18'))
+        
         days = np.busday_count( OptionsFrameStart, datetime.date.today()) # Business days
-        # Volatility = (StdDev*100) * math.sqrt(days)
-        Futdf["FuturesFormula"] = Futdf["Close"] * (1+ (RiskFreeRate * (np.busday_count( Futdf['Date'], Futdf['Expiry'])/365))) - Dividend
-        Futdf["OISlope"] = slope(Futdf["Open Interest"],10)
+        Futdf["NearFuturesFormula"] = Futdf["Close"] * (1+ (RiskFreeRate * (business_days( pd.to_datetime(Futdf['Date']),  pd.to_datetime(Futdf['NearExpiry']))/365))) - Dividend
+        Futdf["MidFuturesFormula"] = Futdf["Close"] * (1+ (RiskFreeRate * (business_days( pd.to_datetime(Futdf['Date']), pd.to_datetime(Futdf['MidExpiry']))/365))) - Dividend
+        Futdf["FarFuturesFormula"] = Futdf["Close"] * (1+ (RiskFreeRate * (business_days( pd.to_datetime(Futdf['Date']), pd.to_datetime(Futdf['FarExpiry']))/365))) - Dividend
+        # Futdf["OISlope"] = slope(Futdf["Open Interest"],10)
         Average = DailyRet * days
         SD = StdDev * math.sqrt(days)
         
@@ -596,24 +626,33 @@ def plot_chart(DF, n, ticker, Dividend):
         Futdf.drop("Date", axis=1, inplace=True)
 
         ax_futures.plot(Futdf.index, Futdf["Close"], color="black",label="Price")
-        ax_oi= ax_futures.twinx()
-        ax_oi.plot(Futdf.index, Futdf["Open Interest"],color="oldlace", alpha = 0.3, label="OpenInterest")
+        ax_futures.plot(Futdf.index, Futdf["NearSettlePrice"], color="gray",label="NearSP")
+        ax_futures.plot(Futdf.index, Futdf["NearFuturesFormula"], color="silver",label="NearFF")
+        
+        ax_futures.plot(Futdf.index, Futdf["MidSettlePrice"], color="blue",label="MidSP")
+        ax_futures.plot(Futdf.index, Futdf["MidFuturesFormula"], color="skyblue",label="MidFF")
+        
+        ax_futures.plot(Futdf.index, Futdf["FarSettlePrice"], color="darkorchid",label="FarSP")
+        ax_futures.plot(Futdf.index, Futdf["FarFuturesFormula"], color="plum",label="FarFF")
+        
+        # ax_oi= ax_futures.twinx()
+        # ax_oi.plot(Futdf.index, Futdf["Open Interest"],color="oldlace", alpha = 0.3, label="OpenInterest")
         ax_futures.set_ylabel('Price')
-        ax_oi.set_ylabel('Open Interest')
-        ax_oi.grid(b=False)
-        ax_futures.legend()
+        # ax_oi.set_ylabel('Open Interest')
+        # ax_oi.grid(b=False)
+        # ax_futures.legend()
         # ax_oi.legend()
-        ax_futures.plot(Futdf.index, Futdf["FuturesFormula"],color="blue", label="FuturesFormula")
-        ax_futures.plot(Futdf.index, Futdf["Settle Price"],color="green", label="SettlePrice")
+        # ax_futures.plot(Futdf.index, Futdf["FuturesFormula"],color="blue", label="FuturesFormula")
+        # ax_futures.plot(Futdf.index, Futdf["Settle Price"],color="green", label="SettlePrice")
 
-        ax_futures.plot(data.index, [StartingPrice] * len(data.index))
+        ax_futures.plot(data.index, [StartingPrice] * len(data.index),label='SD1: '+str(SD)+',Average: '+str(Average) )
         # ax_futures.axhspan(SD2downLevel, SD3downLevel, alpha=0.5, color='lightcoral', label=str(SD3downLevel) + ' -SD3')
-        ax_futures.axhspan(SD1downLevel, SD2downLevel, alpha=0.5, color='lightsalmon', label=str(SD2downLevel)+ ' -SD2')
+        # ax_futures.axhspan(SD1downLevel, SD2downLevel, alpha=0.5, color='lightsalmon', label=str(SD2downLevel)+ ' -SD2')
         ax_futures.axhspan(StartingPrice, SD1downLevel, alpha=0.5, color='mistyrose', label=str(SD1downLevel)+ ' -SD1')
         ax_futures.axhspan(SD1upLevel, StartingPrice, alpha=0.5, color='greenyellow', label=str(SD1upLevel)+ ' +SD1')
-        ax_futures.axhspan(SD2upLevel, SD1upLevel, alpha=0.5, color='lime', label=str(SD2upLevel)+ ' +SD2')
+        # ax_futures.axhspan(SD2upLevel, SD1upLevel, alpha=0.5, color='lime', label=str(SD2upLevel)+ ' +SD2')
         # ax_futures.axhspan(SD3upLevel, SD2upLevel, alpha=0.5, color='green', label = str(SD3upLevel)+ ' +SD3')
-        # ax_futures.legend()
+        ax_futures.legend()
 
     if(ticker != "NIFTY" and ticker != "BANKNIFTY"):
         ax_trades.plot(data.index, data["Trades"], label="Trades")
@@ -855,7 +894,7 @@ def TechAnalysis():
     for Scrip in NSE500ScripList:        
         OHLCdf = None
         Indicatordf = None
-        Scrip = "AXISBANK"
+        Scrip = "NMDC"
         print('Now for '+ Scrip)
         OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
         #Read from feather
@@ -921,7 +960,7 @@ def TechAnalysis():
             #Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip) 
             Indicatordf.reset_index(level=0, inplace=True)
 # ###################################################################################################            
-            plot_chart(Indicatordf,100,Scrip,0)
+            plot_chart(Indicatordf,50,Scrip,0)
 ###################################################################################################
     #         feather.write_feather(Indicatordf, 'E:/Harish/nsepywork/TechnicalFrames/'+Scrip+'-dataframe.ftr')
     #         ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)

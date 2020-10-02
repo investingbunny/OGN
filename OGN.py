@@ -90,20 +90,19 @@ NSE500ScripList = ["BANKNIFTY","NIFTY","3MINDIA","ACC","AIAENG","APLAPOLLO","AUB
                    "WIPRO","WOCKPHARMA","YESBANK","ZEEL","ZENSARTECH","ZYDUSWELL","ECLERX","TATACONSUM",
                    "DEEPAKFERT","ADANIENT","CGPOWER","PENIND"]
 
-# NSEFnOList = ["BANKNIFTY","NIFTY","ACC","ADANIENT","ADANIPORTS","AMARAJABAT","AMBUJACEM","APOLLOHOSP",
-#               "APOLLOTYRE","ASHOKLEY","ASIANPAINT","AUROPHARMA","AXISBANK","BAJAJ-AUTO","BAJAJFINSV",
-#               "BAJFINANCE","BALKRISIND","BANDHANBNK","BANKBARODA","BATAINDIA","BEL","BERGEPAINT","BHARATFORG",
-#               "BHARTIARTL","BHEL","BIOCON","BOSCHLTD","BPCL","BRITANNIA","CADILAHC","CANBK","CENTURYTEX",
-#               "CHOLAFIN","CIPLA","COALINDIA","COLPAL","CONCOR","CUMMINSIND","DABUR","DIVISLAB","DLF",
-#               "DRREDDY","EICHERMOT","EQUITAS","ESCORTS","EXIDEIND","FEDERALBNK","GAIL","GLENMARK","GMRINFRA",
-#               "GODREJCP","GODREJPROP","GRASIM","HAVELLS","HCLTECH","HDFC","HDFCBANK","HDFCLIFE","HEROMOTOCO",
-#               "HINDALCO","HINDPETRO","HINDUNILVR","IBULHSGFIN","ICICIBANK","ICICIPRULI","IDEA","IDFCFIRSTB",
-#               "IGL","INDIGO","INDUSINDBK","INFRATEL","INFY","IOC","ITC","JINDALSTEL","JSWSTEEL","JUBLFOOD",
-#               "JUSTDIAL","KOTAKBANK","L&TFH","LICHSGFIN","LT","LUPIN","M&M","M&MFIN","MANAPPURAM","MARICO",
-#               "MARUTI","MCDOWELL-N","MFSL","MGL","MINDTREE","MOTHERSUMI","MRF","MUTHOOTFIN","NATIONALUM",
-              # "NAUKRI","NCC","NESTLEIND","NIITTECH","NMDC","NTPC","ONGC","PAGEIND","PEL","PETRONET","PFC",
-              # "PIDILITIND","PNB","POWERGRID","PVR","RAMCOCEM",
-NSEFnOList = ["RBLBANK","RECLTD","RELIANCE","SAIL","SBILIFE",
+NSEFnOList = ["BANKNIFTY","NIFTY","ACC","ADANIENT","ADANIPORTS","AMARAJABAT","AMBUJACEM","APOLLOHOSP",
+              "APOLLOTYRE","ASHOKLEY","ASIANPAINT","AUROPHARMA","AXISBANK","BAJAJ-AUTO","BAJAJFINSV",
+              "BAJFINANCE","BALKRISIND","BANDHANBNK","BANKBARODA","BATAINDIA","BEL","BERGEPAINT","BHARATFORG",
+              "BHARTIARTL","BHEL","BIOCON","BOSCHLTD","BPCL","BRITANNIA","CADILAHC","CANBK","CENTURYTEX",
+              "CHOLAFIN","CIPLA","COALINDIA","COLPAL","CONCOR","CUMMINSIND","DABUR","DIVISLAB","DLF",
+              "DRREDDY","EICHERMOT","EQUITAS","ESCORTS","EXIDEIND","FEDERALBNK","GAIL","GLENMARK","GMRINFRA",
+              "GODREJCP","GODREJPROP","GRASIM","HAVELLS","HCLTECH","HDFC","HDFCBANK","HDFCLIFE","HEROMOTOCO",
+              "HINDALCO","HINDPETRO","HINDUNILVR","IBULHSGFIN","ICICIBANK","ICICIPRULI","IDEA","IDFCFIRSTB",
+              "IGL","INDIGO","INDUSINDBK","INFRATEL","INFY","IOC","ITC","JINDALSTEL","JSWSTEEL","JUBLFOOD",
+              "JUSTDIAL","KOTAKBANK","L&TFH","LICHSGFIN","LT","LUPIN","M&M","M&MFIN","MANAPPURAM","MARICO",
+              "MARUTI","MCDOWELL-N","MFSL","MGL","MINDTREE","MOTHERSUMI","MRF","MUTHOOTFIN","NATIONALUM",
+               "NAUKRI","NCC","NESTLEIND","NIITTECH","NMDC","NTPC","ONGC","PAGEIND","PEL","PETRONET","PFC",
+               "PIDILITIND","PNB","POWERGRID","PVR","RAMCOCEM","RBLBANK","RECLTD","RELIANCE","SAIL","SBILIFE",
               "SBIN","SHREECEM","SIEMENS","SRF","SRTRANSFIN","SUNPHARMA","SUNTV","TATACHEM","TATACONSUM",
               "TATAMOTORS","TATAPOWER","TATASTEEL","TCS","TECHM","TITAN","TORNTPHARM","TORNTPOWER","TVSMOTOR",
               "UBL","UJJIVAN","ULTRACEMCO","UPL","VEDL","VOLTAS","WIPRO","ZEEL"]
@@ -347,7 +346,7 @@ def FullFuturesUpdate():
                 if(CurrentMonth == LastMonthFullFutures): #works unless you don't update for a year
                     NextExpiryDate = CurrentDate
                     FullFuturesExpirydf = pd.DataFrame()
-                    for x in range(3):
+                    for x in range(2):
                         try:
                             if Scrip == "BANKNIFTY" or Scrip == "NIFTY":
                                 FreshFullFutures = get_history(symbol=Scrip, start=LastDateFullFutures, 
@@ -391,7 +390,7 @@ def FullFuturesUpdate():
                         ExpiryMonth = LastMonthFullFutures
                         ExpiryYear = LastYearFullFutures
                         
-                        for x in range(3):
+                        for x in range(2):
                             try:
                                 if Scrip == "BANKNIFTY" or Scrip == "NIFTY":
                                     FreshFullFutures = get_history(symbol=Scrip, start=LastDateFullFutures, 
@@ -477,7 +476,7 @@ def FullFuturesUpdate():
                 print(FullFuturesFileName + ' is being updated from ' + LastDateFullFutures.strftime("%Y-%m-%d %H:%M"))
                 while True:
                     FullFuturesExpirydf = pd.DataFrame()
-                    for x in range(3):
+                    for x in range(2):
                         try:
                             if Scrip == "BANKNIFTY" or Scrip == "NIFTY":
                                 FreshFullFutures = get_history(symbol=Scrip, start=LastDateFullFutures, 
@@ -989,7 +988,7 @@ def IntradayUpdate():
 def main():
     OHLCUpdate()
     # MonthlyFuturesUpdate()
-    FullFuturesUpdate()
+    # FullFuturesUpdate()
     IntradayUpdate()
     FXPEUpdate()
     MonthlyOptionsUpdate()

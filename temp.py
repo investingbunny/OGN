@@ -5,6 +5,12 @@ Created on Tue Aug 18 11:54:38 2020
 @author: User
 """
 
+df = pd.DataFrame({'Date': ['05-01-2018', '02-20-2020']})
+
+df['Date'] = pd.to_datetime(df['Date'])
+df['Month'] = df['Date'].dt.month
+df['Month-str'] = df['Date'].dt.strftime('%b')
+df['Month-str-full'] = df['Date'].dt.strftime('%B')
 
     for Scrip in NSEFnOList:
         Scrip = "OIL"
