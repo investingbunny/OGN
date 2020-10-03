@@ -346,7 +346,7 @@ def FullFuturesUpdate():
                 if(CurrentMonth == LastMonthFullFutures): #works unless you don't update for a year
                     NextExpiryDate = CurrentDate
                     FullFuturesExpirydf = pd.DataFrame()
-                    for x in range(2):
+                    for x in range(1):
                         try:
                             if Scrip == "BANKNIFTY" or Scrip == "NIFTY":
                                 FreshFullFutures = get_history(symbol=Scrip, start=LastDateFullFutures, 
@@ -390,7 +390,7 @@ def FullFuturesUpdate():
                         ExpiryMonth = LastMonthFullFutures
                         ExpiryYear = LastYearFullFutures
                         
-                        for x in range(2):
+                        for x in range(1):
                             try:
                                 if Scrip == "BANKNIFTY" or Scrip == "NIFTY":
                                     FreshFullFutures = get_history(symbol=Scrip, start=LastDateFullFutures, 
@@ -438,7 +438,7 @@ def FullFuturesUpdate():
             ExpiryMonth = LastDateFullFutures.month
             ExpiryYear = LastDateFullFutures.year
             
-            for x in range(3):
+            for x in range(1):
                 try:
                     if Scrip == "BANKNIFTY" or Scrip == "NIFTY":
                         FreshFullFutures = get_history(symbol=Scrip, start=FullFuturesStartDate, 
@@ -476,7 +476,7 @@ def FullFuturesUpdate():
                 print(FullFuturesFileName + ' is being updated from ' + LastDateFullFutures.strftime("%Y-%m-%d %H:%M"))
                 while True:
                     FullFuturesExpirydf = pd.DataFrame()
-                    for x in range(2):
+                    for x in range(1):
                         try:
                             if Scrip == "BANKNIFTY" or Scrip == "NIFTY":
                                 FreshFullFutures = get_history(symbol=Scrip, start=LastDateFullFutures, 
@@ -994,3 +994,4 @@ def main():
     MonthlyOptionsUpdate()
     
 # hhhhhhhhhhhh = feather.read_feather('./Datastore/'+'CENTURYTEX_monthly-futures.ftr')    
+# dd = get_expiry_date(2020,11)

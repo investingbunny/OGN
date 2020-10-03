@@ -117,17 +117,19 @@ NSEFnOList = ["BANKNIFTY","NIFTY","ACC","ADANIENT","ADANIPORTS","AMARAJABAT","AM
               "BAJFINANCE","BALKRISIND","BANDHANBNK","BANKBARODA","BATAINDIA","BEL","BERGEPAINT","BHARATFORG",
               "BHARTIARTL","BHEL","BIOCON","BOSCHLTD","BPCL","BRITANNIA","CADILAHC","CANBK","CENTURYTEX",
               "CHOLAFIN","CIPLA","COALINDIA","COLPAL","CONCOR","CUMMINSIND","DABUR","DIVISLAB","DLF",
-              "DRREDDY","EICHERMOT","EQUITAS","ESCORTS","EXIDEIND","FEDERALBNK","GAIL","GLENMARK","GMRINFRA",
-              "GODREJCP","GODREJPROP","GRASIM","HAVELLS","HCLTECH","HDFC","HDFCBANK","HDFCLIFE","HEROMOTOCO",
-               "HINDALCO","HINDPETRO","HINDUNILVR","IBULHSGFIN","ICICIBANK","ICICIPRULI","IDEA","IDFCFIRSTB",
-               "IGL","INDIGO","INDUSINDBK","INFRATEL","INFY","IOC","ITC","JINDALSTEL","JSWSTEEL","JUBLFOOD",
-               "JUSTDIAL","KOTAKBANK","L&TFH","LICHSGFIN","LT","LUPIN","M&M","M&MFIN","MANAPPURAM","MARICO",
-              "MARUTI","MCDOWELL-N","MFSL","MGL","MINDTREE","MOTHERSUMI","MRF","MUTHOOTFIN","NATIONALUM",
-              "NAUKRI","NCC","NESTLEIND","NIITTECH","NMDC","NTPC","ONGC","PAGEIND","PEL","PETRONET","PFC",
+              "DRREDDY","EICHERMOT","ESCORTS","EXIDEIND","FEDERALBNK","GAIL","GLENMARK","GMRINFRA",
+               "GODREJCP","GODREJPROP","GRASIM","HAVELLS","HCLTECH","HDFC","HDFCBANK","HDFCLIFE","HEROMOTOCO",
+                "HINDALCO","HINDPETRO","HINDUNILVR","IBULHSGFIN","ICICIBANK","ICICIPRULI","IDEA","IDFCFIRSTB",
+                "IGL","INDIGO","INDUSINDBK","INFRATEL","INFY","IOC","ITC","JINDALSTEL","JSWSTEEL","JUBLFOOD",
+               "KOTAKBANK","L&TFH","LICHSGFIN","LT","LUPIN","M&M","M&MFIN","MANAPPURAM","MARICO",
+               "MARUTI","MCDOWELL-N","MFSL","MGL","MINDTREE","MOTHERSUMI","MRF","MUTHOOTFIN","NATIONALUM",
+               "NAUKRI","NESTLEIND","NIITTECH","NMDC","NTPC","ONGC","PAGEIND","PEL","PETRONET","PFC",
               "PIDILITIND","PNB","POWERGRID","PVR","RAMCOCEM","RBLBANK","RECLTD","RELIANCE","SAIL","SBILIFE",
               "SBIN","SHREECEM","SIEMENS","SRF","SRTRANSFIN","SUNPHARMA","SUNTV","TATACHEM","TATACONSUM",
               "TATAMOTORS","TATAPOWER","TATASTEEL","TCS","TECHM","TITAN","TORNTPHARM","TORNTPOWER","TVSMOTOR",
-              "UBL","UJJIVAN","ULTRACEMCO","UPL","VEDL","VOLTAS","WIPRO","ZEEL"]
+              "UBL","ULTRACEMCO","UPL","VEDL","VOLTAS","WIPRO","ZEEL"]
+
+#ErrorList = "UJJIVAN", "EQUITAS", "JUSTDIAL","NCC",
 
 Scriplist = ["TCS","TATAPOWER","REDINGTON","SAIL"]
 YahooScriplist = ["RELIANCE.NS", "HDFCBANK.NS", "TATASTEEL.NS", "TCS.NS", "TATAMOTORS.NS","TATAPOWER.NS","INDIGO.NS","IDEA.NS","OIL.NS","AUROPHARMA.NS","CIPLA.NS","FEDERALBNK.NS","AXISBANK.NS","ZEEL.NS"]
@@ -404,10 +406,10 @@ def BollBnd(DF,n):
 
 def plot_chart(DF, n, ticker, Dividend):
 
-    # n = 100
-    # ticker = "UJJIVAN"
-    # data = Indicatordf.copy()
-    data = DF.copy()
+    n = 50
+    ticker = "L&TFH"
+    data = Indicatordf.copy()
+    # data = DF.copy()
 
     # Renkodata = Renko_DF(data,ticker)
     # #DF amd number of latest bricks
@@ -428,7 +430,7 @@ def plot_chart(DF, n, ticker, Dividend):
     #Read from feather
     if (FindFeather(FuturesFileName, './Datastore/')):
         ReadFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
-       
+        ReadFuturesdf.info()
         d = OptionsFrameStart - datetime.timedelta(days=1) #Date to start from for axis alignment
         FuturesSlice = ReadFuturesdf[ReadFuturesdf.Date > d]
         Futdf = FuturesSlice[['Date', 'Expiry','Settle Price','Open Interest']].copy()
@@ -455,23 +457,23 @@ def plot_chart(DF, n, ticker, Dividend):
     data.index = data["Date"].apply(lambda x: pd.Timestamp(x))
     data.drop("Date", axis=1, inplace=True)
     
-    # Create figure and set axes for subplots
-    fig = plt.figure()
+    # # Create figure and set axes for subplots
+    # fig = plt.figure()
     
-    #plt.title(ticker)
-    fig.set_size_inches((40, 20))
-    ax_candle = fig.add_axes((0, 0.72, 0.49, 0.32))
-    ax_macd = fig.add_axes((0, 0.48, 0.49, 0.2), sharex=ax_candle)
-    ax_rsi = fig.add_axes((0, 0.24, 0.49, 0.2), sharex=ax_candle)
-    ax_vol = fig.add_axes((0, 0, 0.49, 0.2), sharex=ax_candle)
+    # #plt.title(ticker)
+    # fig.set_size_inches((40, 20))
+    # ax_candle = fig.add_axes((0, 0.72, 0.49, 0.32))
+    # ax_macd = fig.add_axes((0, 0.48, 0.49, 0.2), sharex=ax_candle)
+    # ax_rsi = fig.add_axes((0, 0.24, 0.49, 0.2), sharex=ax_candle)
+    # ax_vol = fig.add_axes((0, 0, 0.49, 0.2), sharex=ax_candle)
     
-    ax_bba = fig.add_axes((0.51, 0.72,0.49, 0.32), sharex=ax_candle)
-    ax_obv = fig.add_axes((0.51, 0.48, 0.49, 0.2), sharex=ax_candle)
-    ax_atr = fig.add_axes((0.51, 0.24, 0.49, 0.2), sharex=ax_candle)
-    ax_beta = fig.add_axes((0.51, 0, 0.49, 0.2), sharex=ax_candle)
+    # ax_bba = fig.add_axes((0.51, 0.72,0.49, 0.32), sharex=ax_candle)
+    # ax_obv = fig.add_axes((0.51, 0.48, 0.49, 0.2), sharex=ax_candle)
+    # ax_atr = fig.add_axes((0.51, 0.24, 0.49, 0.2), sharex=ax_candle)
+    # ax_beta = fig.add_axes((0.51, 0, 0.49, 0.2), sharex=ax_candle)
     
-    # Format x-axis ticks as dates
-    ax_candle.xaxis_date()
+    # # Format x-axis ticks as dates
+    # ax_candle.xaxis_date()
     
     # Get nested list of date, open, high, low and close prices
     ohlc = []
@@ -479,96 +481,40 @@ def plot_chart(DF, n, ticker, Dividend):
         openp, highp, lowp, closep = row[:4]
         ohlc.append([date2num(date), openp, highp, lowp, closep])
  
-    # Plot candlestick chart
-    ax_candle.plot(data.index, data["Close"], label=ticker +" Price")
-    ax_candle.plot(data.index, data["10DMA"], label="MA10")
-    ax_candle.plot(data.index, data["50DMA"], label="MA50")
-    candlestick_ohlc(ax_candle, ohlc, colorup="g", colordown="r", width=0.8)
-    ax_candle.legend()
+    # # Plot candlestick chart
+    # ax_candle.plot(data.index, data["Close"], label=ticker +" Price")
+    # ax_candle.plot(data.index, data["10DMA"], label="MA10")
+    # ax_candle.plot(data.index, data["50DMA"], label="MA50")
+    # candlestick_ohlc(ax_candle, ohlc, colorup="g", colordown="r", width=0.8)
+    # ax_candle.legend()
     
-    # Plot MACD
-    ax_macd.plot(data.index, data["MACD"], label="MACD")
-    ax_macd.bar(data.index, (data["MACD"] -data["Signal"]) * 3, label="hist")
-    ax_macd.plot(data.index, data["Signal"], label="Signal")
-    ax_macd.legend()
+    # # # Plot ATR
+    # # # MA, BB_up and BB_dn. Expansion = Greater Volatility    
+    # # ax_atr.set_ylabel("Trading range")
+    # ax_atr.plot(data.index, data["TR"], label="TR")
+    # ax_atr.plot(data.index, data["ATR"], label="ATR")
+    # ax_atr.legend()
     
-    # Plot RSI & ADX bands
-    # Above 70% = overbought, below 30% = oversold
-    ax_rsi.set_ylabel("(%)")
-    ax_rsi.plot(data.index, [80] * len(data.index), label="overbought")
-    ax_rsi.plot(data.index, [20] * len(data.index), label="oversold")
-    ax_rsi.plot(data.index, [50] * len(data.index))
-    ax_rsi.plot(data.index, data["RSI"], label="RSI", color = 'lightpink')
-    ax_rsi.plot(data.index, data["ADX"], label="ADX", color = 'blue')
-    ax_rsi.plot(data.index, data["DIplusN"], label="DI+", color = 'green')
-    ax_rsi.plot(data.index, data["DIminusN"], label="DI-", color = 'red')
-    ax_rsi.legend()
-    
-    # Show volume in millions
-    ax_vol.bar(data.index, data["Volume"] / 100000, label="Volume")
-    if(ticker != "NIFTY" and ticker != "BANKNIFTY"):
-        ax_vol.bar(data.index, data["Deliverable Volume"] / 100000, label="Deliverable")
-    ax_vol.set_ylabel("(Lakh(s))")
-    ax_vol.legend()
-
-    # # Plot BB
-    # # MA, BB_up and BB_dn. Expansion = Greater Volatility
-    # ax_bba.set_ylabel("BBands")
-    ax_bba.plot(data.index, data["BB_up"], label="BB_up")
-    ax_bba.plot(data.index, data["BB_dn"], label="BB_dn")
-    ax_bba.plot(data.index, data["MA"], label="MA")
-    ax_bba.legend()
-    
-    # # Plot OBV
-    # # MA, BB_up and BB_dn. Expansion = Greater Volatility   
-    # ax_obv.set_ylabel("On Balance Volume")
-    ax_obv.plot(data.index, data["OBV"]/ 100000, label="OBV")
-    ax_obv.set_ylabel("(Lakh(s))")
-    ax_obv.legend()
-
-    # # Plot ATR
-    # # MA, BB_up and BB_dn. Expansion = Greater Volatility    
-    # ax_atr.set_ylabel("Trading range")
-    ax_atr.plot(data.index, data["TR"], label="TR")
-    ax_atr.plot(data.index, data["ATR"], label="ATR")
-    ax_atr.legend()
-    
-    # Plot Beta and deliverable
-    # Above 70% = overbought, below 30% = oversold
-    #ax_beta.set_ylabel("Beta")
-    ax_beta.plot(data.index, data["Beta"], label="Beta")
-    if(ticker != "NIFTY" and ticker != "BANKNIFTY"):    
-        ax_beta.plot(data.index, data["%Deliverble"], label="% Deliverable")
-    ax_beta.legend()    
 
     # Save the chart as PNG
     #fig.savefig("charts/" + ticker + ".png", bbox_inches="tight")
     
-    plt.show()
+    # plt.show()
     
     fig2 = plt.figure()
-    fig2.set_size_inches((32, 18))
+    fig2.set_size_inches((48, 27))
     #[left, bottom, width, height] 
     
-    ax_sma = fig2.add_axes((0, 0.72, 0.49, 0.32))
-    ax_trades = fig2.add_axes((0, 0.48, 0.49, 0.2), sharex=ax_sma)
-    ax_fibret = fig2.add_axes((0, 0.24, 0.49, 0.2), sharex=ax_sma)
-    ax_slope = fig2.add_axes((0, 0, 0.49, 0.2), sharex=ax_sma)
+    ax_macd = fig2.add_axes((0, 0.84, 0.49, 0.24))
+    ax_rsi = fig2.add_axes((0, 0.56, 0.49, 0.24), sharex=ax_macd)
+    ax_fibret = fig2.add_axes((0, 0.28, 0.49, 0.24), sharex=ax_macd)
+    ax_bba = fig2.add_axes((0, 0, 0.49, 0.24), sharex=ax_macd)
     
-    ax_ema = fig2.add_axes((0.51, 0.72, 0.49, 0.32), sharex=ax_sma)
-    ax_maxpain = fig2.add_axes((0.51, 0.48, 0.49, 0.2), sharex=ax_sma)
-    ax_futures = fig2.add_axes((0.51, 0, 0.49, 0.45), sharex=ax_sma)
+    ax_ema = fig2.add_axes((0.51, 0.76, 0.49, 0.32), sharex=ax_macd)
+    ax_maxpain = fig2.add_axes((0.51, 0.52, 0.49, 0.2), sharex=ax_macd)
+    ax_futures = fig2.add_axes((0.51, 0, 0.49, 0.5), sharex=ax_macd)
       
-    ax_sma.xaxis_date()
-    
-    # Plot SMA chart
-    ax_sma.plot(data.index, data["Close"], label= ticker +" Price")
-    ax_sma.plot(data.index, data["10DMA"], label="10DMA")
-    ax_sma.plot(data.index, data["20DMA"], label="20DMA")
-    ax_sma.plot(data.index, data["50DMA"], label="50DMA")
-    ax_sma.plot(data.index, data["100DMA"], label="100DMA")
-    ax_sma.plot(data.index, data["200DMA"], label="200DMA")       
-    ax_sma.legend()
+    ax_macd.xaxis_date()
     
     # Plot MACD & Slope
     ax_ema.plot(data.index, data["Close"], label= ticker +" Price")
@@ -637,20 +583,36 @@ def plot_chart(DF, n, ticker, Dividend):
         # ax_futures.axhspan(SD3upLevel, SD2upLevel, alpha=0.5, color='green', label = str(SD3upLevel)+ ' +SD3')
         ax_futures.legend()
 
-    if(ticker != "NIFTY" and ticker != "BANKNIFTY"):
-        ax_trades.plot(data.index, data["Trades"], label="Trades")
-    ax_trades.plot(data.index, data["Turnover"]/ 100000, label="Turnover")
-    # ax_trades.set_ylabel("(Lakh(s))")
-    ax_trades.legend()
+    # Plot MACD
+    ax_macd.plot(data.index, data["MACD"], label="MACD")
+    ax_macd.bar(data.index, (data["MACD"] -data["Signal"]) * 3, label="hist")
+    ax_macd.plot(data.index, data["Signal"], label="Signal")
+    ax_macd.legend()
+
+    # Plot RSI & ADX bands
+    # Above 70% = overbought, below 30% = oversold
+    ax_rsi.set_ylabel("(%)")
+    ax_rsi.plot(data.index, [80] * len(data.index), label="overbought")
+    ax_rsi.plot(data.index, [20] * len(data.index), label="oversold")
+    ax_rsi.plot(data.index, [50] * len(data.index))
+    ax_rsi.plot(data.index, data["RSI"], label="RSI", color = 'lightpink')
+    ax_rsi.plot(data.index, data["ADX"], label="ADX", color = 'blue')
+    ax_rsi.plot(data.index, data["DIplusN"], label="DI+", color = 'green')
+    ax_rsi.plot(data.index, data["DIminusN"], label="DI-", color = 'red')
+    ax_rsi.legend()
    
-    ax_slope.plot(data.index, data["Slope"], label="Slope")
-    ax_close = ax_slope.twinx()
-    ax_close.plot(data.index, data["Close"],color="blue",marker="o", label="Price")
-    ax_slope.set_ylabel('Slope')
-    ax_close.set_ylabel('Closing price')
-    ax_close.grid(b=False) # turn off grid #2
-    # ax_slope.plot(data.index, data["Close"], label="Price")
-    ax_slope.legend()
+    # # Plot BB
+    # # MA, BB_up and BB_dn. Expansion = Greater Volatility
+    # ax_bba.set_ylabel("BBands")
+    ax_bba.plot(data.index, data["BB_up"], label="BB_up")
+    ax_bba.plot(data.index, data["BB_dn"], label="BB_dn")
+    ax_bba.plot(data.index, data["MA"], label="MA")
+    ax_bba.legend()
+
+    ax_obv = ax_bba.twinx()
+    ax_obv.plot(data.index, data["OBV"]/ 100000, marker="*", label="OBV")
+    ax_obv.set_ylabel('OBV')
+    ax_obv.grid(b=False) # turn off grid #2
     
     "Retracement -23.6%, 38.2%, 50%, 61.8%, and 78.6%"
     "Fibonacci extension levels are 161.8%, 261.8% and 423.6%."
@@ -689,7 +651,7 @@ def plot_chart(DF, n, ticker, Dividend):
     
     if (FindFeather(OptionsFileName, './Datastore/')):
         ax_maxpain.plot(data.index, data["Close"], label="Price")
-        ax_maxpain.plot(data.index, data["MaxPain"],color="blue",marker="o", label="MaxPain")
+        ax_maxpain.plot(data.index, data["MaxPain"],color="red",marker="o", label="MaxPain")
         ax_pcr = ax_maxpain.twinx()
         ax_pcr.plot(data.index, data["PCR"],color="black",marker="*", label="PCR")
         ax_maxpain.set_ylabel('Price')
@@ -710,27 +672,27 @@ def plot_chart(DF, n, ticker, Dividend):
     
     #Trendlines
     # this will serve as an example for security or index closing prices, or low and high prices
-    Trendlinedf = data.copy()
-    TLClose = Trendlinedf[-n:].Close
-    mins, maxs = trendln.calc_support_resistance(TLClose)
-    minimaIdxs, pmin, mintrend, minwindows = trendln.calc_support_resistance((Trendlinedf[-n:].Low, None)) #support only
-    mins, maxs = trendln.calc_support_resistance((Trendlinedf[-n:].Low, Trendlinedf[-n:].High))
-    (minimaIdxs, pmin, mintrend, minwindows), (maximaIdxs, pmax, maxtrend, maxwindows) = mins, maxs
+    # Trendlinedf = data.copy()
+    # TLClose = Trendlinedf[-n:].Close
+    # mins, maxs = trendln.calc_support_resistance(TLClose)
+    # minimaIdxs, pmin, mintrend, minwindows = trendln.calc_support_resistance((Trendlinedf[-n:].Low, None)) #support only
+    # mins, maxs = trendln.calc_support_resistance((Trendlinedf[-n:].Low, Trendlinedf[-n:].High))
+    # (minimaIdxs, pmin, mintrend, minwindows), (maximaIdxs, pmax, maxtrend, maxwindows) = mins, maxs
 
-    idx = Trendlinedf[-n:].index
-    fig3 = trendln.plot_sup_res_date((Trendlinedf[-n:].Low, Trendlinedf[-n:].High), idx) #requires pandas
-    fig3.set_size_inches((16, 9))
-    # plt.savefig('suppres.svg', format='svg')
-    plt.show()
+    # idx = Trendlinedf[-n:].index
+    # fig3 = trendln.plot_sup_res_date((Trendlinedf[-n:].Low, Trendlinedf[-n:].High), idx) #requires pandas
+    # fig3.set_size_inches((16, 9))
+    # # plt.savefig('suppres.svg', format='svg')
+    # plt.show()
     # plt.clf() #clear figure
 
 def FnOAnalysis():
-    Finaldf = pd.DataFrame()
+    # Finaldf = pd.DataFrame()
     # for Scrip in NSE500ScripList:#Scriplist:
-    for Scrip in NSE500ScripList:        
+    for Scrip in NSEFnOList:        
         OHLCdf = None
         Indicatordf = None
-        Scrip = "ITC"
+        Scrip = "L&TFH"
         print('Now for '+ Scrip)
         OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
         #Read from feather
@@ -809,5 +771,5 @@ def FnOAnalysis():
 ###################################################################################################
 
 def main():
-   TechAnalysis()
+   FnOAnalysis()
 
