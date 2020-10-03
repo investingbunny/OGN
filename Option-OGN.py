@@ -1,52 +1,158 @@
 # -*- coding: utf-8 -*-
 """
-Created on Sat Aug 22 19:03:16 2020
-
-@author: User
+Created on Sun Jul 26 17:11:12 2020
+Technical Analysis Modules
+@author: HRTR
 """
-
-import numpy as np
+#Includes
+import datetime as dt
+import datetime
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+import urllib.request, urllib.error, urllib.parse
 import pandas as pd
-from stocktrends import Renko
-from stocktrends import indicators
-import statsmodels.api as sm
-import copy
 import pyarrow
 import pyarrow.feather as feather
+from stocktrends import Renko
+from stocktrends import indicators
+import numpy as np
+import statsmodels.api as sm
+import copy
+import sys
+import math
+import talib
+%matplotlib inline
+import seaborn as sns
+import matplotlib.ticker as mticker
+import matplotlib.dates as mdates
+from matplotlib.dates import date2num
+from mpl_finance import candlestick_ohlc
+import trendln
+import pylab
+matplotlib.rcParams.update({'font.size': 9})
 import os
-import matplotlib.pyplot as plt
-NSEFnOList = ["BANKNIFTY","NIFTY","AXISBANK"]
-# ,"ADANIENT","ADANIPORTS","AMARAJABAT","AMBUJACEM","APOLLOHOSP",
-#               "APOLLOTYRE","ASHOKLEY","ASIANPAINT","AUROPHARMA","AXISBANK","BAJAJ-AUTO","BAJAJFINSV",
-#               "BAJFINANCE","BALKRISIND","BANDHANBNK","BANKBARODA","BATAINDIA","BEL","BERGEPAINT","BHARATFORG",
-#               "BHARTIARTL","BHEL","BIOCON","BOSCHLTD","BPCL","BRITANNIA","CADILAHC","CANBK","CENTURYTEX",
-#               "CHOLAFIN","CIPLA","COALINDIA","COLPAL","CONCOR","CUMMINSIND","DABUR","DIVISLAB","DLF",
-#               "DRREDDY","EICHERMOT","EQUITAS","ESCORTS","EXIDEIND","FEDERALBNK","GAIL","GLENMARK","GMRINFRA",
-#               "GODREJCP","GODREJPROP","GRASIM","HAVELLS","HCLTECH","HDFC","HDFCBANK","HDFCLIFE","HEROMOTOCO",
-#                "HINDALCO","HINDPETRO","HINDUNILVR","IBULHSGFIN","ICICIBANK","ICICIPRULI","IDEA","IDFCFIRSTB",
-#                "IGL","INDIGO","INDUSINDBK","INFRATEL","INFY","IOC","ITC","JINDALSTEL","JSWSTEEL","JUBLFOOD",
-#                "JUSTDIAL","KOTAKBANK","L&TFH","LICHSGFIN","LT","LUPIN","M&M","M&MFIN","MANAPPURAM","MARICO",
-#               "MARUTI","MCDOWELL-N","MFSL","MGL","MINDTREE","MOTHERSUMI","MRF","MUTHOOTFIN","NATIONALUM",
-#               "NAUKRI","NCC","NESTLEIND","NIITTECH","NMDC","NTPC","ONGC","PAGEIND","PEL","PETRONET","PFC",
-#               "PIDILITIND","PNB","POWERGRID","PVR","RAMCOCEM","RBLBANK","RECLTD","RELIANCE","SAIL","SBILIFE",
-#               "SBIN","SHREECEM","SIEMENS","SRF","SRTRANSFIN","SUNPHARMA","SUNTV","TATACHEM","TATACONSUM",
-#               "TATAMOTORS","TATAPOWER","TATASTEEL","TCS","TECHM","TITAN","TORNTPHARM","TORNTPOWER","TVSMOTOR",
-#               "UBL","UJJIVAN","ULTRACEMCO","UPL","VEDL","VOLTAS","WIPRO","ZEEL"]
+from functools import reduce
 
+sns.set(style='darkgrid', context='talk', palette='Dark2')
+
+my_year_month_fmt = mdates.DateFormatter('%m/%y')
+
+talib.get_function_groups()
+
+DailyOHLCFilePath = "ohlc.ftr";
+IntradayFilePath = "intraday.ftr"
+MonthlyFuturesFilePath = "monthly-futures.ftr"
+FullFuturesFilePath = "full-futures.ftr"
 MonthlyOptionsFilePath = "monthly-options.ftr"
+FXHistory = "FXHistory.ftr"
+PEHistory = "PEHistory.ftr"
+RiskFreeRate = 0.033578 #https://www.rbi.org.in/
+Dividend = 0
 
+NSE500ScripList = ["3MINDIA","ACC","AIAENG","APLAPOLLO","AUBANK","AARTIIND","AAVAS","ABBOTINDIA",
+                    "ADANIGAS","ADANIGREEN","ADANIPORTS","ADANIPOWER","ADANITRANS","ABCAPITAL","ABFRL",
+                    "ADVENZYMES","AEGISCHEM","AFFLE","AJANTPHARM","AKZOINDIA","APLLTD","ALKEM","ALLCARGO",
+                    "AMARAJABAT","AMBER","AMBUJACEM","APOLLOHOSP","APOLLOTYRE","ARVINDFASN","ASAHIINDIA",
+                    "ASHOKLEY","ASHOKA","ASIANPAINT","ASTERDM","ASTRAZEN","ASTRAL","ATUL","AUROPHARMA",
+                    "AVANTIFEED","DMART","AXISBANK","BASF","BEML","BSE","BAJAJ-AUTO","BAJAJCON","BAJAJELEC",
+                    "BAJFINANCE","BAJAJFINSV","BAJAJHLDNG","BALKRISIND","BALMLAWRIE","BALRAMCHIN","BANDHANBNK",
+                    "BANKBARODA","BANKINDIA","MAHABANK","BATAINDIA","BAYERCROP","BERGEPAINT","BDL","BEL",
+                    "BHARATFORG","BHEL","BPCL","BHARTIARTL","INFRATEL","BIOCON","BIRLACORPN","BSOFT",
+                    "BLISSGVS","BLUEDART","BLUESTARCO","BBTC","BOMDYEING","BOSCHLTD","BRIGADE","BRITANNIA",
+                    "CARERATING","CCL","CESC","CRISIL","CADILAHC","CANFINHOME","CANBK","CAPLIPOINT","CGCL",
+                    "CARBORUNIV","CASTROLIND","CEATLTD","CENTRALBK","CDSL","CENTURYPLY","CERA","CHALET",
+                    "CHAMBLFERT","CHENNPETRO","CHOLAHLDNG","CHOLAFIN","CIPLA","CUB","COALINDIA","COCHINSHIP",
+                    "COLPAL","CONCOR","COROMANDEL","CREDITACC","CROMPTON","CUMMINSIND","CYIENT","DBCORP",
+                    "DCBBANK","DCMSHRIRAM","DLF","DABUR","DALBHARAT","DEEPAKNTR","DELTACORP","DHFL","DBL",
+                    "DISHTV","DCAL","DIVISLAB","DIXON","LALPATHLAB","DRREDDY","EIDPARRY","EIHOTEL","EDELWEISS",
+                    "EICHERMOT","ELGIEQUIP","EMAMILTD","ENDURANCE","ENGINERSIN","EQUITAS","ERIS","ESCORTS",
+                    "ESSELPACK","EXIDEIND","FDC","FEDERALBNK","FMGOETZE","FINEORG","FINCABLES","FINPIPE","FSL",
+                    "FORTIS","FCONSUMER","FLFL","FRETAIL","GAIL","GEPIL","GET&D","GHCL","GMRINFRA","GALAXYSURF",
+                    "GARFIBRES","GAYAPROJ","GICRE","GILLETTE","GLAXO","GLENMARK","GODFRYPHLP","GODREJAGRO",
+                    "GODREJCP","GODREJIND","GODREJPROP","GRANULES","GRAPHITE","GRASIM","GESHIP","GREAVESCOT",
+                    "GRINDWELL","GUJALKALI","GUJGASLTD","GMDCLTD","GNFC","GPPL","GSFC","GSPL","GULFOILLUB",
+                    "HEG","HCLTECH","HDFCAMC","HDFCBANK","HDFCLIFE","HFCL","HATSUN","HAVELLS","HEIDELBERG",
+                    "HERITGFOOD","HEROMOTOCO","HEXAWARE","HSCL","HIMATSEIDE","HINDALCO","HAL","HINDCOPPER",
+                    "HINDPETRO","HINDUNILVR","HINDZINC","HONAUT","HUDCO","HDFC","ICICIBANK","ICICIGI",
+                    "ICICIPRULI","ISEC","ICRA","IDBI","IDFCFIRSTB","IDFC","IFBIND","IFCI","IIFL","IRB",
+                    "IRCON","ITC","ITDCEM","ITI","INDIACEM","ITDC","IBULHSGFIN","IBULISL","IBREALEST",
+                    "IBVENTURES","INDIAMART","INDIANB","IEX","INDHOTEL","IOC","IOB","INDOSTAR","IGL",
+                    "INDUSINDBK","INFIBEAM","NAUKRI","INFY","INOXLEISUR","INTELLECT","INDIGO","IPCALAB",
+                    "JBCHEPHARM","JKCEMENT","JKLAKSHMI","JKPAPER","JKTYRE","JMFINANCIL","JSWENERGY","JSWSTEEL",
+                    "JAGRAN","JAICORPLTD","JISLJALEQS","J&KBANK","JAMNAAUTO","JINDALSAW","JSLHISAR","JSL",
+                    "JINDALSTEL","JCHAC","JUBLFOOD","JUBILANT","JUSTDIAL","JYOTHYLAB","KPRMILL","KEI","KNRCON",
+                    "KPITTECH","KRBL","KAJARIACER","KALPATPOWR","KANSAINER","KTKBANK","KARURVYSYA","KSCL",
+                    "KEC","KENNAMET","KIRLOSENG","KOLTEPATIL","KOTAKBANK","L&TFH","LTTS","LICHSGFIN",
+                    "LAXMIMACH","LAKSHVILAS","LTI","LT","LAURUSLABS","LEMONTREE","LINDEINDIA","LUPIN",
+                    "LUXIND","MASFIN","MMTC","MOIL","MRF","MAGMA","MGL","MAHSCOOTER","MAHSEAMLES","M&MFIN",
+                    "M&M","MAHINDCIE","MHRIL","MAHLOG","MANAPPURAM","MRPL","MARICO","MARUTI","MFSL",
+                    "METROPOLIS","MINDTREE","MINDACORP","MINDAIND","MIDHANI","MOTHERSUMI","MOTILALOFS",
+                    "MPHASIS","MCX","MUTHOOTFIN","NATCOPHARM","NBCC","NCC","NESCO","NHPC","NIITTECH",
+                    "NLCINDIA","NMDC","NTPC","NH","NATIONALUM","NFL","NBVENTURES","NAVINFLUOR","NESTLEIND",
+                    "NETWORK18","NILKAMAL","NAM-INDIA","OBEROIRLTY","ONGC","OIL","OMAXE","OFSS","ORIENTCEM",
+                    "ORIENTELEC","ORIENTREF","PCJEWELLER","PIIND","PNBHOUSING","PNCINFRA","PTC","PVR",
+                    "PAGEIND","PARAGMILK","PERSISTENT","PETRONET","PFIZER","PHILIPCARB","PHOENIXLTD",
+                    "PIDILITIND","PEL","POLYCAB","PFC","POWERGRID","PRAJIND","PRESTIGE","PRSMJOHNSN","PGHL",
+                    "PGHH","PNB","QUESS","RBLBANK","RECLTD","RITES","RADICO","RVNL","RAIN","RAJESHEXPO",
+                    "RALLIS","RCF","RATNAMANI","RAYMOND","REDINGTON","RELAXO","RELCAPITAL","RELIANCE",
+                    "RELINFRA","RPOWER","REPCOHOME","RESPONIND","SHK","SBILIFE","SJVN","SKFINDIA","SRF",
+                    "SADBHAV","SANOFI","SCHAEFFLER","SIS","SFL","SHILPAMED","SHOPERSTOP","SHREECEM","RENUKA",
+                    "SHRIRAMCIT","SRTRANSFIN","SIEMENS","SOBHA","SOLARINDS","SONATSOFTW","SOUTHBANK",
+                    "SPANDANA","SPICEJET","STARCEMENT","SBIN","SAIL","STRTECH","STAR","SUDARSCHEM","SPARC",
+                    "SUNPHARMA","SUNTV","SUNCLAYLTD","SUNDARMFIN","SUNDRMFAST","SUNTECK","SUPRAJIT",
+                    "SUPREMEIND","SUZLON","SWANENERGY","SYMPHONY","SYNGENE","TCIEXP","TCNSBRANDS","TTKPRESTIG",
+                    "TVTODAY","TV18BRDCST","TVSMOTOR","TAKE","TASTYBITE","TCS","TATAELXSI","TATAGLOBAL",
+                    "TATAINVEST","TATAMTRDVR","TATAMOTORS","TATAPOWER","TATASTLBSL","TATASTEEL","TEAMLEASE",
+                    "TECHM","TECHNOE","NIACL","RAMCOCEM","THERMAX","THYROCARE","TIMETECHNO","TIMKEN","TITAN",
+                    "TORNTPHARM","TORNTPOWER","TRENT","TRIDENT","TRITURBINE","TIINDIA","UCOBANK","UFLEX","UPL",
+                    "UJJIVAN","ULTRACEMCO","UNIONBANK","UBL","MCDOWELL-N","VGUARD","VMART","VIPIND","VRLLOG",
+                    "VSTIND","WABAG","VAIBHAVGBL","VAKRANGEE","VTL","VARROC","VBL","VEDL","VENKEYS",
+                    "VINATIORGA","IDEA","VOLTAS","WABCOINDIA","WELCORP","WELSPUNIND","WESTLIFE","WHIRLPOOL",
+                    "WIPRO","WOCKPHARMA","YESBANK","ZEEL","ZENSARTECH","ZYDUSWELL","ECLERX","TATACONSUM",
+                    "DEEPAKFERT","ADANIENT","CGPOWER","PENIND","BANKNIFTY","NIFTY"]
+
+NSEFnOList = ["BANKNIFTY","NIFTY","ACC","ADANIENT","ADANIPORTS","AMARAJABAT","AMBUJACEM","APOLLOHOSP",
+              "APOLLOTYRE","ASHOKLEY","ASIANPAINT","AUROPHARMA","AXISBANK","BAJAJ-AUTO","BAJAJFINSV",
+              "BAJFINANCE","BALKRISIND","BANDHANBNK","BANKBARODA","BATAINDIA","BEL","BERGEPAINT","BHARATFORG",
+              "BHARTIARTL","BHEL","BIOCON","BOSCHLTD","BPCL","BRITANNIA","CADILAHC","CANBK","CENTURYTEX",
+              "CHOLAFIN","CIPLA","COALINDIA","COLPAL","CONCOR","CUMMINSIND","DABUR","DIVISLAB","DLF",
+              "DRREDDY","EICHERMOT","EQUITAS","ESCORTS","EXIDEIND","FEDERALBNK","GAIL","GLENMARK","GMRINFRA",
+              "GODREJCP","GODREJPROP","GRASIM","HAVELLS","HCLTECH","HDFC","HDFCBANK","HDFCLIFE","HEROMOTOCO",
+               "HINDALCO","HINDPETRO","HINDUNILVR","IBULHSGFIN","ICICIBANK","ICICIPRULI","IDEA","IDFCFIRSTB",
+               "IGL","INDIGO","INDUSINDBK","INFRATEL","INFY","IOC","ITC","JINDALSTEL","JSWSTEEL","JUBLFOOD",
+               "JUSTDIAL","KOTAKBANK","L&TFH","LICHSGFIN","LT","LUPIN","M&M","M&MFIN","MANAPPURAM","MARICO",
+              "MARUTI","MCDOWELL-N","MFSL","MGL","MINDTREE","MOTHERSUMI","MRF","MUTHOOTFIN","NATIONALUM",
+              "NAUKRI","NCC","NESTLEIND","NIITTECH","NMDC","NTPC","ONGC","PAGEIND","PEL","PETRONET","PFC",
+              "PIDILITIND","PNB","POWERGRID","PVR","RAMCOCEM","RBLBANK","RECLTD","RELIANCE","SAIL","SBILIFE",
+              "SBIN","SHREECEM","SIEMENS","SRF","SRTRANSFIN","SUNPHARMA","SUNTV","TATACHEM","TATACONSUM",
+              "TATAMOTORS","TATAPOWER","TATASTEEL","TCS","TECHM","TITAN","TORNTPHARM","TORNTPOWER","TVSMOTOR",
+              "UBL","UJJIVAN","ULTRACEMCO","UPL","VEDL","VOLTAS","WIPRO","ZEEL"]
+
+Scriplist = ["TCS","TATAPOWER","REDINGTON","SAIL"]
+YahooScriplist = ["RELIANCE.NS", "HDFCBANK.NS", "TATASTEEL.NS", "TCS.NS", "TATAMOTORS.NS","TATAPOWER.NS","INDIGO.NS","IDEA.NS","OIL.NS","AUROPHARMA.NS","CIPLA.NS","FEDERALBNK.NS","AXISBANK.NS","ZEEL.NS"]
+IndexList = ["NIFTY","NIFTYIT","BANKNIFTY","INDIAVIX"]
 #################################Global Variables
 #Creating strike List
 strike = []
 expiry = []
-date = []
+Optdatelist = []
+#Check for file
 
 def FindFeather(name, path):
     for root, dirs, files in os.walk(path):
         if name in files:
             return os.path.join(root, name)
 
-        
+def business_days(start, end):
+    mask = pd.notnull(start) & pd.notnull(end)
+    start = start.values.astype('datetime64[D]')[mask]
+    end = end.values.astype('datetime64[D]')[mask]
+    result = np.empty(len(mask), dtype=float)
+    result[mask] = np.busday_count(start, end)
+    result[~mask] = np.nan
+    return result
+
 def call_otm(df, date):
 	copy_df = df
 	copy_df = copy_df[copy_df['Option type'] == 'CE']
@@ -70,7 +176,7 @@ def max_pain_strike(call_sums, put_sums):
 	mpp = cumulative['Strike Price'][cumulative['cp_sum'].idxmax()]
 	return mpp    
 
-def GetMaxPain(Scrip,FirstDate): #Depth is considered in months to see historical expiry and pain
+def GetMaxPain(Scrip,OptionsFrameStart): #Depth is considered in months to see historical expiry and pain
     # for Scrip in NSEFnOList:
     # Scrip = 'RELIANCE'
     OptionsFileName = Scrip + '_' + MonthlyOptionsFilePath
@@ -81,32 +187,627 @@ def GetMaxPain(Scrip,FirstDate): #Depth is considered in months to see historica
     if (FindFeather(OptionsFileName, './Datastore')):
         ReadOptionsdf = feather.read_feather('./Datastore/'+OptionsFileName)
         OptionsSlice = ReadOptionsdf.copy()
-
-        # MLdf = ReadOptionsdf[(ReadOptionsdf['Date'] ==  SelectDate)]
-        # ExpiryDate = MLdf['Expiry'].values[0] #The month in focus
-        # OptionsSlice = ReadOptionsdf[(ReadOptionsdf['Expiry'] ==  ExpiryDate)]
-        d = FirstDate - timedelta(days=1)
-        OptionsSlice[OptionsSlice.Date > d]
+        d = OptionsFrameStart - datetime.timedelta(days=1)
+        OptionsSlice = OptionsSlice[OptionsSlice.Date > d]
         
-        date = []
+        Optdatelist = []
         #Adding values to list
-        date = list(OptionsSlice['Date'])
+        Optdatelist = list(OptionsSlice['Date'])
         #Removing duplicates in list
-        date = list(dict.fromkeys(date))
+        Optdatelist = list(dict.fromkeys(Optdatelist))
         #Sorting list
-        date.sort()
+        Optdatelist.sort()
         
-        for Focusdate in date:
+        Focusdatelist = []
+        MaxPainlist = []
+        PCRlist = []
+        
+        for Focusdate in Optdatelist:
             call_sums = call_otm(OptionsSlice, Focusdate)
             put_sums = put_otm(OptionsSlice, Focusdate)
             PCR = put_sums['Open Int'].sum()/call_sums['Open Int'].sum()
             MP = max_pain_strike(call_sums, put_sums)
-            MaxPaindf['Date'] = Focusdate
-            MaxPaindf['MaxPain'] = MP
-            MaxPaindf['Expiry'] = ExpiryDate
-            MaxPaindf['PCR'] = PCR
+            Focusdatelist.append(Focusdate)
+            MaxPainlist.append(MP)
+            PCRlist.append(PCR)
             # print(Scrip,ExpiryDate,Focusdate,MP,PCR)
+            
+        MaxPaindf = pd.DataFrame({'Date': Focusdatelist,'MaxPain': MaxPainlist,'PCR': PCRlist})
         return MaxPaindf
-    
+        
+def MACD(DF,a,b,c):
+    """function to calculate MACD
+       typical values a = 12; b =26, c =9"""
+    df = DF.copy()
+    df["MA_Fast"]=df["Close"].ewm(span=a,min_periods=a).mean()
+    df["MA_Slow"]=df["Close"].ewm(span=b,min_periods=b).mean()
+    df["MACD"]=df["MA_Fast"]-df["MA_Slow"]
+    df["Signal"]=df["MACD"].ewm(span=c,min_periods=c).mean()
+    df.dropna(inplace=True)
+    return df
 
-Mpdf = GetMaxPain(ScripName)
+def RSI(DF,n):
+    "function to calculate RSI"
+    df = DF.copy()
+    df['delta']=df['Close'] - df['Close'].shift(1)
+    df['gain']=np.where(df['delta']>=0,df['delta'],0)
+    df['loss']=np.where(df['delta']<0,abs(df['delta']),0)
+    avg_gain = []
+    avg_loss = []
+    gain = df['gain'].tolist()
+    loss = df['loss'].tolist()
+    for i in range(len(df)):
+        if i < n:
+            avg_gain.append(np.NaN)
+            avg_loss.append(np.NaN)
+        elif i == n:
+            avg_gain.append(df['gain'].rolling(n).mean().tolist()[n])
+            avg_loss.append(df['loss'].rolling(n).mean().tolist()[n])
+        elif i > n:
+            avg_gain.append(((n-1)*avg_gain[i-1] + gain[i])/n)
+            avg_loss.append(((n-1)*avg_loss[i-1] + loss[i])/n)
+    df['avg_gain']=np.array(avg_gain)
+    df['avg_loss']=np.array(avg_loss)
+    df['RS'] = df['avg_gain']/df['avg_loss']
+    df['RSI'] = 100 - (100/(1+df['RS']))
+    return df['RSI']
+
+def ADX(DF,n):
+    "function to calculate ADX"
+    # df2 = Indicatordf.copy()
+    # n = 20
+    df2 = DF.copy()
+    df2['TR'] = ATR(df2,n)['TR'] #the period parameter of ATR function does not matter because period does not influence TR calculation
+    df2['DMplus']=np.where((df2['High']-df2['High'].shift(1))>(df2['Low'].shift(1)-df2['Low']),df2['High']-df2['High'].shift(1),0)
+    df2['DMplus']=np.where(df2['DMplus']<0,0,df2['DMplus'])
+    df2['DMminus']=np.where((df2['Low'].shift(1)-df2['Low'])>(df2['High']-df2['High'].shift(1)),df2['Low'].shift(1)-df2['Low'],0)
+    df2['DMminus']=np.where(df2['DMminus']<0,0,df2['DMminus'])
+    TRn = []
+    DMplusN = []
+    DMminusN = []
+    TR = df2['TR'].tolist()
+    DMplus = df2['DMplus'].tolist()
+    DMminus = df2['DMminus'].tolist()
+    for i in range(len(df2)):
+        if i < n:
+            TRn.append(np.NaN)
+            DMplusN.append(np.NaN)
+            DMminusN.append(np.NaN)
+        elif i == n:
+            TRn.append(df2['TR'].rolling(n).sum().tolist()[n])
+            DMplusN.append(df2['DMplus'].rolling(n).sum().tolist()[n])
+            DMminusN.append(df2['DMminus'].rolling(n).sum().tolist()[n])
+        elif i > n:
+            TRn.append(TRn[i-1] - (TRn[i-1]/n) + TR[i])
+            DMplusN.append(DMplusN[i-1] - (DMplusN[i-1]/n) + DMplus[i])
+            DMminusN.append(DMminusN[i-1] - (DMminusN[i-1]/n) + DMminus[i])
+    df2['TRn'] = np.array(TRn)
+    df2['DMplusN'] = np.array(DMplusN)
+    df2['DMminusN'] = np.array(DMminusN)
+    df2['DIplusN']=100*(df2['DMplusN']/df2['TRn'])
+    df2['DIminusN']=100*(df2['DMminusN']/df2['TRn'])
+    df2['DIdiff']=abs(df2['DIplusN']-df2['DIminusN'])
+    df2['DIsum']=df2['DIplusN']+df2['DIminusN']
+    df2['DX']=100*(df2['DIdiff']/df2['DIsum'])
+    ADX = []
+    DX = df2['DX'].tolist()
+    for j in range(len(df2)):
+        if j < 2*n-1:
+            ADX.append(np.NaN)
+        elif j == 2*n-1:
+            ADX.append(df2['DX'][j-n+1:j+1].mean())
+        elif j > 2*n-1:
+            ADX.append(((n-1)*ADX[j-1] + DX[j])/n)
+    df2['ADX']=np.array(ADX)
+    return df2#['ADX']['DIplusN']['DIminusN']
+
+def OBV(DF):
+    """function to calculate On Balance Volume"""
+    df = DF.copy()
+    df['daily_ret'] = df['Close'].pct_change()
+    df['direction'] = np.where(df['daily_ret']>=0,1,-1)
+    df['direction'][0] = 0
+    df['vol_adj'] = df['Volume'] * df['direction']
+    df['obv'] = df['vol_adj'].cumsum()
+    return df
+            
+def ATR(DF,n):
+    "function to calculate True Range and Average True Range"
+    df = DF.copy()
+    df['H-L']=abs(df['High']-df['Low'])
+    df['H-PC']=abs(df['High']-df['Close'].shift(1))
+    df['L-PC']=abs(df['Low']-df['Close'].shift(1))
+    df['TR']=df[['H-L','H-PC','L-PC']].max(axis=1,skipna=False)
+    df['ATR'] = df['TR'].rolling(n).mean()
+    #df['ATR'] = df['TR'].ewm(span=n,adjust=False,min_periods=n).mean()
+    df2 = df.drop(['H-L','H-PC','L-PC'],axis=1)
+    return df2
+
+def slope(ser,n):
+    "function to calculate the slope of regression line for n consecutive points on a plot"
+    ser = (ser - ser.min())/(ser.max() - ser.min())
+    x = np.array(range(len(ser)))
+    x = (x - x.min())/(x.max() - x.min())
+    slopes = [i*0 for i in range(n-1)]
+    for i in range(n,len(ser)+1):
+        y_scaled = ser[i-n:i]
+        x_scaled = x[i-n:i]
+        x_scaled = sm.add_constant(x_scaled)
+        model = sm.OLS(y_scaled,x_scaled)
+        results = model.fit()
+        #results.summary()
+        slopes.append(results.params[-1])
+    slope_angle = (np.rad2deg(np.arctan(np.array(slopes))))
+    return np.array(slope_angle)
+
+def Renko_DF(DF,ticker):
+    "function to convert ohlc data into renko bricks"
+    df = DF.copy()
+    if (ticker =="NIFTY" or ticker == "BANKNIFTY"):
+        df = df.iloc[:,[0,2,3,1,4,5]]
+    else:    
+        df = df.iloc[:,[0,5,6,4,8,10]]
+    df.rename(columns = {"Date" : "date", "High" : "high","Low" : "low", "Open" : "open","Close" : "close", "Volume" : "volume"}, inplace = True)
+    df2 = Renko(df)
+    df2.brick_size = round(ATR(DF,120)["ATR"].iloc[-1],0)
+    renko_df = df2.get_ohlc_data() #if using older version of the library please use get_bricks() instead
+    return renko_df
+
+def PlotRenko(DF,num_bars):
+    # Turn interactive mode off
+    plt.ioff()
+
+    df = DF.copy()
+    # get the last num_bars
+    df = df.tail(num_bars)
+    renkos = zip(df['open'],df['close'])
+ 
+    # compute the price movement in the Renko
+    price_move = abs(df.iloc[1]['open'] - df.iloc[1]['close'])
+ 
+    # create the figure
+    fig = plt.figure(1)
+    fig.clf()
+    axes = fig.gca()
+ 
+    # plot the bars, blue for 'up', red for 'down'
+    index = 1
+    for open_price, close_price in renkos:
+        if (open_price < close_price):
+            renko = matplotlib.patches.Rectangle((index,open_price), 1, close_price-open_price, edgecolor='darkgreen', facecolor='green', alpha=0.5)
+            axes.add_patch(renko)
+        else:
+            renko = matplotlib.patches.Rectangle((index,open_price), 1, close_price-open_price, edgecolor='darkred', facecolor='red', alpha=0.5)
+            axes.add_patch(renko)
+        index = index + 1
+ 
+    # adjust the axes
+    plt.xlim([0, num_bars])
+    plt.ylim([min(min(df['open']),min(df['close'])), max(max(df['open']),max(df['close']))])
+    fig.suptitle('Bars from ' + min(df['date']).strftime("%d-%b-%Y") + " to " + max(df['date']).strftime("%d-%b-%Y") \
+        + '\nPrice movement = ' + str(price_move), fontsize=14)
+    plt.xlabel('Bar Number')
+    plt.ylabel('Price')
+    #plt.figsize = (16,9)
+    plt.grid(True)
+    plt.show()
+
+def BollBnd(DF,n):
+    "function to calculate Bollinger Band"
+    df = DF.copy()
+    df["MA"] = df['Close'].rolling(n).mean()
+    df["BB_up"] = df["MA"] + 2*df['Close'].rolling(n).std(ddof=0) #ddof=0 is required since we want to take the standard deviation of the population and not sample
+    df["BB_dn"] = df["MA"] - 2*df['Close'].rolling(n).std(ddof=0) #ddof=0 is required since we want to take the standard deviation of the population and not sample
+    df["BB_width"] = df["BB_up"] - df["BB_dn"]
+    df.dropna(inplace=True)
+    return df
+
+def plot_chart(DF, n, ticker, Dividend):
+
+    # n = 100
+    # ticker = "UJJIVAN"
+    # data = Indicatordf.copy()
+    data = DF.copy()
+
+    # Renkodata = Renko_DF(data,ticker)
+    # #DF amd number of latest bricks
+    # PlotRenko(Renkodata,100)
+
+    data = data.iloc[-n:]    
+    if(ticker != "NIFTY" and ticker != "BANKNIFTY"):
+        data.drop(data.iloc[:, [1,2,3,7]], inplace = True, axis = 1) #This line is required for candles
+
+    OptionsFileName = ticker + '_' + MonthlyOptionsFilePath
+    #Read from feather
+    if (FindFeather(OptionsFileName, './Datastore/')):
+        OptionsFrameStart = data.iloc[0].Date
+        Mpdf = GetMaxPain(ticker,OptionsFrameStart)
+        data = pd.merge(data,Mpdf, on = 'Date', how = 'outer')
+        
+    FuturesFileName = ticker + '_' + FullFuturesFilePath
+    #Read from feather
+    if (FindFeather(FuturesFileName, './Datastore/')):
+        ReadFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
+       
+        d = OptionsFrameStart - datetime.timedelta(days=1) #Date to start from for axis alignment
+        FuturesSlice = ReadFuturesdf[ReadFuturesdf.Date > d]
+        Futdf = FuturesSlice[['Date', 'Expiry','Settle Price','Open Interest']].copy()
+        Futdf = Futdf.sort_values(by=['Date', 'Expiry'])
+        Futdf = Futdf.reset_index(drop=True)
+        
+        SettlePricedf = Futdf.groupby('Date')['Settle Price'].apply(lambda x: pd.Series(list(x))).unstack()
+        OpenInterestdf = Futdf.groupby('Date')['Open Interest'].apply(lambda x: pd.Series(list(x))).unstack()
+        ExpiryDatedf = Futdf.groupby('Date')['Expiry'].apply(lambda x: pd.Series(list(x))).unstack()
+
+        ExpiryDatedf = ExpiryDatedf.reset_index(level=0)
+        ExpiryDatedf = ExpiryDatedf.rename(columns={0: 'NearExpiry',1:'MidExpiry',2:'FarExpiry'})
+        
+        OpenInterestdf = OpenInterestdf.reset_index(level=0)
+        OpenInterestdf = OpenInterestdf.rename(columns={0: 'NearOpenInterest',1:'MidOpenInterest',2:'FarOpenInterest'})        
+        
+        SettlePricedf = SettlePricedf.reset_index(level=0)
+        SettlePricedf = SettlePricedf.rename(columns={0: 'NearSettlePrice',1:'MidSettlePrice',2:'FarSettlePrice'})
+        
+        dfs = [ExpiryDatedf, OpenInterestdf, SettlePricedf]
+        Futdf = reduce(lambda left,right: pd.merge(left,right,on='Date'), dfs)
+        Futdf = pd.merge(data,Futdf, on = 'Date', how = 'outer')
+    
+    data.index = data["Date"].apply(lambda x: pd.Timestamp(x))
+    data.drop("Date", axis=1, inplace=True)
+    
+    # Create figure and set axes for subplots
+    fig = plt.figure()
+    
+    #plt.title(ticker)
+    fig.set_size_inches((40, 20))
+    ax_candle = fig.add_axes((0, 0.72, 0.49, 0.32))
+    ax_macd = fig.add_axes((0, 0.48, 0.49, 0.2), sharex=ax_candle)
+    ax_rsi = fig.add_axes((0, 0.24, 0.49, 0.2), sharex=ax_candle)
+    ax_vol = fig.add_axes((0, 0, 0.49, 0.2), sharex=ax_candle)
+    
+    ax_bba = fig.add_axes((0.51, 0.72,0.49, 0.32), sharex=ax_candle)
+    ax_obv = fig.add_axes((0.51, 0.48, 0.49, 0.2), sharex=ax_candle)
+    ax_atr = fig.add_axes((0.51, 0.24, 0.49, 0.2), sharex=ax_candle)
+    ax_beta = fig.add_axes((0.51, 0, 0.49, 0.2), sharex=ax_candle)
+    
+    # Format x-axis ticks as dates
+    ax_candle.xaxis_date()
+    
+    # Get nested list of date, open, high, low and close prices
+    ohlc = []
+    for date, row in data.iterrows():
+        openp, highp, lowp, closep = row[:4]
+        ohlc.append([date2num(date), openp, highp, lowp, closep])
+ 
+    # Plot candlestick chart
+    ax_candle.plot(data.index, data["Close"], label=ticker +" Price")
+    ax_candle.plot(data.index, data["10DMA"], label="MA10")
+    ax_candle.plot(data.index, data["50DMA"], label="MA50")
+    candlestick_ohlc(ax_candle, ohlc, colorup="g", colordown="r", width=0.8)
+    ax_candle.legend()
+    
+    # Plot MACD
+    ax_macd.plot(data.index, data["MACD"], label="MACD")
+    ax_macd.bar(data.index, (data["MACD"] -data["Signal"]) * 3, label="hist")
+    ax_macd.plot(data.index, data["Signal"], label="Signal")
+    ax_macd.legend()
+    
+    # Plot RSI & ADX bands
+    # Above 70% = overbought, below 30% = oversold
+    ax_rsi.set_ylabel("(%)")
+    ax_rsi.plot(data.index, [80] * len(data.index), label="overbought")
+    ax_rsi.plot(data.index, [20] * len(data.index), label="oversold")
+    ax_rsi.plot(data.index, [50] * len(data.index))
+    ax_rsi.plot(data.index, data["RSI"], label="RSI", color = 'lightpink')
+    ax_rsi.plot(data.index, data["ADX"], label="ADX", color = 'blue')
+    ax_rsi.plot(data.index, data["DIplusN"], label="DI+", color = 'green')
+    ax_rsi.plot(data.index, data["DIminusN"], label="DI-", color = 'red')
+    ax_rsi.legend()
+    
+    # Show volume in millions
+    ax_vol.bar(data.index, data["Volume"] / 100000, label="Volume")
+    if(ticker != "NIFTY" and ticker != "BANKNIFTY"):
+        ax_vol.bar(data.index, data["Deliverable Volume"] / 100000, label="Deliverable")
+    ax_vol.set_ylabel("(Lakh(s))")
+    ax_vol.legend()
+
+    # # Plot BB
+    # # MA, BB_up and BB_dn. Expansion = Greater Volatility
+    # ax_bba.set_ylabel("BBands")
+    ax_bba.plot(data.index, data["BB_up"], label="BB_up")
+    ax_bba.plot(data.index, data["BB_dn"], label="BB_dn")
+    ax_bba.plot(data.index, data["MA"], label="MA")
+    ax_bba.legend()
+    
+    # # Plot OBV
+    # # MA, BB_up and BB_dn. Expansion = Greater Volatility   
+    # ax_obv.set_ylabel("On Balance Volume")
+    ax_obv.plot(data.index, data["OBV"]/ 100000, label="OBV")
+    ax_obv.set_ylabel("(Lakh(s))")
+    ax_obv.legend()
+
+    # # Plot ATR
+    # # MA, BB_up and BB_dn. Expansion = Greater Volatility    
+    # ax_atr.set_ylabel("Trading range")
+    ax_atr.plot(data.index, data["TR"], label="TR")
+    ax_atr.plot(data.index, data["ATR"], label="ATR")
+    ax_atr.legend()
+    
+    # Plot Beta and deliverable
+    # Above 70% = overbought, below 30% = oversold
+    #ax_beta.set_ylabel("Beta")
+    ax_beta.plot(data.index, data["Beta"], label="Beta")
+    if(ticker != "NIFTY" and ticker != "BANKNIFTY"):    
+        ax_beta.plot(data.index, data["%Deliverble"], label="% Deliverable")
+    ax_beta.legend()    
+
+    # Save the chart as PNG
+    #fig.savefig("charts/" + ticker + ".png", bbox_inches="tight")
+    
+    plt.show()
+    
+    fig2 = plt.figure()
+    fig2.set_size_inches((32, 18))
+    #[left, bottom, width, height] 
+    
+    ax_sma = fig2.add_axes((0, 0.72, 0.49, 0.32))
+    ax_trades = fig2.add_axes((0, 0.48, 0.49, 0.2), sharex=ax_sma)
+    ax_fibret = fig2.add_axes((0, 0.24, 0.49, 0.2), sharex=ax_sma)
+    ax_slope = fig2.add_axes((0, 0, 0.49, 0.2), sharex=ax_sma)
+    
+    ax_ema = fig2.add_axes((0.51, 0.72, 0.49, 0.32), sharex=ax_sma)
+    ax_maxpain = fig2.add_axes((0.51, 0.48, 0.49, 0.2), sharex=ax_sma)
+    ax_futures = fig2.add_axes((0.51, 0, 0.49, 0.45), sharex=ax_sma)
+      
+    ax_sma.xaxis_date()
+    
+    # Plot SMA chart
+    ax_sma.plot(data.index, data["Close"], label= ticker +" Price")
+    ax_sma.plot(data.index, data["10DMA"], label="10DMA")
+    ax_sma.plot(data.index, data["20DMA"], label="20DMA")
+    ax_sma.plot(data.index, data["50DMA"], label="50DMA")
+    ax_sma.plot(data.index, data["100DMA"], label="100DMA")
+    ax_sma.plot(data.index, data["200DMA"], label="200DMA")       
+    ax_sma.legend()
+    
+    # Plot MACD & Slope
+    ax_ema.plot(data.index, data["Close"], label= ticker +" Price")
+    ax_ema.plot(data.index, data["10DMA-E"], label="10DMA-E")
+    ax_ema.plot(data.index, data["20DMA-E"], label="20DMA-E")
+    ax_ema.plot(data.index, data["50DMA-E"], label="50DMA-E")
+    ax_ema.plot(data.index, data["80DMA-E"], label="80DMA-E")
+    ax_ema.plot(data.index, data["140DMA-E"], label="140DMA-E")       
+    ax_ema.legend()
+
+    #Read from feather
+    if (FindFeather(FuturesFileName, './Datastore/')):
+        StdDev = data['Log_Ret'].std() # Daily Std Deviation for volatility
+        DailyRet = data['Log_Ret'].mean()
+        pd.to_datetime(Futdf['Date'])
+        # Futdf.info()
+        # np.busday_count( pd.to_datetime(Futdf['Date']).values.astype('datetime64[D]'), pd.to_datetime(Futdf['NearExpiry']).values.astype('datetime64[D]'))
+        # np.busday_count(np.datetime64('2011-07-11'), np.datetime64('2011-07-18'))
+        
+        days = np.busday_count( OptionsFrameStart, datetime.date.today()) # Business days
+        
+        Futdf["NearFuturesFormula"] = Futdf["Close"] * (1+ (RiskFreeRate * (business_days( pd.to_datetime(Futdf['Date']),  pd.to_datetime(Futdf['NearExpiry']))/365))) - Dividend
+        Futdf["MidFuturesFormula"] = Futdf["Close"] * (1+ (RiskFreeRate * (business_days( pd.to_datetime(Futdf['Date']), pd.to_datetime(Futdf['MidExpiry']))/365))) - Dividend
+        Futdf["FarFuturesFormula"] = Futdf["Close"] * (1+ (RiskFreeRate * (business_days( pd.to_datetime(Futdf['Date']), pd.to_datetime(Futdf['FarExpiry']))/365))) - Dividend
+        # Futdf["OISlope"] = slope(Futdf["Open Interest"],10)
+        Average = DailyRet * days
+        SD = StdDev * math.sqrt(days)
+        
+        SD1up = Average + SD
+        SD1down = Average - SD
+        SD2up = Average + (2 * SD)
+        SD2down = Average - (2 * SD)
+        SD3up = Average + (3 * SD)
+        SD3down = Average - (3 * SD)
+        
+        StartingPrice = data.iloc[0].Close
+        
+        SD1upLevel = StartingPrice * math.exp(SD1up)
+        SD1downLevel = StartingPrice * math.exp(SD1down)
+        SD2upLevel = StartingPrice * math.exp(SD2up)
+        SD2downLevel = StartingPrice * math.exp(SD2down)
+        SD3upLevel = StartingPrice * math.exp(SD3up)
+        SD3downLevel = StartingPrice * math.exp(SD3down)
+        
+        Futdf.index = Futdf["Date"]
+        Futdf.drop("Date", axis=1, inplace=True)
+
+        ax_futures.plot(Futdf.index, Futdf["Close"], color="black",label="Price")
+        ax_futures.plot(Futdf.index, Futdf["NearSettlePrice"], color="gray",label="NearSP")
+        ax_futures.plot(Futdf.index, Futdf["NearFuturesFormula"], color="silver",label="NearFF")
+        
+        ax_futures.plot(Futdf.index, Futdf["MidSettlePrice"], color="blue",label="MidSP")
+        ax_futures.plot(Futdf.index, Futdf["MidFuturesFormula"], color="skyblue",label="MidFF")
+        
+        ax_futures.plot(Futdf.index, Futdf["FarSettlePrice"], color="darkorchid",label="FarSP")
+        ax_futures.plot(Futdf.index, Futdf["FarFuturesFormula"], color="plum",label="FarFF")
+
+        ax_futures.set_ylabel('Price')
+
+        ax_futures.plot(data.index, [StartingPrice] * len(data.index),label='SD1: '+str(SD)+',Average: '+str(Average) )
+        # ax_futures.axhspan(SD2downLevel, SD3downLevel, alpha=0.5, color='lightcoral', label=str(SD3downLevel) + ' -SD3')
+        # ax_futures.axhspan(SD1downLevel, SD2downLevel, alpha=0.5, color='lightsalmon', label=str(SD2downLevel)+ ' -SD2')
+        ax_futures.axhspan(StartingPrice, SD1downLevel, alpha=0.5, color='mistyrose', label=str(SD1downLevel)+ ' -SD1')
+        ax_futures.axhspan(SD1upLevel, StartingPrice, alpha=0.5, color='greenyellow', label=str(SD1upLevel)+ ' +SD1')
+        # ax_futures.axhspan(SD2upLevel, SD1upLevel, alpha=0.5, color='lime', label=str(SD2upLevel)+ ' +SD2')
+        # ax_futures.axhspan(SD3upLevel, SD2upLevel, alpha=0.5, color='green', label = str(SD3upLevel)+ ' +SD3')
+        ax_futures.legend()
+
+    if(ticker != "NIFTY" and ticker != "BANKNIFTY"):
+        ax_trades.plot(data.index, data["Trades"], label="Trades")
+    ax_trades.plot(data.index, data["Turnover"]/ 100000, label="Turnover")
+    # ax_trades.set_ylabel("(Lakh(s))")
+    ax_trades.legend()
+   
+    ax_slope.plot(data.index, data["Slope"], label="Slope")
+    ax_close = ax_slope.twinx()
+    ax_close.plot(data.index, data["Close"],color="blue",marker="o", label="Price")
+    ax_slope.set_ylabel('Slope')
+    ax_close.set_ylabel('Closing price')
+    ax_close.grid(b=False) # turn off grid #2
+    # ax_slope.plot(data.index, data["Close"], label="Price")
+    ax_slope.legend()
+    
+    "Retracement -23.6%, 38.2%, 50%, 61.8%, and 78.6%"
+    "Fibonacci extension levels are 161.8%, 261.8% and 423.6%."
+    # retracements = [23.6,38.2,50.00,61.8,76.4,78.6,85.40]
+    # extensions = [127.2,138.2,150.00,161.8,176.4,261.8,423.6]   
+
+    price_min = data.Low.min()
+    price_max = data.High.max()
+    diff = price_max - price_min
+    #Retracements
+
+    level1 = price_min + 0.236 * diff
+    level2 = price_min + 0.382 * diff
+    level3 = price_min + 0.5 * diff
+    level4 = price_min + 0.618 * diff
+    level5 = price_min + 0.786 * diff    
+    
+    ax_fibret.axhspan(level1, price_min, alpha=0.4, color='lightcoral', label=str(level1) + ' (0.236)')
+    ax_fibret.axhspan(level2, level1, alpha=0.5, color='lightsalmon', label=str(level2)+ ' (0.382)')
+    ax_fibret.axhspan(level3, level2, alpha=0.5, color='mistyrose', label=str(level3)+ ' (0.5)')
+    ax_fibret.axhspan(level4, level3, alpha=0.5, color='greenyellow', label=str(level4)+ ' (0.618)')
+    ax_fibret.axhspan(level5, level4, alpha=0.5, color='lime', label=str(level5)+ ' (0.786)')
+    ax_fibret.axhspan(price_max, level5, alpha=0.5, color='green', label = str(price_max)+ ' (1)')
+    ax_fibret.legend()
+
+    candlestick_ohlc(ax_fibret, ohlc, colorup="g", colordown="r", width=0.8)
+
+
+    #Extensons
+    level6 = price_max - 1.272 * diff    
+    level7 = price_max - 1.382 * diff 
+    level8 = price_max - 1.5 * diff 
+    level9 = price_max - 1.618 * diff 
+    level10 = price_max - 2.618 * diff
+    level11 = price_max - 4.236 * diff
+    
+    if (FindFeather(OptionsFileName, './Datastore/')):
+        ax_maxpain.plot(data.index, data["Close"], label="Price")
+        ax_maxpain.plot(data.index, data["MaxPain"],color="blue",marker="o", label="MaxPain")
+        ax_pcr = ax_maxpain.twinx()
+        ax_pcr.plot(data.index, data["PCR"],color="black",marker="*", label="PCR")
+        ax_maxpain.set_ylabel('Price')
+        ax_pcr.set_ylabel('PCR')
+        ax_pcr.grid(b=False) # turn off grid #2
+        # ax_maxpain.plot(data.index, data["Close"], label="Price")
+        ax_maxpain.legend()
+    else:
+        ax_maxpain.axhspan(level6, price_max, alpha=0.5, color='limegreen', label=str(level6)+ ' (1.272)')
+        ax_maxpain.axhspan(level7, level6, alpha=0.5, color='lime', label=str(level7)+ ' (1.382)')
+        ax_maxpain.axhspan(level8, level7, alpha=0.5, color='deepskyblue', label=str(level8)+ ' (1.5)')
+        ax_maxpain.axhspan(level9, level8, alpha=0.5, color='powderblue', label=str(level9)+ ' (1.618)')
+        ax_maxpain.legend()
+
+        candlestick_ohlc(ax_maxpain, ohlc, colorup="g", colordown="r", width=0.8)    
+    
+    plt.show()
+    
+    #Trendlines
+    # this will serve as an example for security or index closing prices, or low and high prices
+    Trendlinedf = data.copy()
+    TLClose = Trendlinedf[-n:].Close
+    mins, maxs = trendln.calc_support_resistance(TLClose)
+    minimaIdxs, pmin, mintrend, minwindows = trendln.calc_support_resistance((Trendlinedf[-n:].Low, None)) #support only
+    mins, maxs = trendln.calc_support_resistance((Trendlinedf[-n:].Low, Trendlinedf[-n:].High))
+    (minimaIdxs, pmin, mintrend, minwindows), (maximaIdxs, pmax, maxtrend, maxwindows) = mins, maxs
+
+    idx = Trendlinedf[-n:].index
+    fig3 = trendln.plot_sup_res_date((Trendlinedf[-n:].Low, Trendlinedf[-n:].High), idx) #requires pandas
+    fig3.set_size_inches((16, 9))
+    # plt.savefig('suppres.svg', format='svg')
+    plt.show()
+    # plt.clf() #clear figure
+
+def FnOAnalysis():
+    Finaldf = pd.DataFrame()
+    # for Scrip in NSE500ScripList:#Scriplist:
+    for Scrip in NSE500ScripList:        
+        OHLCdf = None
+        Indicatordf = None
+        Scrip = "ITC"
+        print('Now for '+ Scrip)
+        OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
+        #Read from feather
+        if (FindFeather(OHLCFileName, './Datastore/')):
+            OHLCdf = feather.read_feather('./Datastore/'+OHLCFileName)
+            Indicatordf = OHLCdf.copy()
+            Indicatordf = Indicatordf.set_index("Date")
+            if(Scrip is not "INDIAVIX"):
+                Indicatordf = MACD(Indicatordf, 12, 26, 9)
+            
+            Indicatordf = BollBnd(Indicatordf,20)
+            # Calculate ATR
+            Indicatordf = ATR(Indicatordf,20) #20 day rolling mean
+
+            # Indicatordf["ADX"] = talib.ADX(Indicatordf["High"], Indicatordf["Low"],
+            #                                Indicatordf["Close"], timeperiod=20)
+            ADXdf = ADX(Indicatordf,20)
+            Indicatordf['ADX'] = ADXdf['ADX']
+            Indicatordf['DIplusN'] = ADXdf['DIplusN']
+            Indicatordf['DIminusN'] = ADXdf['DIminusN']
+            #5 day rolling ADX
+            Indicatordf['ADXRoll5'] = Indicatordf['ADX'].rolling(5).mean()
+            #15 day rolling volume
+            Indicatordf['ADXRoll10'] = Indicatordf['ADX'].rolling(15).mean()            
+            #5 day rolling volume
+            Indicatordf['VolRoll5'] = Indicatordf['Volume'].rolling(5).mean()
+            #10 day rolling volume
+            Indicatordf['VolRoll10'] = Indicatordf['Volume'].rolling(10).mean()
+
+            # Identify chart patterns (e.g. two crows, three crows, three inside, engulging pattern etc.)
+            # OHLCdf["3I"] = talib.CDL3WHITESOLDIERS(OHLCdf["Open"],
+            #                                              OHLCdf["High"],
+            #                                              OHLCdf["Low"],
+            #                                              OHLCdf["Close"])
+            
+            # Statistical functions (e.g. beta, correlation etc.)
+            Indicatordf["Beta"] = talib.BETA(Indicatordf["High"],
+                                                 Indicatordf["Low"],
+                                                 timeperiod=14)
+            
+            Indicatordf["RSI"] = RSI(Indicatordf,14)
+            
+            OBVdf = OBV(Indicatordf)
+            Indicatordf["OBV"] = OBVdf["obv"]
+            Indicatordf["Daily_Ret"] = OBVdf['daily_ret']
+            Indicatordf["Log_Ret"] = np.log(1+ OBVdf['daily_ret'])
+            
+            Indicatordf["Slope"] = slope(Indicatordf["Close"],5)
+            
+            # Simple DMA - If you change MA timeframes here, you have to hcange in plot_chart
+            Indicatordf["10DMA"] = Indicatordf["Close"].rolling(window=10).mean()
+            Indicatordf["20DMA"] = Indicatordf["Close"].rolling(window=20).mean()
+            Indicatordf["50DMA"] = Indicatordf["Close"].rolling(window=50).mean()
+            Indicatordf["100DMA"] = Indicatordf["Close"].rolling(window=100).mean()
+            Indicatordf["200DMA"] = Indicatordf["Close"].rolling(window=200).mean() 
+           # Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip)     
+            # Exponential DMA - If you change MA timeframes here, you have to hcange in plot_chart
+            Indicatordf["10DMA-E"] = Indicatordf["Close"].ewm(span=10, adjust=False).mean()
+            Indicatordf["20DMA-E"] = Indicatordf["Close"].ewm(span=20, adjust=False).mean()
+            Indicatordf["50DMA-E"] = Indicatordf["Close"].ewm(span=50, adjust=False).mean()
+            Indicatordf["80DMA-E"] = Indicatordf["Close"].ewm(span=80, adjust=False).mean()
+            Indicatordf["140DMA-E"] = Indicatordf["Close"].ewm(span=140, adjust=False).mean()
+            #Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip) 
+            Indicatordf.reset_index(level=0, inplace=True)
+# ###################################################################################################            
+            plot_chart(Indicatordf,50,Scrip,0)
+###################################################################################################
+    #         feather.write_feather(Indicatordf, 'E:/Harish/nsepywork/TechnicalFrames/'+Scrip+'-dataframe.ftr')
+    #         ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)
+    #         # ReturnMLdf.to_csv(r'./OutputFrames/pandas.txt', header=None, index=None, sep=' ', mode='a')
+    #         Finaldf = Finaldf.append(ReturnMLdf, ignore_index=True)
+            
+    # Focusdate = ReturnMLdf['Date'].values[0]
+    # if not Finaldf.empty:
+    #     feather.write_feather(Finaldf, './OutputFrames/'+str(Focusdate)+'-G1dataframe.ftr')
+###################################################################################################
+
+def main():
+   TechAnalysis()
+
