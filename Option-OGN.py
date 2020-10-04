@@ -406,10 +406,10 @@ def BollBnd(DF,n):
 
 def plot_chart(DF, n, ticker, Dividend):
 
-    n = 50
-    ticker = "L&TFH"
-    data = Indicatordf.copy()
-    # data = DF.copy()
+    # n = 50
+    # ticker = "L&TFH"
+    # data = Indicatordf.copy()
+    data = DF.copy()
 
     # Renkodata = Renko_DF(data,ticker)
     # #DF amd number of latest bricks
@@ -430,7 +430,6 @@ def plot_chart(DF, n, ticker, Dividend):
     #Read from feather
     if (FindFeather(FuturesFileName, './Datastore/')):
         ReadFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
-        ReadFuturesdf.info()
         d = OptionsFrameStart - datetime.timedelta(days=1) #Date to start from for axis alignment
         FuturesSlice = ReadFuturesdf[ReadFuturesdf.Date > d]
         Futdf = FuturesSlice[['Date', 'Expiry','Settle Price','Open Interest']].copy()
@@ -692,7 +691,7 @@ def FnOAnalysis():
     for Scrip in NSEFnOList:        
         OHLCdf = None
         Indicatordf = None
-        Scrip = "L&TFH"
+        # Scrip = "L&TFH"
         print('Now for '+ Scrip)
         OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
         #Read from feather

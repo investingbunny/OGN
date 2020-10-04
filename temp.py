@@ -4,6 +4,33 @@ Created on Tue Aug 18 11:54:38 2020
 
 @author: User
 """
+    ExpiryDatedf = NewFuturesdf.groupby('Symbol')['Expiry'].apply(lambda x: pd.Series(list(x))).unstack() 
+    ExpiryDatedf = ExpiryDatedf.reset_index(level=0)
+    ExpiryDatedf = ExpiryDatedf.rename(columns={0: 'NearExpiry',1:'MidExpiry',2:'FarExpiry'})
+    
+    SettlePricedf = NewFuturesdf.groupby('Symbol')['Settle Price'].apply(lambda x: pd.Series(list(x))).unstack()
+    SettlePricedf = SettlePricedf.reset_index(level=0)
+    SettlePricedf = SettlePricedf.rename(columns={0: 'NearSettlePrice',1:'MidSettlePrice',2:'FarSettlePrice'})
+  
+    OpenInterestdf = NewFuturesdf.groupby('Symbol')['Open Interest'].apply(lambda x: pd.Series(list(x))).unstack()
+    OpenInterestdf = OpenInterestdf.reset_index(level=0)
+    OpenInterestdf = OpenInterestdf.rename(columns={0: 'NearOpenInterest',1:'MidOpenInterest',2:'FarOpenInterest'})        
+    
+    NoOfContractsdf = NewFuturesdf.groupby('Symbol')['Number of Contracts'].apply(lambda x: pd.Series(list(x))).unstack()
+    NoOfContractsdf = NoOfContractsdf.reset_index(level=0)
+    NoOfContractsdf = NoOfContractsdf.rename(columns={0: 'NearNoOfContracts',1:'MidNoOfContracts',2:'FarNoOfContracts'})        
+    
+  
+    dfs = [ExpiryDatedf, OpenInterestdf, SettlePricedf, NoOfContractsdf]
+    Futdf = reduce(lambda left,right: pd.merge(left,right,on='Symbol'), dfs)   
+    
+
+    if (FindFeather(FnOVolatilityArg, './New NSE site/')):
+        Volatilitydf = feather.read_feather('./New NSE site/'+FnOVolatilityArg) #Volatilitydf.info()
+        #Below Formatting is needed to clean up the csv and remove whitespaces
+        Volatilitydf = Volatilitydf.rename(columns=lambda x: x.strip())
+        Volatilitydf = Volatilitydf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        Mergedf = pd.merge(NewFuturesdf, Volatilitydf, how="outer", on=["Symbol"])
 
 df = pd.DataFrame({'Date': ['05-01-2018', '02-20-2020']})
 
