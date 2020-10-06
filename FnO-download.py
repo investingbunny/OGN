@@ -43,21 +43,22 @@ def UpdateBusinessDays():
     NiftyFullFutures = feather.read_feather('./Datastore/NIFTY_full-futures.ftr')
     FuturesStartDate = NiftyFullFutures.iloc[-1].Date
     FuturesStartDate += datetime.timedelta(days=1)
+    YesterdayDate = datetime.date.today() - datetime.timedelta(days=1)
 
-    bday = pd.bdate_range(FuturesStartDate, datetime.date.today()) #To be replaced with LastRecordDate, CurrentDate
+    bday = pd.bdate_range(FuturesStartDate, YesterdayDate) #To be replaced with LastRecordDate, CurrentDate
     bday = set(bday).difference(HolidayList)
     print('UpdateBusinessDays complete ')
 
 def DownloadNewNSEFnO():        
     #Loop through dates to download NSE Futures data
     for weekday in bday:
-        print('DownloadNewNSEFnO for'+weekday)
+        print('DownloadNewNSEFnO for'+ weekday.strftime("%Y-%m-%d"))
         #FnO Market report download
         FnOReportArg = 'fo' + weekday.strftime("%d%m%Y") + '.zip'
         FnOReportURL = FnOReport + FnOReportArg
         try:
             r = requests.get(FnOReportURL, allow_redirects=True) #Download FnO Market report for 'weekday'
-            open(FnOReportArg, 'wb').write(r.content)
+            open('./New NSE site/'+FnOReportArg, 'wb').write(r.content)
         except:
             print('Couldnt download:'+ FnOReportURL)
 
@@ -124,15 +125,17 @@ def UpdatetNSEFuturesData():
     
     #Update the old Futures file
     for sym in FnOSymbollist:
-        print('Updating Futures for '+ sym)
+        
         FuturesFileName = sym + '_' + FullFuturesFilePath
         #Read from feather
         if (FindFeather(FuturesFileName, './Datastore/')):
             OldFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
             # OldFuturesdf.drop("index", axis=1, inplace=True) #DO NOT ENABLE!!!
             # OldFuturesdf = OldFuturesdf[OldFuturesdf.Date < FnOStartDate] #DO NOT ENABLE!!!
+            print('Updating Futures for '+ sym)
             Mergedf = OldFuturesdf.append(TotalNewFuturesdf[TotalNewFuturesdf["Symbol"] == sym], ignore_index = True)            
         else: #A new symbol has been added, create a feather for it
+            print('Creating new Futures DB for '+ sym)
             Mergedf = TotalNewFuturesdf[TotalNewFuturesdf["Symbol"] == sym]#, ignore_index = True)
             Mergedf.reset_index(level=0, inplace=True)
             Mergedf.drop("index", axis=1, inplace=True)
