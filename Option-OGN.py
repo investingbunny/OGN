@@ -757,7 +757,7 @@ def FnOAnalysis():
             #Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip) 
             Indicatordf.reset_index(level=0, inplace=True)
 # ###################################################################################################            
-            plot_chart(Indicatordf,50,Scrip,0)
+            plot_chart(Indicatordf,40,Scrip,0)
 ###################################################################################################
     #         feather.write_feather(Indicatordf, 'E:/Harish/nsepywork/TechnicalFrames/'+Scrip+'-dataframe.ftr')
     #         ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)

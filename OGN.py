@@ -20,7 +20,7 @@ import time
 from dateutil.relativedelta import *
 import os
 
-DailyOHLCFilePath = "ohlc.ftr";
+DailyOHLCFilePath = "ohlc.ftr"
 IntradayFilePath = "intraday.ftr"
 MonthlyFuturesFilePath = "monthly-futures.ftr"
 FullFuturesFilePath = "full-futures.ftr"

@@ -43,7 +43,7 @@ def UpdateBusinessDays():
     NiftyFullFutures = feather.read_feather('./Datastore/NIFTY_full-futures.ftr')
     FuturesStartDate = NiftyFullFutures.iloc[-1].Date
     FuturesStartDate += datetime.timedelta(days=1)
-    YesterdayDate = datetime.date.today() - datetime.timedelta(days=1)
+    YesterdayDate = datetime.date.today()# - datetime.timedelta(days=1)
 
     bday = pd.bdate_range(FuturesStartDate, YesterdayDate) #To be replaced with LastRecordDate, CurrentDate
     bday = set(bday).difference(HolidayList)
