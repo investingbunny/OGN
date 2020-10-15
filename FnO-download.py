@@ -18,7 +18,7 @@ import pyarrow
 import pyarrow.feather as feather
 from functools import reduce
 
-FnOStartDate = date(2020,9,1)
+# FnOStartDate = date(2020,9,1)
 FnOReport = 'https://archives.nseindia.com/archives/fo/mkt/'
 FnOVolatility = 'https://archives.nseindia.com/archives/nsccl/volt/'
 FnOSettlement = 'https://archives.nseindia.com/archives/nsccl/sett/'
@@ -26,11 +26,6 @@ FnOBhavcopy = 'https://archives.nseindia.com/content/historical/DERIVATIVES/'
 MonthlyFuturesFilePath = "monthly-futures.ftr"
 FullFuturesFilePath = "full-futures.ftr"
 MonthlyOptionsFilePath = "monthly-options.ftr"
-
-# FnOBhavCopy = 'https://archives.nseindia.com/content/historical/DERIVATIVES/'#2020/OCT/fo01OCT2020bhav.csv.zip
-
-# FnOReportArg #fo30092020.zip
-# FnOVolatilityArg #FOVOLT_29092020.csv
 HolidayList = ['21-Feb-20','10-Mar-20','2-Apr-20','6-Apr-20','10-Apr-20','14-Apr-20','1-May-20','25-May-20','2-Oct-20','16-Nov-20','30-Nov-20','25-Dec-20']
 HolidayList = pd.to_datetime(pd.Series(HolidayList), format='%d-%b-%y')
 
@@ -46,7 +41,7 @@ def UpdateBusinessDays():
     FuturesStartDate += datetime.timedelta(days=1)
     YesterdayDate = datetime.date.today() - datetime.timedelta(days=1)
 
-    bday = pd.bdate_range(FnOStartDate, YesterdayDate) #To be replaced with LastRecordDate, CurrentDate
+    bday = pd.bdate_range(FuturesStartDate, YesterdayDate) #To be replaced with LastRecordDate, CurrentDate
     bday = set(bday).difference(HolidayList)
     print('UpdateBusinessDays complete ')
 
