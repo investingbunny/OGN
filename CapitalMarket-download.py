@@ -38,7 +38,7 @@ def UpdateBusinessDays():
     NiftyOHLC = feather.read_feather('./Datastore/NIFTY_ohlc.ftr')
     OHLCStartDate = NiftyOHLC.iloc[-1].Date
     OHLCStartDate += datetime.timedelta(days=1)
-    YesterdayDate = datetime.date.today()# - datetime.timedelta(days=1)
+    YesterdayDate = datetime.date.today() - datetime.timedelta(days=1)
 
     bday = pd.bdate_range(OHLCStartDate, YesterdayDate) #To be replaced with LastRecordDate, CurrentDate
     bday = set(bday).difference(HolidayList)
