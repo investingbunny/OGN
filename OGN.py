@@ -991,7 +991,7 @@ def main():
     # FullFuturesUpdate()
     IntradayUpdate()
     FXPEUpdate()
-    MonthlyOptionsUpdate()
+    # MonthlyOptionsUpdate()
     
-# hhhhhhhhhhhh = feather.read_feather('./Datastore/'+'CENTURYTEX_monthly-futures.ftr')    
+# hhhhhhhhhhhh.info() = feather.read_feather('./Datastore/'+'NIFTY_monthly-options.ftr')    
 # dd = get_expiry_date(2020,11)

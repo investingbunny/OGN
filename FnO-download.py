@@ -22,6 +22,7 @@ FnOStartDate = date(2020,9,1)
 FnOReport = 'https://archives.nseindia.com/archives/fo/mkt/'
 FnOVolatility = 'https://archives.nseindia.com/archives/nsccl/volt/'
 FnOSettlement = 'https://archives.nseindia.com/archives/nsccl/sett/'
+FnOBhavcopy = 'https://archives.nseindia.com/content/historical/DERIVATIVES/'
 MonthlyFuturesFilePath = "monthly-futures.ftr"
 FullFuturesFilePath = "full-futures.ftr"
 MonthlyOptionsFilePath = "monthly-options.ftr"
@@ -43,15 +44,29 @@ def UpdateBusinessDays():
     NiftyFullFutures = feather.read_feather('./Datastore/NIFTY_full-futures.ftr')
     FuturesStartDate = NiftyFullFutures.iloc[-1].Date
     FuturesStartDate += datetime.timedelta(days=1)
-    YesterdayDate = datetime.date.today()# - datetime.timedelta(days=1)
+    YesterdayDate = datetime.date.today() - datetime.timedelta(days=1)
 
-    bday = pd.bdate_range(FuturesStartDate, YesterdayDate) #To be replaced with LastRecordDate, CurrentDate
+    bday = pd.bdate_range(FnOStartDate, YesterdayDate) #To be replaced with LastRecordDate, CurrentDate
     bday = set(bday).difference(HolidayList)
     print('UpdateBusinessDays complete ')
 
 def DownloadNewNSEFnO():        
     #Loop through dates to download NSE Futures data
     for weekday in bday:
+        # 2020/OCT/fo14OCT2020bhav.csv.zip
+        FnOBhavMonth = weekday.strftime("%b").upper()
+        FnOBhavYear = weekday.strftime("%Y")
+        
+        print('Download NSEFnOBhav for '+ weekday.strftime("%Y-%m-%d"))
+        #FnO Bhav report download
+        FnOBhavArg = 'fo' + weekday.strftime("%d%b%Y").upper() + 'bhav.csv.zip'
+        FnOBhavURL = FnOBhavcopy + FnOBhavYear + '/' + FnOBhavMonth + '/' + FnOBhavArg
+        try:
+            r = requests.get(FnOBhavURL, allow_redirects=True) #Download FnO Market report for 'weekday'
+            open('./New NSE site/'+FnOBhavArg, 'wb').write(r.content)
+        except:
+            print('Couldnt download:'+ FnOBhavURL)
+        
         print('DownloadNewNSEFnO for'+ weekday.strftime("%Y-%m-%d"))
         #FnO Market report download
         FnOReportArg = 'fo' + weekday.strftime("%d%m%Y") + '.zip'
@@ -61,7 +76,6 @@ def DownloadNewNSEFnO():
             open('./New NSE site/'+FnOReportArg, 'wb').write(r.content)
         except:
             print('Couldnt download:'+ FnOReportURL)
-
             
         #FnO Volatility report download
         FnOVolatilityArg = 'FOVOLT_' + weekday.strftime("%d%m%Y") + '.csv'
@@ -130,18 +144,107 @@ def UpdatetNSEFuturesData():
         #Read from feather
         if (FindFeather(FuturesFileName, './Datastore/')):
             OldFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
-            # OldFuturesdf.drop("index", axis=1, inplace=True) #DO NOT ENABLE!!!
-            # OldFuturesdf = OldFuturesdf[OldFuturesdf.Date < FnOStartDate] #DO NOT ENABLE!!!
             print('Updating Futures for '+ sym)
             Mergedf = OldFuturesdf.append(TotalNewFuturesdf[TotalNewFuturesdf["Symbol"] == sym], ignore_index = True)            
         else: #A new symbol has been added, create a feather for it
             print('Creating new Futures DB for '+ sym)
             Mergedf = TotalNewFuturesdf[TotalNewFuturesdf["Symbol"] == sym]#, ignore_index = True)
-            Mergedf.reset_index(level=0, inplace=True)
-            Mergedf.drop("index", axis=1, inplace=True)
             
         if not Mergedf.empty:
             feather.write_feather(Mergedf, './Datastore/'+FuturesFileName)
+            
+def UpdatetNSEOptionsData():
+    TotalNewOptionsdf = pd.DataFrame()
+    for weekday in bday:  # weekday = YesterdayDate
+        FnOBhavArg = 'fo' + weekday.strftime("%d%b%Y").upper() + 'bhav'
+        print('Processing '+FnOBhavArg)
+        zf = ZipFile('New NSE site/'+FnOBhavArg+ '.csv.zip')  #fo12OCT2020bhav.csv.zip
+        CSVdf = pd.read_csv(zf.open(FnOBhavArg+'.csv'), parse_dates=[2], dayfirst=True) #fo12OCT2020bhav
+        CSVdf = CSVdf.rename(columns=lambda x: x.strip())
+        CSVdf = CSVdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        NewOptionsdf = RefineNewNSEOptions(CSVdf)
+        NewOptionsdf = NewOptionsdf[(NewOptionsdf["Instrument"] == 'OPTIDX') | (NewOptionsdf["Instrument"] == 'OPTSTK')]
+        
+        TotalNewOptionsdf = TotalNewOptionsdf.append(NewOptionsdf, ignore_index=True)
+    
+    TotalNewOptionsdf = TotalNewOptionsdf.sort_values(by=['Symbol', 'Date'])
+    FnOSymbollist = []
+    #Adding values to list
+    FnOSymbollist = list(TotalNewOptionsdf['Symbol'])
+    #Removing duplicates in list
+    FnOSymbollist = list(dict.fromkeys(FnOSymbollist))
+    
+    #Update the old Options file
+    for sym in FnOSymbollist:
+        OptionsFileName = sym + '_' + MonthlyOptionsFilePath
+        #Read from feather
+        if (FindFeather(OptionsFileName, './Datastore/')):
+            OldOptionsdf = feather.read_feather('./Datastore/'+OptionsFileName)
+            print('Updating Options for '+ sym)
+            Mergedf = OldOptionsdf.append(TotalNewOptionsdf[TotalNewOptionsdf["Symbol"] == sym], ignore_index = True)            
+        else: #A new symbol has been added, create a feather for it
+            print('Creating new Options DB for '+ sym)
+            Mergedf = TotalNewOptionsdf[TotalNewOptionsdf["Symbol"] == sym]
+            
+        if not Mergedf.empty:
+            feather.write_feather(Mergedf, './Datastore/'+OptionsFileName)
+
+def RefineNewNSEOptions(DF):
+    df = DF.copy()
+    
+    if 'INSTRUMENT' in df.columns:
+        df.rename(columns={'INSTRUMENT': 'Instrument'}, inplace=True)
+        
+    if 'SYMBOL' in df.columns:
+        df.rename(columns={'SYMBOL': 'Symbol'}, inplace=True)
+    
+    if 'EXPIRY_DT' in df.columns:
+        df.rename(columns={'EXPIRY_DT': 'Expiry'}, inplace=True)
+        # df["Expiry"] = df["EXP_DATE"].apply(pd.to_datetime, format='%d-%b-%Y')
+        df['Expiry'] = df['Expiry'].dt.date
+
+    if 'STRIKE_PR' in df.columns:
+        df.rename(columns={'STRIKE_PR': 'Strike Price'}, inplace=True)
+
+    if 'OPTION_TYP' in df.columns:
+        df.rename(columns={'OPTION_TYP': 'Option type'}, inplace=True)
+        
+    if 'OPEN' in df.columns:
+        df.rename(columns={'OPEN': 'Open'}, inplace=True)        
+        
+    if 'HIGH' in df.columns:
+        df.rename(columns={'HIGH': 'High'}, inplace=True)
+
+    if 'LOW' in df.columns:
+        df.rename(columns={'LOW': 'Low'}, inplace=True)
+    
+    if 'CLOSE' in df.columns:
+        df.rename(columns={'CLOSE': 'Close'}, inplace=True)
+
+    if 'SETTLE_PR' in df.columns:
+        df.rename(columns={'SETTLE_PR': 'Settle Price'}, inplace=True)
+        
+    if 'CONTRACTS' in df.columns:
+        df.rename(columns={'CONTRACTS': 'No. of contracts'}, inplace=True)          
+
+    if 'VAL_INLAKH' in df.columns:
+        df.rename(columns={'VAL_INLAKH': 'Turnover in Lacs'}, inplace=True)
+
+    if 'OPEN_INT' in df.columns:
+        df.rename(columns={'OPEN_INT': 'Open Int'}, inplace=True)
+
+    if 'CHG_IN_OI' in df.columns:
+        df.rename(columns={'CHG_IN_OI': 'Change in OI'}, inplace=True)
+        
+    if 'TIMESTAMP' in df.columns:
+        df.rename(columns={'TIMESTAMP': 'Date'}, inplace=True)
+        df["Date"] = df["Date"].apply(pd.to_datetime, format='%d-%b-%Y')
+        df['Date'] = df['Date'].dt.date
+        
+    if 'Unnamed: 15' in df.columns:
+        df.drop("Unnamed: 15", axis=1, inplace=True)
+        
+    return df
 
 def RefineNewNSEFutures(DF):
     df = DF.copy()
@@ -156,7 +259,7 @@ def RefineNewNSEFutures(DF):
         df.rename(columns={'EXP_DATE': 'Expiry'}, inplace=True)
         # df["Expiry"] = df["EXP_DATE"].apply(pd.to_datetime, format='%d-%b-%Y')
         df['Expiry'] = df['Expiry'].dt.date
-
+     
     if 'OPEN_PRICE' in df.columns:
         df.rename(columns={'OPEN_PRICE': 'Open'}, inplace=True) 
         
@@ -203,4 +306,10 @@ def main():
     UpdateBusinessDays()
     DownloadNewNSEFnO()
     UpdatetNSEFuturesData()
+    UpdatetNSEOptionsData()
     
+    
+            # ###########OldFuturesdf.drop("index", axis=1, inplace=True) #DO NOT ENABLE!!!
+            # ############OldFuturesdf = OldFuturesdf[OldFuturesdf.Date < FnOStartDate] #DO NOT ENABLE!!!
+            # ########OldOptionsdf = OldOptionsdf[OldOptionsdf.Date < FnOStartDate] #DO NOT ENABLE!!!            
+            
