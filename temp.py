@@ -4,7 +4,12 @@ Created on Tue Aug 18 11:54:38 2020
 
 @author: User
 """
-
+            OldOHLCdf = OldOHLCdf[OldOHLCdf.Date < OHLCStartDate] #DO NOT ENABLE!!!
+        # if (FindFeather(OHLCSettleArg, './New NSE site/')):
+        #     Settledf = feather.read_feather('./New NSE site/'+OHLCSettleArg) #Volatilitydf.info()
+        #     NewOHLCdf = pd.merge(NewOHLCdf, Settledf, how="inner", on=["Symbol","Expiry","Instrument"])
+        # else:
+        #     print('Couldnt find settlement info for '+ OHLCSettleArg)
             
         # #FnO Settlement Report download    
         # FnOSettleArg = 'FOSett_prce_' + weekday.strftime("%d%m%Y") + '.csv'

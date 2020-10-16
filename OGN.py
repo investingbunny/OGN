@@ -986,12 +986,13 @@ def IntradayUpdate():
             feather.write_feather(Intradaydf, './Datastore/'+IntradayFileName)
 
 def main():
-    OHLCUpdate()
+    # OHLCUpdate()
     # MonthlyFuturesUpdate()
     # FullFuturesUpdate()
     IntradayUpdate()
     FXPEUpdate()
     # MonthlyOptionsUpdate()
     
-# hhhhhhhhhhhh.info() = feather.read_feather('./Datastore/'+'NIFTY_monthly-options.ftr')    
+# hhhhhhhhhhhh = feather.read_feather('./Datastore/'+'SBIN_ohlc.ftr')   ohlc.ftr 
+# hhhhhhhhhhhh = feather.read_feather('./Datastore/'+'COFORGE_full-futures.ftr')   
 # dd = get_expiry_date(2020,11)
