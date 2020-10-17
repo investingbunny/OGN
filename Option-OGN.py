@@ -432,12 +432,12 @@ def plot_chart(DF, n, ticker, Dividend):
         ReadFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
         d = OptionsFrameStart - datetime.timedelta(days=1) #Date to start from for axis alignment
         FuturesSlice = ReadFuturesdf[ReadFuturesdf.Date > d]
-        Futdf = FuturesSlice[['Date', 'Expiry','Settle Price','Open Interest']].copy()
+        Futdf = FuturesSlice[['Date', 'Expiry','Settle Price','Open Int']].copy()
         Futdf = Futdf.sort_values(by=['Date', 'Expiry'])
         Futdf = Futdf.reset_index(drop=True)
         
         SettlePricedf = Futdf.groupby('Date')['Settle Price'].apply(lambda x: pd.Series(list(x))).unstack()
-        OpenInterestdf = Futdf.groupby('Date')['Open Interest'].apply(lambda x: pd.Series(list(x))).unstack()
+        OpenInterestdf = Futdf.groupby('Date')['Open Int'].apply(lambda x: pd.Series(list(x))).unstack()
         ExpiryDatedf = Futdf.groupby('Date')['Expiry'].apply(lambda x: pd.Series(list(x))).unstack()
 
         ExpiryDatedf = ExpiryDatedf.reset_index(level=0)
@@ -538,7 +538,7 @@ def plot_chart(DF, n, ticker, Dividend):
         Futdf["NearFuturesFormula"] = Futdf["Close"] * (1+ (RiskFreeRate * (business_days( pd.to_datetime(Futdf['Date']),  pd.to_datetime(Futdf['NearExpiry']))/365))) - Dividend
         Futdf["MidFuturesFormula"] = Futdf["Close"] * (1+ (RiskFreeRate * (business_days( pd.to_datetime(Futdf['Date']), pd.to_datetime(Futdf['MidExpiry']))/365))) - Dividend
         Futdf["FarFuturesFormula"] = Futdf["Close"] * (1+ (RiskFreeRate * (business_days( pd.to_datetime(Futdf['Date']), pd.to_datetime(Futdf['FarExpiry']))/365))) - Dividend
-        # Futdf["OISlope"] = slope(Futdf["Open Interest"],10)
+        # Futdf["OISlope"] = slope(Futdf["Open Int"],10)
         Average = DailyRet * days
         SD = StdDev * math.sqrt(days)
         
@@ -691,7 +691,7 @@ def FnOAnalysis():
     for Scrip in NSEFnOList:        
         OHLCdf = None
         Indicatordf = None
-        # Scrip = "L&TFH"
+        Scrip = "HDFC"
         print('Now for '+ Scrip)
         OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
         #Read from feather

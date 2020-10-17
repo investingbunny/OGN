@@ -993,6 +993,8 @@ def main():
     FXPEUpdate()
     # MonthlyOptionsUpdate()
     
-# hhhhhhhhhhhh = feather.read_feather('./Datastore/'+'Nifty 50_ohlc.ftr')   ohlc.ftr 
-# hhhhhhhhhhhh = feather.read_feather('./Datastore/'+'COFORGE_full-futures.ftr')   
+# hhhhhhhhhhhh = feather.read_feather('./Datastore/'+'RELIANCE_full-futures.ftr')   CMVOLT_16102020.CSV.ftr 
+# cmv = feather.read_feather('./New NSE site/'+'CMVOLT_16102020.CSV.ftr')   
+# hhhhhhhhhhhh.info()
+# cmv.info()
 # dd = get_expiry_date(2020,11)

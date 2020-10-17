@@ -126,6 +126,9 @@ def UpdatetNSEFnOData():
     
     TotalNewOptionsdf = TotalNewOptionsdf.sort_values(by=['Symbol', 'Date'])
     TotalNewFuturesdf = TotalNewFuturesdf.sort_values(by=['Symbol', 'Date'])
+    TotalNewOptionsdf = TotalNewOptionsdf.drop_duplicates()
+    TotalNewFuturesdf = TotalNewFuturesdf.drop_duplicates()
+    
     FnOSymbollist = []
     #Adding values to list
     FnOSymbollist = list(TotalNewOptionsdf['Symbol'])
@@ -138,6 +141,7 @@ def UpdatetNSEFnOData():
         #Read from feather
         if (FindFeather(OptionsFileName, './Datastore/')):
             OldOptionsdf = feather.read_feather('./Datastore/'+OptionsFileName)
+            # OldOptionsdf = OldOptionsdf[OldOptionsdf.Date < FnOStartDate] 
             print('Updating Options for '+ sym)
             MergeOptdf = OldOptionsdf.append(TotalNewOptionsdf[TotalNewOptionsdf["Symbol"] == sym], ignore_index = True)            
         else: #A new symbol has been added, create a feather for it
@@ -153,6 +157,7 @@ def UpdatetNSEFnOData():
         #Read from feather
         if (FindFeather(FuturesFileName, './Datastore/')):
             OldFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
+            # OldFuturesdf = OldFuturesdf[OldFuturesdf.Date < FnOStartDate]
             print('Updating Futures for '+ sym)
             MergeFutdf = OldFuturesdf.append(TotalNewFuturesdf[TotalNewFuturesdf["Symbol"] == sym], ignore_index = True)            
         else: #A new symbol has been added, create a feather for it
@@ -273,6 +278,7 @@ def UpdatetNSEOHLCData():
     TotalNewIndexOHLCdf = pd.DataFrame()
     for weekday in ohlcbday:
         OHLCBhavArg = 'sec_bhavdata_full_' + weekday.strftime("%d%m%Y") + '.csv.ftr'
+        print('Adding OHLC data for '+ weekday.strftime("%d%m%Y"))
         if (FindFeather(OHLCBhavArg, './New NSE site/')):
             OHLCBhavdf = feather.read_feather('./New NSE site/'+OHLCBhavArg) #OHLCBhavdf.info()
             TotalNewOHLCdf = TotalNewOHLCdf.append(OHLCBhavdf, ignore_index=True)
@@ -295,10 +301,11 @@ def UpdatetNSEOHLCData():
         
         TotalNewIndexOHLCdf = TotalNewIndexOHLCdf.append(CSVIndexdf, ignore_index=True)
         
-
+#####################################################################################
     TotalNewOHLCdf = RefineNewNSEOHLC(TotalNewOHLCdf) #TotalNewOHLCdf.info()
     TotalNewOHLCdf = TotalNewOHLCdf[TotalNewOHLCdf.Series == "EQ"] #Only considering EQ, no debentures(?)
     TotalNewOHLCdf = TotalNewOHLCdf.sort_values(by=['Symbol', 'Date'])
+    TotalNewOHLCdf = TotalNewOHLCdf.drop_duplicates()
     OHLCSymbollist = []
     #Adding values to list
     OHLCSymbollist = list(TotalNewOHLCdf['Symbol'])
@@ -311,6 +318,7 @@ def UpdatetNSEOHLCData():
         #Read from feather
         if (FindFeather(OHLCFileName, './Datastore/')):
             OldOHLCdf = feather.read_feather('./Datastore/'+OHLCFileName) # OldOHLCdf.info()
+            # OldOHLCdf = OldOHLCdf[OldOHLCdf.Date < FnOStartDate]
             print('Updating OHLC for '+ sym)
             Mergedf = OldOHLCdf.append(TotalNewOHLCdf[TotalNewOHLCdf["Symbol"] == sym], ignore_index = True)            
         else: #A new symbol has been added, create a feather for it
@@ -333,7 +341,10 @@ def UpdatetNSEOHLCData():
     for col in cols:
         NewNSEIndexdf[col]=pd.to_numeric(NewNSEIndexdf[col])
         
-    NewNSEIndexdf = NewNSEIndexdf.sort_values(by=['Date', 'Symbol'])    
+    NewNSEIndexdf['Symbol'].replace('Nifty 50','NIFTY',inplace=True)
+    NewNSEIndexdf['Symbol'].replace('Nifty Bank','BANKNIFTY',inplace=True)
+    NewNSEIndexdf = NewNSEIndexdf.sort_values(by=['Date', 'Symbol'])
+    NewNSEIndexdf = NewNSEIndexdf.drop_duplicates()
 
     IndexSymbollist = []
     #Adding values to list
@@ -347,6 +358,7 @@ def UpdatetNSEOHLCData():
         #Read from feather
         if (FindFeather(OHLCFileName, './Datastore/')):
             OldIndexOHLCdf = feather.read_feather('./Datastore/'+OHLCFileName) # OldOHLCdf.info()
+            # OldIndexOHLCdf = OldIndexOHLCdf[OldIndexOHLCdf.Date < FnOStartDate]
             print('Updating OHLC for '+ sym)
             MergeIndexdf = OldIndexOHLCdf.append(NewNSEIndexdf[NewNSEIndexdf["Symbol"] == sym], ignore_index = True)            
         else: #A new symbol has been added, create a feather for it

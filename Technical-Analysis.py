@@ -115,7 +115,7 @@ NSEFnOList = ["BANKNIFTY","NIFTY","ACC","ADANIENT","ADANIPORTS","AMARAJABAT","AM
               "APOLLOTYRE","ASHOKLEY","ASIANPAINT","AUROPHARMA","AXISBANK","BAJAJ-AUTO","BAJAJFINSV",
               "BAJFINANCE","BALKRISIND","BANDHANBNK","BANKBARODA","BATAINDIA","BEL","BERGEPAINT","BHARATFORG",
               "BHARTIARTL","BHEL","BIOCON","BOSCHLTD","BPCL","BRITANNIA","CADILAHC","CANBK","CENTURYTEX",
-              "CHOLAFIN","CIPLA","COALINDIA","COLPAL","CONCOR","CUMMINSIND","DABUR","DIVISLAB","DLF",
+              "COFORGE","CHOLAFIN","CIPLA","COALINDIA","COLPAL","CONCOR","CUMMINSIND","DABUR","DIVISLAB","DLF",
               "DRREDDY","EICHERMOT","EQUITAS","ESCORTS","EXIDEIND","FEDERALBNK","GAIL","GLENMARK","GMRINFRA",
               "GODREJCP","GODREJPROP","GRASIM","HAVELLS","HCLTECH","HDFC","HDFCBANK","HDFCLIFE","HEROMOTOCO",
                "HINDALCO","HINDPETRO","HINDUNILVR","IBULHSGFIN","ICICIBANK","ICICIPRULI","IDEA","IDFCFIRSTB",
@@ -430,12 +430,12 @@ def plot_chart(DF, n, ticker, Dividend):
        
         d = OptionsFrameStart - datetime.timedelta(days=1) #Date to start from for axis alignment
         FuturesSlice = ReadFuturesdf[ReadFuturesdf.Date > d]
-        Futdf = FuturesSlice[['Date', 'Expiry','Settle Price','Open Interest']].copy()
+        Futdf = FuturesSlice[['Date', 'Expiry','Settle Price','Open Int']].copy()
         Futdf = Futdf.sort_values(by=['Date', 'Expiry'])
         Futdf = Futdf.reset_index(drop=True)
         
         SettlePricedf = Futdf.groupby('Date')['Settle Price'].apply(lambda x: pd.Series(list(x))).unstack()
-        OpenInterestdf = Futdf.groupby('Date')['Open Interest'].apply(lambda x: pd.Series(list(x))).unstack()
+        OpenInterestdf = Futdf.groupby('Date')['Open Int'].apply(lambda x: pd.Series(list(x))).unstack()
         ExpiryDatedf = Futdf.groupby('Date')['Expiry'].apply(lambda x: pd.Series(list(x))).unstack()
 
         ExpiryDatedf = ExpiryDatedf.reset_index(level=0)
@@ -812,7 +812,7 @@ def GenerateMLdf(DF,Scrip):
                     MLdf["FuturesSettlePrice-"+str(OHLCdepth)] = Futuresdf.iloc[[FuturesdfIndex-OHLCdepth]]["Settle Price"].values[0]
                     MLdf["FuturesNoContracts-"+str(OHLCdepth)] = Futuresdf.iloc[[FuturesdfIndex-OHLCdepth]]["Number of Contracts"].values[0]
                     MLdf["FuturesTurnover-"+str(OHLCdepth)] = Futuresdf.iloc[[FuturesdfIndex-OHLCdepth]]["Turnover"].values[0]
-                    MLdf["FuturesOpenInterest-"+str(OHLCdepth)] = Futuresdf.iloc[[FuturesdfIndex-OHLCdepth]]["Open Interest"].values[0]
+                    MLdf["FuturesOpenInterest-"+str(OHLCdepth)] = Futuresdf.iloc[[FuturesdfIndex-OHLCdepth]]["Open Int"].values[0]
                     MLdf["FuturesChangeinOI-"+str(OHLCdepth)] = Futuresdf.iloc[[FuturesdfIndex-OHLCdepth]]["Change in OI"].values[0]
                     OHLCdepth += 1
             
@@ -894,7 +894,7 @@ def TechAnalysis():
     for Scrip in NSE500ScripList:        
         OHLCdf = None
         Indicatordf = None
-        Scrip = "NMDC"
+        Scrip = "RELIANCE"
         print('Now for '+ Scrip)
         OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
         #Read from feather
@@ -931,9 +931,7 @@ def TechAnalysis():
             #                                              OHLCdf["Close"])
             
             # Statistical functions (e.g. beta, correlation etc.)
-            Indicatordf["Beta"] = talib.BETA(Indicatordf["High"],
-                                                 Indicatordf["Low"],
-                                                 timeperiod=14)
+            Indicatordf["Beta"] = talib.BETA(Indicatordf["High"],Indicatordf["Low"],timeperiod=14)
             
             Indicatordf["RSI"] = RSI(Indicatordf,14)
             
@@ -960,7 +958,7 @@ def TechAnalysis():
             #Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip) 
             Indicatordf.reset_index(level=0, inplace=True)
 # ###################################################################################################            
-            plot_chart(Indicatordf,50,Scrip,0)
+            plot_chart(Indicatordf,20,Scrip,0)
 ###################################################################################################
     #         feather.write_feather(Indicatordf, 'E:/Harish/nsepywork/TechnicalFrames/'+Scrip+'-dataframe.ftr')
     #         ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)
