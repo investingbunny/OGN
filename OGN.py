@@ -993,6 +993,6 @@ def main():
     FXPEUpdate()
     # MonthlyOptionsUpdate()
     
-# hhhhhhhhhhhh = feather.read_feather('./Datastore/'+'SBIN_ohlc.ftr')   ohlc.ftr 
+# hhhhhhhhhhhh = feather.read_feather('./Datastore/'+'Nifty 50_ohlc.ftr')   ohlc.ftr 
 # hhhhhhhhhhhh = feather.read_feather('./Datastore/'+'COFORGE_full-futures.ftr')   
 # dd = get_expiry_date(2020,11)

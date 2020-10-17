@@ -12,6 +12,7 @@ import datetime
 from datetime import date
 from dateutil.relativedelta import *
 import time
+import numpy as np
 import io
 import os
 import pyarrow
@@ -46,7 +47,7 @@ def UpdateBusinessDays():
     NiftyFullFutures = feather.read_feather('./Datastore/NIFTY_full-futures.ftr')
     FuturesStartDate = NiftyFullFutures.iloc[-1].Date
     FuturesStartDate += datetime.timedelta(days=1)
-    YesterdayDate = datetime.date.today() - datetime.timedelta(days=1)
+    YesterdayDate = datetime.date.today() - datetime.timedelta(days=1) # weekday = YesterdayDate
 
     bday = pd.bdate_range(FuturesStartDate, YesterdayDate) #To be replaced with LastRecordDate, CurrentDate
     bday = set(bday).difference(HolidayList)
@@ -57,9 +58,9 @@ def UpdateOHLCBusinessDays():
     SBINOHLC = feather.read_feather('./Datastore/SBIN_ohlc.ftr')
     OHLCStartDate = SBINOHLC.iloc[-1].Date
     OHLCStartDate += datetime.timedelta(days=1)
-    LastOHLCDate = datetime.date.today() - datetime.timedelta(days=1)
+    YesterdayOHLCDate = datetime.date.today() - datetime.timedelta(days=1)
 
-    ohlcbday = pd.bdate_range(OHLCStartDate, LastOHLCDate) #To be replaced with LastRecordDate, CurrentDate
+    ohlcbday = pd.bdate_range(OHLCStartDate, YesterdayOHLCDate) #To be replaced with LastRecordDate, CurrentDate
     ohlcbday = set(ohlcbday).difference(HolidayList)
     print('UpdateOHLCBusinessDays complete ')
 
@@ -269,6 +270,7 @@ def DownloadNewNSEOHLC():
 
 def UpdatetNSEOHLCData():
     TotalNewOHLCdf = pd.DataFrame()
+    TotalNewIndexOHLCdf = pd.DataFrame()
     for weekday in ohlcbday:
         OHLCBhavArg = 'sec_bhavdata_full_' + weekday.strftime("%d%m%Y") + '.csv.ftr'
         if (FindFeather(OHLCBhavArg, './New NSE site/')):
@@ -277,7 +279,23 @@ def UpdatetNSEOHLCData():
         else:
             print('Couldnt find: ' + OHLCBhavArg)
             continue
-    
+        
+        IndexBhavZip = 'PR' + weekday.strftime("%d%m%y") #IndexBhavZip = 'PR161020'
+        IndexBhavArg = 'Pr' + weekday.strftime("%d%m%y") #IndexBhavArg = 'Pr161020'
+        print('Processing '+ IndexBhavZip)
+        zf = ZipFile('New NSE site/'+IndexBhavZip + '.zip')  #PR161020.zip
+        CSVIndexdf = pd.read_csv(zf.open(IndexBhavArg+'.csv'), parse_dates=[2], dayfirst=True,error_bad_lines=False) #fo12OCT2020bhav
+        CSVIndexdf = CSVIndexdf.head(57)
+        CSVIndexdf = CSVIndexdf.rename(columns=lambda x: x.strip())
+        CSVIndexdf = CSVIndexdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        
+        if not 'Date' in CSVIndexdf.columns:
+            CSVIndexdf["Date"] = np.nan
+        CSVIndexdf.Date = pd.to_datetime(weekday)
+        
+        TotalNewIndexOHLCdf = TotalNewIndexOHLCdf.append(CSVIndexdf, ignore_index=True)
+        
+
     TotalNewOHLCdf = RefineNewNSEOHLC(TotalNewOHLCdf) #TotalNewOHLCdf.info()
     TotalNewOHLCdf = TotalNewOHLCdf[TotalNewOHLCdf.Series == "EQ"] #Only considering EQ, no debentures(?)
     TotalNewOHLCdf = TotalNewOHLCdf.sort_values(by=['Symbol', 'Date'])
@@ -304,6 +322,42 @@ def UpdatetNSEOHLCData():
             feather.write_feather(Mergedf, './Datastore/'+OHLCFileName)
         else:
             print(sym + ' not updated, in Series '+ Mergedf.iloc[-1].Series)
+            
+############################################## For Indices below
+
+    TotalNewIndexOHLCdf.drop(["MKT","IND_SEC","CORP_IND"], axis=1, inplace=True)
+    TotalNewIndexOHLCdf['Date'] = TotalNewIndexOHLCdf['Date'].dt.date
+    NewNSEIndexdf = RefineNewNSEOHLC(TotalNewIndexOHLCdf) # NewNSEIndexdf.info()
+
+    cols=[i for i in NewNSEIndexdf.columns if i not in ["Symbol","Date"]]
+    for col in cols:
+        NewNSEIndexdf[col]=pd.to_numeric(NewNSEIndexdf[col])
+        
+    NewNSEIndexdf = NewNSEIndexdf.sort_values(by=['Date', 'Symbol'])    
+
+    IndexSymbollist = []
+    #Adding values to list
+    IndexSymbollist = list(NewNSEIndexdf['Symbol'])
+    #Removing duplicates in list
+    IndexSymbollist = list(dict.fromkeys(IndexSymbollist))
+        
+    #Update the old OHLC file
+    for sym in IndexSymbollist: # sym = 'HDFC'
+        OHLCFileName = sym + '_' + DailyOHLCFilePath
+        #Read from feather
+        if (FindFeather(OHLCFileName, './Datastore/')):
+            OldIndexOHLCdf = feather.read_feather('./Datastore/'+OHLCFileName) # OldOHLCdf.info()
+            print('Updating OHLC for '+ sym)
+            MergeIndexdf = OldIndexOHLCdf.append(NewNSEIndexdf[NewNSEIndexdf["Symbol"] == sym], ignore_index = True)            
+        else: #A new symbol has been added, create a feather for it
+            print('Creating new OHLC DB for '+ sym)
+            MergeIndexdf = NewNSEIndexdf[NewNSEIndexdf["Symbol"] == sym]
+            MergeIndexdf.reset_index(level=0, inplace=True, drop=True)
+            
+        if not MergeIndexdf.empty:
+            feather.write_feather(MergeIndexdf, './Datastore/'+OHLCFileName)
+        else:
+            print(sym + ' not updated, is empty')
 
 def RefineNewNSEOHLC(DF):
     df = DF.copy()
@@ -359,11 +413,43 @@ def RefineNewNSEOHLC(DF):
         df['%Deliverble'] = pd.to_numeric(df['%Deliverble'], errors='coerce')
         df['%Deliverble'] = df['%Deliverble'].div(100)
 
+####Specific for Index below
+    if 'SECURITY' in df.columns:
+        df.rename(columns={'SECURITY': 'Symbol'}, inplace=True)
+
+    if 'PREV_CL_PR' in df.columns:
+        df.rename(columns={'PREV_CL_PR': 'Prev Close'}, inplace=True)
+
+    if 'NET_TRDVAL' in df.columns:
+        df.rename(columns={'NET_TRDVAL': 'Turnover'}, inplace=True)
+
+    if 'NET_TRDQTY' in df.columns:
+        df.rename(columns={'NET_TRDQTY': 'Volume'}, inplace=True)
+
+    if 'TRADES' in df.columns:
+        df.rename(columns={'TRADES': 'No. of Trades'}, inplace=True)
+        
     return df
 
 def main():
-    UpdateBusinessDays()
-    UpdateOHLCBusinessDays()    
+    NiftyFullFutures = feather.read_feather('./Datastore/NIFTY_full-futures.ftr')
+    FuturesStartDate = NiftyFullFutures.iloc[-1].Date
+    FuturesStartDate += datetime.timedelta(days=1)
+    YesterdayDate = datetime.date.today() - datetime.timedelta(days=1) # weekday = YesterdayDate
+
+    bday = pd.bdate_range(FuturesStartDate, YesterdayDate) #To be replaced with LastRecordDate, CurrentDate
+    bday = set(bday).difference(HolidayList)
+    print('UpdateBusinessDays complete ')
+    
+    SBINOHLC = feather.read_feather('./Datastore/SBIN_ohlc.ftr')
+    OHLCStartDate = SBINOHLC.iloc[-1].Date
+    OHLCStartDate += datetime.timedelta(days=1)
+    YesterdayOHLCDate = datetime.date.today() - datetime.timedelta(days=1)
+
+    ohlcbday = pd.bdate_range(OHLCStartDate, YesterdayOHLCDate) #To be replaced with LastRecordDate, CurrentDate
+    ohlcbday = set(ohlcbday).difference(HolidayList)
+    print('UpdateOHLCBusinessDays complete ')
+    
     DownloadNewNSEFnO()
     UpdatetNSEFnOData()
     DownloadNewNSEOHLC()
