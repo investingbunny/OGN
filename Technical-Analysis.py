@@ -894,7 +894,7 @@ def TechAnalysis():
     for Scrip in NSE500ScripList:        
         OHLCdf = None
         Indicatordf = None
-        Scrip = "RELIANCE"
+        # Scrip = "RELIANCE"
         print('Now for '+ Scrip)
         OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
         #Read from feather
@@ -958,9 +958,9 @@ def TechAnalysis():
             #Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip) 
             Indicatordf.reset_index(level=0, inplace=True)
 # ###################################################################################################            
-            plot_chart(Indicatordf,20,Scrip,0)
+            # plot_chart(Indicatordf,20,Scrip,0)
 ###################################################################################################
-    #         feather.write_feather(Indicatordf, 'E:/Harish/nsepywork/TechnicalFrames/'+Scrip+'-dataframe.ftr')
+            feather.write_feather(Indicatordf, 'E:/Harish/OGN/TechnicalFrames/'+Scrip+'-dataframe.ftr')
     #         ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)
     #         # ReturnMLdf.to_csv(r'./OutputFrames/pandas.txt', header=None, index=None, sep=' ', mode='a')
     #         Finaldf = Finaldf.append(ReturnMLdf, ignore_index=True)
