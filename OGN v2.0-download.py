@@ -19,7 +19,7 @@ import pyarrow
 import pyarrow.feather as feather
 from functools import reduce
 
-# FnOStartDate = date(2020,9,1)
+# FnOStartDate = date(2020,9,28)
 FnOReport = 'https://archives.nseindia.com/archives/fo/mkt/'
 FnOVolatility = 'https://archives.nseindia.com/archives/nsccl/volt/'
 FnOSettlement = 'https://archives.nseindia.com/archives/nsccl/sett/'
@@ -229,7 +229,7 @@ def RefineNSEFnOData(DF):
 
 def DownloadNewNSEOHLC():        
     #Loop through dates to download NSE OHLC data
-    for weekday in ohlcbday: # weekday = YesterdayDate
+    for weekday in ohlcbday: # weekday = date(2020,9,28)
         print('DownloadNewNSEOHLC for'+ weekday.strftime("%Y-%m-%d"))
         #OHLC Market report download # sec_bhavdata_full_09102020.csv
         OHLCBhavArg = 'sec_bhavdata_full_' + weekday.strftime("%d%m%Y") + '.csv'

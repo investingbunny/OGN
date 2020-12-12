@@ -994,7 +994,7 @@ def main():
     # MonthlyOptionsUpdate()
     
 # hhhhhhhhhhhh = feather.read_feather('./Datastore/'+'RELIANCE_full-futures.ftr')   CMVOLT_16102020.CSV.ftr 
-# cmv = feather.read_feather('./New NSE site/'+'CMVOLT_16102020.CSV.ftr')   
+# cmv = feather.read_feather('./New NSE site/'+'sec_bhavdata_full_29092020.csv.ftr')   
 # hhhhhhhhhhhh.info()
 # cmv.info()
 # dd = get_expiry_date(2020,11)

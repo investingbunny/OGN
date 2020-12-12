@@ -225,7 +225,7 @@ def MACD(DF,a,b,c):
     df["MA_Slow"]=df["Close"].ewm(span=b,min_periods=b).mean()
     df["MACD"]=df["MA_Fast"]-df["MA_Slow"]
     df["Signal"]=df["MACD"].ewm(span=c,min_periods=c).mean()
-    df.dropna(inplace=True)
+    # df.dropna(inplace=True)
     return df
 
 def RSI(DF,n):
@@ -401,19 +401,19 @@ def BollBnd(DF,n):
     df["BB_up"] = df["MA"] + 2*df['Close'].rolling(n).std(ddof=0) #ddof=0 is required since we want to take the standard deviation of the population and not sample
     df["BB_dn"] = df["MA"] - 2*df['Close'].rolling(n).std(ddof=0) #ddof=0 is required since we want to take the standard deviation of the population and not sample
     df["BB_width"] = df["BB_up"] - df["BB_dn"]
-    df.dropna(inplace=True)
+    # df.dropna(inplace=True)
     return df
 
 def plot_chart(DF, n, ticker, Dividend):
 
-    # n = 50
-    # ticker = "L&TFH"
+    # n = 60
+    # ticker = "HDFC"
     # data = Indicatordf.copy()
     data = DF.copy()
 
-    # Renkodata = Renko_DF(data,ticker)
-    # #DF amd number of latest bricks
-    # PlotRenko(Renkodata,100)
+    Renkodata = Renko_DF(data,ticker)
+    #DF amd number of latest bricks
+    PlotRenko(Renkodata,100)
 
     data = data.iloc[-n:]    
     if(ticker != "NIFTY" and ticker != "BANKNIFTY"):
@@ -435,6 +435,7 @@ def plot_chart(DF, n, ticker, Dividend):
         Futdf = FuturesSlice[['Date', 'Expiry','Settle Price','Open Int']].copy()
         Futdf = Futdf.sort_values(by=['Date', 'Expiry'])
         Futdf = Futdf.reset_index(drop=True)
+        # Futdf = Futdf[Futdf.Date != '2020-09-28
         
         SettlePricedf = Futdf.groupby('Date')['Settle Price'].apply(lambda x: pd.Series(list(x))).unstack()
         OpenInterestdf = Futdf.groupby('Date')['Open Int'].apply(lambda x: pd.Series(list(x))).unstack()
@@ -671,19 +672,19 @@ def plot_chart(DF, n, ticker, Dividend):
     
     #Trendlines
     # this will serve as an example for security or index closing prices, or low and high prices
-    # Trendlinedf = data.copy()
-    # TLClose = Trendlinedf[-n:].Close
-    # mins, maxs = trendln.calc_support_resistance(TLClose)
-    # minimaIdxs, pmin, mintrend, minwindows = trendln.calc_support_resistance((Trendlinedf[-n:].Low, None)) #support only
-    # mins, maxs = trendln.calc_support_resistance((Trendlinedf[-n:].Low, Trendlinedf[-n:].High))
-    # (minimaIdxs, pmin, mintrend, minwindows), (maximaIdxs, pmax, maxtrend, maxwindows) = mins, maxs
+    Trendlinedf = data.copy()
+    TLClose = Trendlinedf[-n:].Close
+    mins, maxs = trendln.calc_support_resistance(TLClose)
+    minimaIdxs, pmin, mintrend, minwindows = trendln.calc_support_resistance((Trendlinedf[-n:].Low, None)) #support only
+    mins, maxs = trendln.calc_support_resistance((Trendlinedf[-n:].Low, Trendlinedf[-n:].High))
+    (minimaIdxs, pmin, mintrend, minwindows), (maximaIdxs, pmax, maxtrend, maxwindows) = mins, maxs
 
-    # idx = Trendlinedf[-n:].index
-    # fig3 = trendln.plot_sup_res_date((Trendlinedf[-n:].Low, Trendlinedf[-n:].High), idx) #requires pandas
-    # fig3.set_size_inches((16, 9))
-    # # plt.savefig('suppres.svg', format='svg')
-    # plt.show()
-    # plt.clf() #clear figure
+    idx = Trendlinedf[-n:].index
+    fig3 = trendln.plot_sup_res_date((Trendlinedf[-n:].Low, Trendlinedf[-n:].High), idx) #requires pandas
+    fig3.set_size_inches((16, 9))
+    # plt.savefig('suppres.svg', format='svg')
+    plt.show()
+    plt.clf() #clear figure
 
 def FnOAnalysis():
     # Finaldf = pd.DataFrame()
@@ -691,7 +692,7 @@ def FnOAnalysis():
     for Scrip in NSEFnOList:        
         OHLCdf = None
         Indicatordf = None
-        # Scrip = "MGL"
+        Scrip = "CONCOR"
         print('Now for '+ Scrip)
         OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
         #Read from feather
@@ -757,7 +758,7 @@ def FnOAnalysis():
             #Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip) 
             Indicatordf.reset_index(level=0, inplace=True)
 # ###################################################################################################            
-            plot_chart(Indicatordf,40,Scrip,0)
+            plot_chart(Indicatordf,60,Scrip,0)
 ###################################################################################################
     #         feather.write_feather(Indicatordf, 'E:/Harish/nsepywork/TechnicalFrames/'+Scrip+'-dataframe.ftr')
     #         ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)

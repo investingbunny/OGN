@@ -4,6 +4,540 @@ Created on Tue Aug 18 11:54:38 2020
 
 @author: User
 """
+# -*- coding: utf-8 -*-
+"""
+Created on Sat Dec 12 16:44:30 2020
+
+@author: User
+"""
+
+
+    # def rolling_quantiles(self, window=30, quantiles=[0.25, 0.75]):
+    #     """Plots rolling quantiles of volatility
+        
+    #     Parameters
+    #     ----------
+    #     window : int
+    #         Rolling window for which to calculate the estimator
+    #     quantiles : [lower, upper]
+    #         List of lower and upper quantiles for which to plot
+    #     """
+
+    #     price_data = self._price_data
+
+    #     if len(quantiles) != 2:
+    #         raise ValueError(
+    #             'A two element list of quantiles is required, lower and upper')
+    #     if quantiles[0] + quantiles[1] != 1.0:
+    #         raise ValueError(
+    #             'The sum of the quantiles must equal 1.0')
+    #     if quantiles[0] > quantiles[1]:
+    #         raise ValueError(
+    #             'The lower quantiles (first element) must be less than the upper quantile (second element)')
+        
+    #     estimator = self._get_estimator(
+    #         window=window,
+    #         price_data=price_data
+    #     )
+    #     date = estimator.index
+        
+    #     top_q = estimator.rolling(window=window, center=False).quantile(quantiles[1])
+    #     median = estimator.rolling(window=window, center=False).median()
+    #     bottom_q = estimator.rolling(window=window, center=False).quantile(quantiles[0])
+    #     realized = estimator
+    #     last = estimator[-1]
+
+    #     if self._estimator is "Skew" or self._estimator is "Kurtosis":
+    #         f = lambda x: "%i" % round(x, 0)
+    #     else:
+    #         f = lambda x: "%i%%" % round(x*100, 0)
+
+    #     # figure
+    #     fig = plt.figure(figsize=(8, 6))
+    #     fig.autofmt_xdate()
+    #     left, width = 0.07, 0.65
+    #     bottom, height = 0.2, 0.7
+    #     left_h = left+width+0.02
+        
+    #     rect_cones = [left, bottom, width, height]
+    #     rect_box = [left_h, bottom, 0.17, height]
+        
+    #     cones = plt.axes(rect_cones)
+    #     box = plt.axes(rect_box)
+
+    #     # set the plots
+    #     cones.plot(date, top_q, label=str(int(quantiles[1]*100)) + " Prctl")
+    #     cones.plot(date, median, label="Median")
+    #     cones.plot(date, bottom_q, label=str(int(quantiles[0]*100)) + " Prctl")
+    #     cones.plot(date, realized, 'r-.', label="Realized")
+        
+    #     # set and format the y-axis labels
+    #     locs = cones.get_yticks()
+    #     cones.set_yticklabels(map(f, locs))
+        
+    #     # turn on the grid
+    #     cones.grid(True, axis='y', which='major', alpha=0.5)
+        
+    #     # set the title
+    #     cones.set_title(self._estimator + ' (' + self._symbol + ', daily ' + self._start.strftime('%Y-%m-%d') + ' to ' + self._end.strftime('%Y-%m-%d') + ')')
+        
+    #     # set the legend
+    #     cones.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=3)
+
+    #     # box plots
+    #     box.boxplot(realized, notch=1, sym='+')
+    #     box.plot(1, last, color='r', marker='*', markeredgecolor='k')
+        
+    #     # set and format the y-axis labels
+    #     locs = box.get_yticks()
+    #     box.set_yticklabels(map(f, locs))
+        
+    #     # move the y-axis ticks on the right side
+    #     box.yaxis.tick_right()
+        
+    #     # turn on the grid
+    #     box.grid(True, axis='y', which='major', alpha=0.5)
+        
+    #     return fig, plt
+
+    # def rolling_extremes(self, window=30):
+    #     """Plots rolling max and min of volatility estimator
+        
+    #     Parameters
+    #     ----------
+    #     window : int
+    #         Rolling window for which to calculate the estimator
+    #     """
+
+    #     price_data = self._price_data
+
+    #     estimator = self._get_estimator(
+    #         window=window,
+    #         price_data=price_data
+    #     )
+    #     date = estimator.index
+    #     max_ = estimator.rolling(window=window, center=False).max()
+    #     min_ = estimator.rolling(window=window, center=False).min()
+    #     realized = estimator
+    #     last = estimator[-1]
+
+    #     if self._estimator is "Skew" or self._estimator is "Kurtosis":
+    #         f = lambda x: "%i" % round(x, 0)
+    #     else:
+    #         f = lambda x: "%i%%" % round(x*100, 0)
+
+    #     # figure
+    #     fig = plt.figure(figsize=(8, 6))
+    #     fig.autofmt_xdate()
+    #     left, width = 0.07, 0.65
+    #     bottom, height = 0.2, 0.7
+    #     left_h = left+width+0.02
+        
+    #     rect_cones = [left, bottom, width, height]
+    #     rect_box = [left_h, bottom, 0.17, height]
+        
+    #     cones = plt.axes(rect_cones)
+    #     box = plt.axes(rect_box)
+
+    #     # set the plots
+    #     cones.plot(date, max_, label="Max")
+    #     cones.plot(date, min_, label="Min")
+    #     cones.plot(date, realized, 'r-.', label="Realized")
+        
+    #     # set and format the y-axis labels
+    #     locs = cones.get_yticks()
+    #     cones.set_yticklabels(map(f, locs))
+        
+    #     # turn on the grid
+    #     cones.grid(True, axis='y', which='major', alpha=0.5)
+        
+    #     # set the title
+    #     cones.set_title(self._estimator + ' (' + self._symbol + ', daily ' + self._start.strftime('%Y-%m-%d') + ' to ' + self._end.strftime('%Y-%m-%d') + ')')
+        
+    #     # set the legend
+    #     cones.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=3)
+
+    #     # box plot
+    #     box.boxplot(realized, notch=1, sym='+')
+    #     box.plot(1, last, color='r', marker='*', markeredgecolor='k')
+        
+    #     # set and format the y-axis labels
+    #     locs = box.get_yticks()
+    #     box.set_yticklabels(map(f, locs))
+        
+    #     # move the y-axis ticks on the right side
+    #     box.yaxis.tick_right()
+        
+    #     # turn on the grid
+    #     box.grid(True, axis='y', which='major', alpha=0.5)
+        
+    #     return fig, plt
+
+    # def rolling_descriptives(self, window=30):
+    #     """Plots rolling first and second moment of volatility estimator
+        
+    #     Parameters
+    #     ----------
+    #     window : int
+    #         Rolling window for which to calculate the estimator
+    #     """
+
+    #     price_data = self._price_data
+
+    #     estimator = self._get_estimator(
+    #         window=window,
+    #         price_data=price_data
+    #     )
+    #     date = estimator.index
+    #     mean = estimator.rolling(window=window, center=False).mean()
+    #     std = estimator.rolling(window=window, center=False).std()
+    #     z_score = (estimator - mean) / std
+        
+    #     realized = estimator
+    #     last = estimator[-1]
+
+    #     if self._estimator is "Skew" or self._estimator is "Kurtosis":
+    #         f = lambda x: "%i" % round(x, 0)
+    #     else:
+    #         f = lambda x: "%i%%" % round(x*100, 0)
+
+    #     # figure
+    #     fig = plt.figure(figsize=(8, 6))
+    #     fig.autofmt_xdate()
+    #     left, width = 0.07, 0.65
+    #     left_h = left+width+0.02
+        
+    #     rect_cones = [left, 0.35, width, 0.55]
+    #     rect_box = [left_h, 0.15, 0.17, 0.75]
+    #     rect_z = [left, 0.15, width, 0.15]
+        
+    #     cones = plt.axes(rect_cones)
+    #     box = plt.axes(rect_box)
+    #     z = plt.axes(rect_z)
+        
+    #     if self._estimator is "Skew" or self._estimator is "Kurtosis":
+    #         f = lambda x: "%i" % round(x, 0)
+    #     else:
+    #         f = lambda x: "%i%%" % round(x*100, 0)
+
+    #     # set the plots
+    #     cones.plot(date, mean, label="Mean")
+    #     cones.plot(date, std, label="Std. Dev.")
+    #     cones.plot(date, realized, 'r-.', label="Realized")
+        
+    #     # set and format the y-axis labels
+    #     locs = cones.get_yticks()
+    #     cones.set_yticklabels(map(f, locs))
+        
+    #     # turn on the grid
+    #     cones.grid(True, axis='y', which='major', alpha=0.5)
+        
+    #     # set the title
+    #     cones.set_title(self._estimator + ' (' + self._symbol + ', daily ' + self._start.strftime('%Y-%m-%d') + ' to ' + self._end.strftime('%Y-%m-%d') + ')')
+        
+    #     # shrink the plot up a bit and set the legend
+    #     pos = cones.get_position()
+    #     cones.set_position([pos.x0, pos.y0 + pos.height * 0.1, pos.width, pos.height * 0.9]) #
+    #     cones.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=3)
+
+    #     # box plot
+    #     box.boxplot(realized, notch=1, sym='+')
+    #     box.plot(1, last, color='r', marker='*', markeredgecolor='k')
+        
+    #     # set and format the y-axis labels
+    #     locs = box.get_yticks()
+    #     box.set_yticklabels(map(f, locs))
+        
+    #     # move the y-axis ticks on the right side
+    #     box.yaxis.tick_right()
+        
+    #     # turn on the grid
+    #     box.grid(True, axis='y', which='major', alpha=0.5)
+
+    #     # z-score set the plots
+    #     z.plot(date, z_score, 'm-', label="Z-Score")
+        
+    #     # turn on the grid
+    #     z.grid(True, axis='y', which='major', alpha=0.5)
+        
+    #     # create a horizontal line at y=0
+    #     z.axhline(0, 0, 1, linestyle='-', linewidth=1.0, color='black')
+        
+    #     # set the legend
+    #     z.legend(loc='upper center', bbox_to_anchor=(0.5, -0.2), ncol=3)
+        
+    #     return fig, plt
+
+    # def histogram(self, window=90, bins=100, normed=True):
+    #     """
+        
+    #     Parameters
+    #     ----------
+    #     window : int
+    #         Rolling window for which to calculate the estimator
+    #     bins : int
+            
+    #     """
+
+    #     price_data = self._price_data
+
+    #     estimator = self._get_estimator(
+    #         window=window,
+    #         price_data=price_data
+    #     )
+    #     mean = estimator.mean()
+    #     std = estimator.std()
+    #     last = estimator[-1]
+
+    #     fig = plt.figure(figsize=(8, 6))
+        
+    #     n, bins, patches = plt.hist(estimator, bins, normed=normed, facecolor='blue', alpha=0.25)
+        
+    #     if normed:
+    #         y = mlab.normpdf(bins, mean, std)
+    #         plt.plot(bins, y, 'g--', linewidth=1)
+
+    #     plt.axvline(last, 0, 1, linestyle='-', linewidth=1.5, color='r')
+
+    #     plt.grid(True, axis='y', which='major', alpha=0.5)
+    #     plt.title('Distribution of ' + self._estimator +
+    #               ' estimator values (' + self._symbol +
+    #               ', daily ' + self._start.strftime('%Y-%m-%d') + ' to ' + self._end.strftime('%Y-%m-%d') + ')')
+        
+    #     return fig, plt
+    
+    # def benchmark_compare(self, window=90):
+    #     """
+        
+    #     Parameters
+    #     ----------
+    #     window : int
+    #         Rolling window for which to calculate the estimator
+    #     bins : int
+            
+    #     """
+
+    #     price_data = self._price_data
+    #     bench_data = self._bench_data
+
+    #     y = self._get_estimator(
+    #         window=window,
+    #         price_data=price_data
+    #     )
+    #     x = self._get_estimator(
+    #         window=window,
+    #         price_data=bench_data
+    #     )
+    #     date = y.index
+        
+    #     ratio = y / x
+
+    #     if self._estimator is "Skew" or self._estimator is "Kurtosis":
+    #         f = lambda x: "%i" % round(x, 0)
+    #     else:
+    #         f = lambda x: "%i%%" % round(x*100, 0)
+        
+    #     # figure
+    #     fig = plt.figure(figsize=(8, 6))
+    #     fig.autofmt_xdate()
+    #     left, width = 0.07, .9
+        
+    #     rect_cones = [left, 0.4, width, .5]
+    #     rect_box = [left, 0.15, width, 0.15]
+        
+    #     cones = plt.axes(rect_cones)
+    #     box = plt.axes(rect_box)
+
+    #     # set the plots
+    #     cones.plot(date, y, label=self._symbol)
+    #     cones.plot(date, x, label=self._bench_symbol)
+        
+    #     # set and format the y-axis labels
+    #     locs = cones.get_yticks()
+    #     cones.set_yticklabels(map(f, locs))
+        
+    #     # turn on the grid
+    #     cones.grid(True, axis='y', which='major', alpha=0.5)
+        
+    #     # set the title
+    #     cones.set_title(self._estimator + ' (' + self._symbol +
+    #                     ' v. ' + self._bench_symbol + ', daily ' +
+    #                     self._start.strftime("%Y%m%d") + ' to ' + self._end.strftime("%Y%m%d") + ')')
+        
+    #     # shrink the plot up a bit and set the legend
+    #     cones.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=3)
+
+    #     # set the plot
+    #     box.plot(date, ratio, label=self._symbol + '/' + self._bench_symbol)
+        
+    #     # set the y-limits
+    #     box.set_ylim((ratio.min() - 0.05, ratio.max() + 0.05))
+        
+    #     # fill the area
+    #     box.fill_between(date, ratio, 0, color='blue', alpha=0.25)
+        
+    #     # set the legend
+    #     box.legend(loc='upper center', bbox_to_anchor=(0.5, -0.2), ncol=3)
+
+    #     return fig, plt
+
+    # def benchmark_correlation(self, window=90):
+    #     """
+        
+    #     Parameters
+    #     ----------
+    #     window : int
+    #         Rolling window for which to calculate the estimator
+    #     bins : int
+            
+    #     """
+        
+    #     price_data = self._price_data
+    #     bench_data = self._bench_data
+
+    #     y = self._get_estimator(
+    #         window=window,
+    #         price_data=price_data
+    #     )
+    #     x = self._get_estimator(
+    #         window=window,
+    #         price_data=bench_data
+    #     )
+    #     date = y.index
+
+    #     corr = x.rolling(window=window).corr(other=y)
+
+    #     if self._estimator is "Skew" or self._estimator is "Kurtosis":
+    #         f = lambda x: "%i" % round(x, 0)
+    #     else:
+    #         f = lambda x: "%i%%" % round(x*100, 0)
+        
+    #     # figure
+    #     fig = plt.figure(figsize=(8, 6))
+    #     cones = plt.axes()
+
+    #     # set the plots
+    #     cones.plot(date, corr)
+
+    #     # set the y-limits
+    #     cones.set_ylim((corr.min() - 0.05, corr.max() + 0.05))
+
+    #     # set and format the y-axis labels
+    #     locs = cones.get_yticks()
+    #     cones.set_yticklabels(map(f, locs))
+
+    #     # turn on the grid
+    #     cones.grid(True, axis='y', which='major', alpha=0.5)
+
+    #     # set the title
+    #     cones.set_title(self._estimator + ' (Correlation of ' +
+    #                     self._symbol + ' v. ' + self._bench_symbol +
+    #                     ', daily ' + self._start + ' to ' + self._end + ')')
+        
+    #     return fig, plt
+
+    # def benchmark_regression(self, window=90):
+    #     """
+        
+    #     Parameters
+    #     ----------
+    #     window : int
+    #         Rolling window for which to calculate the estimator
+    #     bins : int
+            
+    #     """
+    #     price_data = self._price_data
+    #     bench_data = self._bench_data
+
+    #     y = self._get_estimator(
+    #         window=window,
+    #         price_data=price_data
+    #     )
+    #     X = self._get_estimator(
+    #         window=window,
+    #         price_data=bench_data
+    #     )
+        
+    #     model = sm.OLS(y, X)
+    #     results = model.fit()
+
+    #     return results.summary()
+    
+    # def term_sheet(
+    #         self,
+    #         window=30,
+    #         windows=[30, 60, 90, 120],
+    #         quantiles=[0.25, 0.75],
+    #         bins=100,
+    #         normed=True,
+    #         open=False):
+        
+    #     cones_fig, cones_plt = self.cones(windows=windows, quantiles=quantiles)
+    #     rolling_quantiles_fig, rolling_quantiles_plt = self.rolling_quantiles(window=window, quantiles=quantiles)
+    #     rolling_extremes_fig, rolling_extremes_plt = self.rolling_extremes(window=window)
+    #     rolling_descriptives_fig, rolling_descriptives_plt = self.rolling_descriptives(window=window)
+    #     histogram_fig, histogram_plt = self.histogram(window=window, bins=bins, normed=normed)
+    #     benchmark_compare_fig, benchmark_compare_plt = self.benchmark_compare(window=window)
+    #     benchmark_corr_fig, benchmark_corr_plt = self.benchmark_correlation(window=window)
+    #     benchmark_regression = self.benchmark_regression(window=window)
+        
+    #     filename = self._symbol.upper() + '_termsheet_' + datetime.datetime.today().strftime("%Y%m%d") + '.pdf'
+    #     fn = os.path.abspath(os.path.join(u'..', u'term-sheets', filename))
+    #     pp = PdfPages(fn)
+        
+    #     pp.savefig(cones_fig)
+    #     pp.savefig(rolling_quantiles_fig)
+    #     pp.savefig(rolling_extremes_fig)
+    #     pp.savefig(rolling_descriptives_fig)
+    #     pp.savefig(histogram_fig)
+    #     pp.savefig(benchmark_compare_fig)
+    #     pp.savefig(benchmark_corr_fig)
+
+    #     fig = plt.figure(figsize=(8, 6))
+    #     ax = fig.add_subplot(111)
+    #     ax.text(
+    #         0, .2,
+    #         benchmark_regression,
+    #         family='monospace',
+    #         fontsize=9
+    #     )
+
+    #     plt.axis('off')
+    #     fig.tight_layout()
+    #     pp.savefig(fig)
+    #     pp.close()
+        
+    #     print('%s output complete' % filename)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
             OldOHLCdf = OldOHLCdf[OldOHLCdf.Date < OHLCStartDate] #DO NOT ENABLE!!!
         # if (FindFeather(OHLCSettleArg, './New NSE site/')):
         #     Settledf = feather.read_feather('./New NSE site/'+OHLCSettleArg) #Volatilitydf.info()

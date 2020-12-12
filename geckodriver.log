@@ -1,0 +1,91 @@
+1607778605724	geckodriver	INFO	Listening on 127.0.0.1:65162
+1607778608744	mozrunner::runner	INFO	Running command: "C:\\Program Files\\Mozilla Firefox\\firefox.exe" "--marionette" "-headless" "-foreground" "-no-remote" "-profile" "C:\\Users\\User\\AppData\\Local\\Temp\\rust_mozprofile6nd2bb"
+*** You are running in headless mode.
+JavaScript error: resource://gre/modules/XULStore.jsm, line 66: Error: Can't find profile directory.
+console.warn: SearchSettings: "get: No settings file exists, new profile?" (new Error("", "(unknown module)"))
+1607778613255	Marionette	INFO	Listening on port 65175
+1607778613627	Marionette	WARN	TLS certificate errors will be ignored for this session
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2968: unreachable code after return statement
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2985: unreachable code after return statement
+1607778634628	geckodriver	INFO	Listening on 127.0.0.1:65251
+1607778637294	mozrunner::runner	INFO	Running command: "C:\\Program Files\\Mozilla Firefox\\firefox.exe" "--marionette" "-headless" "-foreground" "-no-remote" "-profile" "C:\\Users\\User\\AppData\\Local\\Temp\\rust_mozprofile5haJpX"
+*** You are running in headless mode.
+JavaScript error: resource://gre/modules/XULStore.jsm, line 66: Error: Can't find profile directory.
+console.warn: SearchSettings: "get: No settings file exists, new profile?" (new Error("", "(unknown module)"))
+1607778641787	Marionette	INFO	Listening on port 65261
+1607778642141	Marionette	WARN	TLS certificate errors will be ignored for this session
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2968: unreachable code after return statement
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2985: unreachable code after return statement
+1607778695523	geckodriver	INFO	Listening on 127.0.0.1:65361
+1607778698963	mozrunner::runner	INFO	Running command: "C:\\Program Files\\Mozilla Firefox\\firefox.exe" "--marionette" "-headless" "-foreground" "-no-remote" "-profile" "C:\\Users\\User\\AppData\\Local\\Temp\\rust_mozprofile8suHj5"
+*** You are running in headless mode.
+JavaScript error: resource://gre/modules/XULStore.jsm, line 66: Error: Can't find profile directory.
+console.warn: SearchSettings: "get: No settings file exists, new profile?" (new Error("", "(unknown module)"))
+1607778702222	Marionette	INFO	Listening on port 65371
+1607778702700	Marionette	WARN	TLS certificate errors will be ignored for this session
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2968: unreachable code after return statement
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2985: unreachable code after return statement
+1607779139818	geckodriver	INFO	Listening on 127.0.0.1:49217
+1607779144550	mozrunner::runner	INFO	Running command: "C:\\Program Files\\Mozilla Firefox\\firefox.exe" "--marionette" "-foreground" "-no-remote" "-profile" "C:\\Users\\User\\AppData\\Local\\Temp\\rust_mozprofilezDZsyW"
+Can't find symbol 'eglSwapBuffersWithDamageEXT'.
+Can't find symbol 'eglSetDamageRegionKHR'.
+JavaScript error: resource://gre/modules/XULStore.jsm, line 66: Error: Can't find profile directory.
+console.warn: SearchSettings: "get: No settings file exists, new profile?" (new Error("", "(unknown module)"))
+1607779149709	Marionette	INFO	Listening on port 49231
+1607779149886	Marionette	WARN	TLS certificate errors will be ignored for this session
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2968: unreachable code after return statement
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2985: unreachable code after return statement
+1607779198744	Marionette	INFO	Stopped listening on port 49231
+
+###!!! [Child][RunMessage] Error: Channel closing: too late to send/recv, messages will be lost
+
+
+###!!! [Child][MessageChannel::SendAndWait] Error: Channel error: cannot send/recv
+
+1607779243317	geckodriver	INFO	Listening on 127.0.0.1:49347
+1607779246227	mozrunner::runner	INFO	Running command: "C:\\Program Files\\Mozilla Firefox\\firefox.exe" "--marionette" "-headless" "-foreground" "-no-remote" "-profile" "C:\\Users\\User\\AppData\\Local\\Temp\\rust_mozprofileNQD4vx"
+*** You are running in headless mode.
+JavaScript error: resource://gre/modules/XULStore.jsm, line 66: Error: Can't find profile directory.
+console.warn: SearchSettings: "get: No settings file exists, new profile?" (new Error("", "(unknown module)"))
+1607779249796	Marionette	INFO	Listening on port 49357
+1607779249951	Marionette	WARN	TLS certificate errors will be ignored for this session
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2968: unreachable code after return statement
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2985: unreachable code after return statement
+1607779658292	geckodriver	INFO	Listening on 127.0.0.1:49539
+1607779661281	mozrunner::runner	INFO	Running command: "C:\\Program Files\\Mozilla Firefox\\firefox.exe" "--marionette" "-headless" "-foreground" "-no-remote" "-profile" "C:\\Users\\User\\AppData\\Local\\Temp\\rust_mozprofile4RtU6V"
+*** You are running in headless mode.
+JavaScript error: resource://gre/modules/XULStore.jsm, line 66: Error: Can't find profile directory.
+console.warn: SearchSettings: "get: No settings file exists, new profile?" (new Error("", "(unknown module)"))
+1607779664368	Marionette	INFO	Listening on port 49548
+1607779664525	Marionette	WARN	TLS certificate errors will be ignored for this session
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2968: unreachable code after return statement
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2985: unreachable code after return statement
+JavaScript error: https://www.nseindia.com/assets/js/excellentexport.js, line 120: TypeError: table is null
+1607779829720	geckodriver	INFO	Listening on 127.0.0.1:49641
+1607779832880	mozrunner::runner	INFO	Running command: "C:\\Program Files\\Mozilla Firefox\\firefox.exe" "--marionette" "-headless" "-foreground" "-no-remote" "-profile" "C:\\Users\\User\\AppData\\Local\\Temp\\rust_mozprofiley8srJv"
+*** You are running in headless mode.
+JavaScript error: resource://gre/modules/XULStore.jsm, line 66: Error: Can't find profile directory.
+console.warn: SearchSettings: "get: No settings file exists, new profile?" (new Error("", "(unknown module)"))
+1607779836259	Marionette	INFO	Listening on port 49651
+1607779836585	Marionette	WARN	TLS certificate errors will be ignored for this session
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2968: unreachable code after return statement
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2985: unreachable code after return statement
+JavaScript error: https://www.nseindia.com/assets/js/excellentexport.js, line 120: TypeError: table is null
+1607780084637	geckodriver	INFO	Listening on 127.0.0.1:49818
+1607780087197	mozrunner::runner	INFO	Running command: "C:\\Program Files\\Mozilla Firefox\\firefox.exe" "--marionette" "-headless" "-foreground" "-no-remote" "-profile" "C:\\Users\\User\\AppData\\Local\\Temp\\rust_mozprofileyO48SO"
+*** You are running in headless mode.
+JavaScript error: resource://gre/modules/XULStore.jsm, line 66: Error: Can't find profile directory.
+console.warn: SearchSettings: "get: No settings file exists, new profile?" (new Error("", "(unknown module)"))
+1607780092787	Marionette	INFO	Listening on port 49827
+1607780093107	Marionette	WARN	TLS certificate errors will be ignored for this session
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2968: unreachable code after return statement
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2985: unreachable code after return statement
+1607780446223	geckodriver	INFO	Listening on 127.0.0.1:50031
+1607780449267	mozrunner::runner	INFO	Running command: "C:\\Program Files\\Mozilla Firefox\\firefox.exe" "--marionette" "-headless" "-foreground" "-no-remote" "-profile" "C:\\Users\\User\\AppData\\Local\\Temp\\rust_mozprofileGM8FFA"
+*** You are running in headless mode.
+JavaScript error: resource://gre/modules/XULStore.jsm, line 66: Error: Can't find profile directory.
+console.warn: SearchSettings: "get: No settings file exists, new profile?" (new Error("", "(unknown module)"))
+1607780452215	Marionette	INFO	Listening on port 50040
+1607780452487	Marionette	WARN	TLS certificate errors will be ignored for this session
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2968: unreachable code after return statement
+JavaScript warning: https://www.nseindia.com/dist/js/static/public/assets/js/common.js, line 2985: unreachable code after return statement
