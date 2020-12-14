@@ -3,13 +3,17 @@ import os
 import pyarrow
 import pyarrow.feather as feather
 import pandas
-import numpy
+import numpy as np
 import statsmodels.api as sm
 import matplotlib
 import matplotlib.mlab as mlab
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import math
+from nsepy.derivatives import get_expiry_date
+import datetime
+from datetime import date
+import pandas as pd
 
 def FindFeather(name, path):
     for root, dirs, files in os.walk(path):
@@ -196,12 +200,13 @@ class VolatilityEstimator(object):
             realized.append(estimator[-1])
 
             data.append(estimator)
-        
+
         if self._estimator is "Skew" or self._estimator is "Kurtosis":
             f = lambda x: "%i" % round(x, 0)
         else:
             f = lambda x: "%i%%" % round(x*100, 0)
-
+        print(*data, sep='\n')
+        print("The length of list is: ", len(data)) 
         # figure
         fig = plt.figure(figsize=(8, 6))
         fig.autofmt_xdate()
@@ -353,6 +358,53 @@ _, plt = vol.cones(windows=windows, quantiles=quantiles)
 # plt = vol.benchmark_compare(window=window)
 # plt = vol.benchmark_correlation(window=window)
 plt.show()
+
+CurrentDate = datetime.date.today()
+CurrentMonth = CurrentDate.month
+CurrentYear = CurrentDate.year
+CurrentDay = CurrentDate.day
+ExpiryDateSet = get_expiry_date(CurrentYear,CurrentMonth)
+
+ExpiryDateList = list(ExpiryDateSet)
+ExpiryDateList.sort()
+res = next(x for x, val in enumerate(ExpiryDateList) if val > CurrentDate)
+ExpiryDate = ExpiryDateList[res]
+
+OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-NIFTYoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
+OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+OptionChain, header = 1)
+OptionChainCSVdf = OptionChainCSVdf.rename(columns=lambda x: x.strip())
+OptionChainCSVdf = OptionChainCSVdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+
+OptionChainCSVdf.drop("Unnamed: 0", axis=1, inplace=True)
+OptionChainCSVdf.drop("Unnamed: 22", axis=1, inplace=True)
+CallOptionChaindf = OptionChainCSVdf.iloc[:,0:11]
+PutOptionChaindf = OptionChainCSVdf.iloc[:,10:21]
+if 'IV.1' in PutOptionChaindf.columns:
+    PutOptionChaindf.rename(columns={'IV.1': 'IV1'}, inplace=True)
+
+
+CallOptionChainIVdf = CallOptionChaindf[CallOptionChaindf.IV != '-']
+PutOptionChainIVdf = PutOptionChaindf[PutOptionChaindf.IV1 != '-']
+
+
+
+
+OptionChainCSV.columns = pd.RangeIndex(OptionChainCSV.columns.size)
+
+
+
+header_row = 0
+OptionChainCSV.columns = OptionChainCSV.iloc[header_row]
+
+
+
+FnOVolatilityURL = FnOVolatility + FnOVolatilityArg
+try:
+    r = requests.get(FnOVolatilityURL, allow_redirects=True) #Download FnO Volatility report for 'weekday'
+    if r.ok:
+        data = r.content.decode('utf8')
+
+
 
 
 # # ... or create a pdf term sheet with all metrics in term-sheets/

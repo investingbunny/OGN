@@ -123,8 +123,9 @@ JavaScript error: https://www.nseindia.com/assets/js/excellentexport.js, line 12
 JavaScript error: https://www.nseindia.com/assets/js/excellentexport.js, line 120: TypeError: table is null
 JavaScript error: https://www.nseindia.com/assets/js/excellentexport.js, line 120: TypeError: table is null
 JavaScript error: , line 0: NS_ERROR_NOT_AVAILABLE
-1607841471213	geckodriver	INFO	Listening on 127.0.0.1:51266
-1607841474383	mozrunner::runner	INFO	Running command: "C:\\Program Files\\Mozilla Firefox\\firefox.exe" "--marionette" "-headless" "-foreground" "-no-remote" "-profile" "C:\\Users\\User\\AppData\\Local\\Temp\\rust_mozprofilesHpf1T"
+Exiting due to channel error.
+Exiting due to channel error.
+07841474383	mozrunner::runner	INFO	Running command: "C:\\Program Files\\Mozilla Firefox\\firefox.exe" "--marionette" "-headless" "-foreground" "-no-remote" "-profile" "C:\\Users\\User\\AppData\\Local\\Temp\\rust_mozprofilesHpf1T"
 *** You are running in headless mode.
 JavaScript error: resource://gre/modules/XULStore.jsm, line 66: Error: Can't find profile directory.
 console.warn: SearchSettings: "get: No settings file exists, new profile?" (new Error("", "(unknown module)"))
