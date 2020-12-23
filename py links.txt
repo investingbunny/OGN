@@ -1,5 +1,7 @@
 https://pythondata.com/visualizing-data-overlaying-charts/
 https://stackoverflow.com/questions/11190735/python-matplotlib-superimpose-scatter-plots
+https://stackoverflow.com/questions/2369492/generate-a-heatmap-in-matplotlib-using-a-scatter-data-set
+https://stackoverflow.com/questions/14827650/pyplot-scatter-plot-marker-size
 https://medium.com/analytics-vidhya/building-a-technical-analysis-chart-with-python-17107b78b297
 https://realpython.com/python-matplotlib-guide/
 https://towardsdatascience.com/programmatic-identification-of-support-resistance-trend-lines-with-python-d797a4a90530

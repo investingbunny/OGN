@@ -3,6 +3,7 @@ import os
 import pyarrow
 import pyarrow.feather as feather
 import pandas
+import numpy
 import numpy as np
 import statsmodels.api as sm
 import matplotlib
@@ -385,7 +386,8 @@ if 'IV.1' in PutOptionChaindf.columns:
 
 CallOptionChainIVdf = CallOptionChaindf[CallOptionChaindf.IV != '-']
 PutOptionChainIVdf = PutOptionChaindf[PutOptionChaindf.IV1 != '-']
-
+CallOptionChainIVdf.reset_index(level=0, inplace=True, drop=True)
+PutOptionChainIVdf.reset_index(level=0, inplace=True, drop=True)
 
 
 
