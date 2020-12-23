@@ -206,8 +206,8 @@ class VolatilityEstimator(object):
             f = lambda x: "%i" % round(x, 0)
         else:
             f = lambda x: "%i%%" % round(x*100, 0)
-        print(*data, sep='\n')
-        print("The length of list is: ", len(data)) 
+        # print(*data, sep='\n')
+        # print("The length of list is: ", len(data)) 
         # figure
         fig = plt.figure(figsize=(8, 6))
         fig.autofmt_xdate()
@@ -216,8 +216,8 @@ class VolatilityEstimator(object):
         left_h = left+width+0.02
         rect_cones = [left, bottom, width, height]
         rect_box = [left_h, bottom, 0.17, height]
-        cones = plt.axes(rect_cones)
-        box = plt.axes(rect_box)
+        cones = fig.add_axes(rect_cones)
+        box = fig.add_axes(rect_box)
 
         # set the plots
         cones.plot(windows, max_, label="Max")
@@ -226,6 +226,9 @@ class VolatilityEstimator(object):
         cones.plot(windows, bottom_q, label=str(int(quantiles[0]*100)) + " Prctl")
         cones.plot(windows, min_, label="Min")
         cones.plot(windows, realized, 'r-.', label="Realized")
+        
+        cones.scatter(CallOptionChainIVdf['DaysToExpiry'],CallOptionChainIVdf['IV'],color='k')
+        cones.scatter(PutOptionChainIVdf['DaysToExpiry'],PutOptionChainIVdf['IV1'],color='g')
 
         # set the x ticks and limits
         cones.set_xticks(windows)
@@ -239,10 +242,10 @@ class VolatilityEstimator(object):
         cones.grid(True, axis='y', which='major', alpha=0.5)
 
         # set the title
-        cones.set_title(self._estimator + ' (' + self._symbol + ', daily ' + self._start.strftime("%Y%m%d") + ' to ' + self._end.strftime("%Y%m%d") + ')')
+        # cones.set_title(self._estimator + ' (' + self._symbol + ', daily ' + self._start.strftime("%Y%m%d") + ' to ' + self._end.strftime("%Y%m%d") + ')')
 
         # set the legend
-        cones.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=3)
+        cones.legend()#loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=3)
 
         # box plot
         box.boxplot(data, notch=1, sym='+')
@@ -310,7 +313,7 @@ def get_estimator(price_data, window=30, trading_periods=252, clean=True):
 # ]
 
 # data
-sym = 'BANKNIFTY'
+sym = 'NIFTY'
 # bench = '^GSPC'
 data_file_path = './Datastore/'+sym+'_ohlc.ftr'
 bench_file_path = './Datastore/NIFTY_ohlc.ftr'
@@ -319,7 +322,7 @@ est = 'Parkinson'
 
 # estimator windows
 window = 30
-windows = [5, 10, 20, 30, 60, 90]
+windows = [3, 5, 10, 20, 30, 60, 90]
 quantiles = [0.25, 0.75]
 bins = 100
 normed = True
@@ -345,7 +348,7 @@ bench_data = bench_data.set_index('Date')
 vol = VolatilityEstimator(
     price_data=price_data,
     estimator=est,
-    bench_data=bench_data #spx_price_data
+    bench_data=None #bench_data
 )
 
 # call plt.show() on any of the below...
@@ -361,17 +364,31 @@ _, plt = vol.cones(windows=windows, quantiles=quantiles)
 plt.show()
 
 CurrentDate = datetime.date.today()
-CurrentMonth = CurrentDate.month
-CurrentYear = CurrentDate.year
 CurrentDay = CurrentDate.day
-ExpiryDateSet = get_expiry_date(CurrentYear,CurrentMonth)
 
+MidMonthDate = CurrentDate + relativedelta(months=1)
+FarMonthDate = MidMonthDate + relativedelta(months=1)
+
+try:
+    ExpiryDateSet = None
+    ExpiryDateSet = get_expiry_date(CurrentDate.year,CurrentDate.month)
+    ExpiryDateSet = ExpiryDateSet.union(get_expiry_date(MidMonthDate.year,MidMonthDate.month))
+    ExpiryDateSet = ExpiryDateSet.union(get_expiry_date(FarMonthDate.year,FarMonthDate.month))
+except:
+    print('Couldnt download ExpiryDateSet:')
+######################################################## Need to iterate future expiry dates below
 ExpiryDateList = list(ExpiryDateSet)
 ExpiryDateList.sort()
 res = next(x for x, val in enumerate(ExpiryDateList) if val > CurrentDate)
 ExpiryDate = ExpiryDateList[res]
 
+ExpiryDates = []
+for i, num in enumerate(lst):
+    if i == 0 or num - lst[i-1] > 50:
+        new_lst.append(num)
+
 OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-NIFTYoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
+
 OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+OptionChain, header = 1)
 OptionChainCSVdf = OptionChainCSVdf.rename(columns=lambda x: x.strip())
 OptionChainCSVdf = OptionChainCSVdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
@@ -386,25 +403,41 @@ if 'IV.1' in PutOptionChaindf.columns:
 
 CallOptionChainIVdf = CallOptionChaindf[CallOptionChaindf.IV != '-']
 PutOptionChainIVdf = PutOptionChaindf[PutOptionChaindf.IV1 != '-']
+
+# covert IV string to an integer  to plot it
+CallOptionChainIVdf['IV'] = CallOptionChainIVdf['IV'].astype(float) 
+PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].astype(float) 
+CallOptionChainIVdf['IV'] = CallOptionChainIVdf['IV'].div(100).round(4)
+PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].div(100).round(4)
+#Reset the index
 CallOptionChainIVdf.reset_index(level=0, inplace=True, drop=True)
 PutOptionChainIVdf.reset_index(level=0, inplace=True, drop=True)
 
+CallOptionChainIVdf['Date'] = CurrentDate
+CallOptionChainIVdf['Expiry'] = ExpiryDate
+PutOptionChainIVdf['Date'] = CurrentDate
+PutOptionChainIVdf['Expiry'] = ExpiryDate
+# d = ExpiryDate - CurrentDate Can add this to a column directly?
+CallOptionChainIVdf[['Date','Expiry']] = CallOptionChainIVdf[['Date','Expiry']].apply(pd.to_datetime) #if conversion required
+CallOptionChainIVdf['DaysToExpiry'] = (CallOptionChainIVdf['Expiry'] - CallOptionChainIVdf['Date']).dt.days
+PutOptionChainIVdf[['Date','Expiry']] = PutOptionChainIVdf[['Date','Expiry']].apply(pd.to_datetime) #if conversion required
+PutOptionChainIVdf['DaysToExpiry'] = (PutOptionChainIVdf['Expiry'] - PutOptionChainIVdf['Date']).dt.days
 
 
-OptionChainCSV.columns = pd.RangeIndex(OptionChainCSV.columns.size)
+# OptionChainCSV.columns = pd.RangeIndex(OptionChainCSV.columns.size)
 
 
 
-header_row = 0
-OptionChainCSV.columns = OptionChainCSV.iloc[header_row]
+# header_row = 0
+# OptionChainCSV.columns = OptionChainCSV.iloc[header_row]
 
 
 
-FnOVolatilityURL = FnOVolatility + FnOVolatilityArg
-try:
-    r = requests.get(FnOVolatilityURL, allow_redirects=True) #Download FnO Volatility report for 'weekday'
-    if r.ok:
-        data = r.content.decode('utf8')
+# FnOVolatilityURL = FnOVolatility + FnOVolatilityArg
+# try:
+#     r = requests.get(FnOVolatilityURL, allow_redirects=True) #Download FnO Volatility report for 'weekday'
+#     if r.ok:
+#         data = r.content.decode('utf8')
 
 
 
