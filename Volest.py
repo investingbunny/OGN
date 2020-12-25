@@ -14,14 +14,57 @@ import math
 from nsepy.derivatives import get_expiry_date
 import datetime
 from datetime import date
+from dateutil.relativedelta import *
 import pandas as pd
+import glob
 
 ExpiryDates = []
+ExpiryDateList = []
 
 def FindFeather(name, path):
     for root, dirs, files in os.walk(path):
         if name in files:
             return os.path.join(root, name)
+
+def UpdateOptionChainTable(ExpiryDate):
+    OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-NIFTYoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
+    
+    OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+OptionChain, header = 1)
+    OptionChainCSVdf = OptionChainCSVdf.rename(columns=lambda x: x.strip())
+    OptionChainCSVdf = OptionChainCSVdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+    
+    OptionChainCSVdf.drop("Unnamed: 0", axis=1, inplace=True)
+    OptionChainCSVdf.drop("Unnamed: 22", axis=1, inplace=True)
+    CallOptionChaindf = OptionChainCSVdf.iloc[:,0:11]
+    PutOptionChaindf = OptionChainCSVdf.iloc[:,10:21]
+    if 'IV.1' in PutOptionChaindf.columns:
+        PutOptionChaindf.rename(columns={'IV.1': 'IV1'}, inplace=True)
+    
+    
+    CallOptionChainIVdf = CallOptionChaindf[CallOptionChaindf.IV != '-']
+    PutOptionChainIVdf = PutOptionChaindf[PutOptionChaindf.IV1 != '-']
+    
+    # covert IV string to an integer  to plot it
+    CallOptionChainIVdf['IV'] = CallOptionChainIVdf['IV'].astype(float) 
+    PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].astype(float) 
+    CallOptionChainIVdf['IV'] = CallOptionChainIVdf['IV'].div(100).round(4)
+    PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].div(100).round(4)
+    #Reset the index
+    CallOptionChainIVdf.reset_index(level=0, inplace=True, drop=True)
+    PutOptionChainIVdf.reset_index(level=0, inplace=True, drop=True)
+    
+    CallOptionChainIVdf['Date'] = CurrentDate
+    CallOptionChainIVdf['Expiry'] = ExpiryDate
+    PutOptionChainIVdf['Date'] = CurrentDate
+    PutOptionChainIVdf['Expiry'] = ExpiryDate
+    # d = ExpiryDate - CurrentDate Can add this to a column directly?
+    CallOptionChainIVdf[['Date','Expiry']] = CallOptionChainIVdf[['Date','Expiry']].apply(pd.to_datetime) #if conversion required
+    CallOptionChainIVdf['DaysToExpiry'] = (CallOptionChainIVdf['Expiry'] - CallOptionChainIVdf['Date']).dt.days
+    PutOptionChainIVdf[['Date','Expiry']] = PutOptionChainIVdf[['Date','Expiry']].apply(pd.to_datetime) #if conversion required
+    PutOptionChainIVdf['DaysToExpiry'] = (PutOptionChainIVdf['Expiry'] - PutOptionChainIVdf['Date']).dt.days
+
+    return CallOptionChainIVdf,PutOptionChainIVdf
+
 
 #from volatility import models
 
@@ -233,8 +276,8 @@ class VolatilityEstimator(object):
                 if i > CurrentDate:
                     try:
                         CallOptionChainIVdf, PutOptionChainIVdf = UpdateOptionChainTable(i)
-                        cones.scatter(CallOptionChainIVdf['DaysToExpiry'],CallOptionChainIVdf['IV'],color='k')
-                        cones.scatter(PutOptionChainIVdf['DaysToExpiry'],PutOptionChainIVdf['IV1'],color='g')
+                        cones.scatter(CallOptionChainIVdf['DaysToExpiry'],CallOptionChainIVdf['IV'],color='g')
+                        cones.scatter(PutOptionChainIVdf['DaysToExpiry'],PutOptionChainIVdf['IV1'],color='r')
                     except:
                         print('Couldnt update table for date'+i.strftime("%Y%m%d"))
 
@@ -330,18 +373,13 @@ est = 'Parkinson'
 CurrentDate = datetime.date.today()
 CurrentDay = CurrentDate.day
 
-MidMonthDate = CurrentDate + relativedelta(months=1)
-FarMonthDate = MidMonthDate + relativedelta(months=1)
+path = './Option chain - Dec 14/' # use your path
+all_files = glob.glob(path + CurrentDate.strftime("%Y-%m-%d") + "*.csv")
 
-try: #Need to figure out a way to get expiry dates accurately with new site
-    ExpiryDateSet = None
-    ExpiryDateSet = get_expiry_date(CurrentDate.year,CurrentDate.month)
-    ExpiryDateSet = ExpiryDateSet.union(get_expiry_date(MidMonthDate.year,MidMonthDate.month))
-    ExpiryDateSet = ExpiryDateSet.union(get_expiry_date(FarMonthDate.year,FarMonthDate.month))
-except:
-    print('Couldnt download ExpiryDateSet:')
-######################################################## Need to iterate future expiry dates below
-ExpiryDateList = list(ExpiryDateSet)
+ExpiryDateList.clear()
+for filename in all_files:
+    Edate = datetime.datetime.strptime(filename[72:82], '%Y-%m-%d').date()
+    ExpiryDateList.append(Edate)
 
 # estimator windows
 window = 30
@@ -390,44 +428,7 @@ plt.show()
 # res = next(x for x, val in enumerate(ExpiryDateList) if val > CurrentDate)
 # ExpiryDate = ExpiryDateList[res]
 
-def UpdateOptionChainTable(ExpiryDate):
-    OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-NIFTYoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
-    
-    OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+OptionChain, header = 1)
-    OptionChainCSVdf = OptionChainCSVdf.rename(columns=lambda x: x.strip())
-    OptionChainCSVdf = OptionChainCSVdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-    
-    OptionChainCSVdf.drop("Unnamed: 0", axis=1, inplace=True)
-    OptionChainCSVdf.drop("Unnamed: 22", axis=1, inplace=True)
-    CallOptionChaindf = OptionChainCSVdf.iloc[:,0:11]
-    PutOptionChaindf = OptionChainCSVdf.iloc[:,10:21]
-    if 'IV.1' in PutOptionChaindf.columns:
-        PutOptionChaindf.rename(columns={'IV.1': 'IV1'}, inplace=True)
-    
-    
-    CallOptionChainIVdf = CallOptionChaindf[CallOptionChaindf.IV != '-']
-    PutOptionChainIVdf = PutOptionChaindf[PutOptionChaindf.IV1 != '-']
-    
-    # covert IV string to an integer  to plot it
-    CallOptionChainIVdf['IV'] = CallOptionChainIVdf['IV'].astype(float) 
-    PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].astype(float) 
-    CallOptionChainIVdf['IV'] = CallOptionChainIVdf['IV'].div(100).round(4)
-    PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].div(100).round(4)
-    #Reset the index
-    CallOptionChainIVdf.reset_index(level=0, inplace=True, drop=True)
-    PutOptionChainIVdf.reset_index(level=0, inplace=True, drop=True)
-    
-    CallOptionChainIVdf['Date'] = CurrentDate
-    CallOptionChainIVdf['Expiry'] = ExpiryDate
-    PutOptionChainIVdf['Date'] = CurrentDate
-    PutOptionChainIVdf['Expiry'] = ExpiryDate
-    # d = ExpiryDate - CurrentDate Can add this to a column directly?
-    CallOptionChainIVdf[['Date','Expiry']] = CallOptionChainIVdf[['Date','Expiry']].apply(pd.to_datetime) #if conversion required
-    CallOptionChainIVdf['DaysToExpiry'] = (CallOptionChainIVdf['Expiry'] - CallOptionChainIVdf['Date']).dt.days
-    PutOptionChainIVdf[['Date','Expiry']] = PutOptionChainIVdf[['Date','Expiry']].apply(pd.to_datetime) #if conversion required
-    PutOptionChainIVdf['DaysToExpiry'] = (PutOptionChainIVdf['Expiry'] - PutOptionChainIVdf['Date']).dt.days
 
-    return CallOptionChainIVdf,PutOptionChainIVdf
 
 # OptionChainCSV.columns = pd.RangeIndex(OptionChainCSV.columns.size)
 
@@ -443,12 +444,31 @@ def UpdateOptionChainTable(ExpiryDate):
 #     r = requests.get(FnOVolatilityURL, allow_redirects=True) #Download FnO Volatility report for 'weekday'
 #     if r.ok:
 #         data = r.content.decode('utf8')
+###########################################################################
 # ExpiryDate = date(2020,12,31)
 # OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-NIFTYoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
 
 # OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+OptionChain, header = 1)
+# OptionChainCSVdf = OptionChainCSVdf.rename(columns=lambda x: x.strip())
+# OptionChainCSVdf = OptionChainCSVdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+
+# OptionChainCSVdf.drop("Unnamed: 0", axis=1, inplace=True)
+# OptionChainCSVdf.drop("Unnamed: 22", axis=1, inplace=True)
+# CallOptionChaindf = OptionChainCSVdf.iloc[:,0:11]
+# PutOptionChaindf = OptionChainCSVdf.iloc[:,10:21]
+# if 'IV.1' in PutOptionChaindf.columns:
+#     PutOptionChaindf.rename(columns={'IV.1': 'IV1'}, inplace=True)
 
 
+# CallOptionChainIVdf = CallOptionChaindf[CallOptionChaindf.IV != '-']
+# PutOptionChainIVdf = PutOptionChaindf[PutOptionChaindf.IV1 != '-']
+
+# # covert IV string to an integer  to plot it
+# CallOptionChainIVdf['IV'] = CallOptionChainIVdf['IV'].astype(float) 
+# PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].astype(float) 
+# CallOptionChainIVdf['IV'] = CallOptionChainIVdf['IV'].div(100).round(4)
+# PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].div(100).round(4)
+###########################################################################
 # # ... or create a pdf term sheet with all metrics in term-sheets/
 # vol.term_sheet(
 #     window,

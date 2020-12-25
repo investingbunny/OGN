@@ -10,7 +10,18 @@ Created on Sat Dec 12 16:44:30 2020
 
 @author: User
 """
+# MidMonthDate = CurrentDate + relativedelta(months=1)
+# FarMonthDate = MidMonthDate + relativedelta(months=1)
 
+# try: #Need to figure out a way to get expiry dates accurately with new site
+#     ExpiryDateSet = None
+#     ExpiryDateSet = get_expiry_date(CurrentDate.year,CurrentDate.month)
+#     ExpiryDateSet = ExpiryDateSet.union(get_expiry_date(MidMonthDate.year,MidMonthDate.month))
+#     ExpiryDateSet = ExpiryDateSet.union(get_expiry_date(FarMonthDate.year,FarMonthDate.month))
+# except:
+#     print('Couldnt download ExpiryDateSet:')
+# ######################################################## Need to iterate future expiry dates below
+# ExpiryDateList = list(ExpiryDateSet)
 
     # def rolling_quantiles(self, window=30, quantiles=[0.25, 0.75]):
     #     """Plots rolling quantiles of volatility
