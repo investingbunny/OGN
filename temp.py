@@ -9,6 +9,31 @@ Created on Tue Aug 18 11:54:38 2020
 Created on Sat Dec 12 16:44:30 2020
 
 @author: User
+
+
+
+
+# res = next(x for x, val in enumerate(ExpiryDateList) if val > CurrentDate)
+# ExpiryDate = ExpiryDateList[res]
+
+
+
+# OptionChainCSV.columns = pd.RangeIndex(OptionChainCSV.columns.size)
+
+
+
+# header_row = 0
+# OptionChainCSV.columns = OptionChainCSV.iloc[header_row]
+
+
+
+# FnOVolatilityURL = FnOVolatility + FnOVolatilityArg
+# try:
+#     r = requests.get(FnOVolatilityURL, allow_redirects=True) #Download FnO Volatility report for 'weekday'
+#     if r.ok:
+#         data = r.content.decode('utf8')
+
+
 """
 # MidMonthDate = CurrentDate + relativedelta(months=1)
 # FarMonthDate = MidMonthDate + relativedelta(months=1)
