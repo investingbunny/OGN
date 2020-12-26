@@ -17,6 +17,7 @@ from datetime import date
 from dateutil.relativedelta import *
 import pandas as pd
 import glob
+import models
 
 ExpiryDates = []
 ExpiryDateList = []
@@ -26,10 +27,14 @@ def FindFeather(name, path):
         if name in files:
             return os.path.join(root, name)
 
-def UpdateOptionChainTable(ExpiryDate):
-    OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-NIFTYoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
+def UpdateOptionChainTable(ExpiryDate,Symbol):
+    OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-' + Symbol + 'option-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
+    # OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-NIFTYoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
+    # print('Symbol = ' + Symbol)
+    print('expiry = ',ExpiryDate.strftime("%Y-%m-%d"))
     
-    OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+OptionChain, header = 1)
+    OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+ OptionChain, header = 1)
+    
     OptionChainCSVdf = OptionChainCSVdf.rename(columns=lambda x: x.strip())
     OptionChainCSVdf = OptionChainCSVdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
     
@@ -191,7 +196,7 @@ class VolatilityEstimator(object):
             Estimator series values
         """
 
-        return get_estimator(
+        return getattr(models, self._estimator).get_estimator(
             price_data=price_data,
             window=window,
             clean=clean
@@ -275,7 +280,7 @@ class VolatilityEstimator(object):
         for i in ExpiryDateList:
                 if i > CurrentDate:
                     try:
-                        CallOptionChainIVdf, PutOptionChainIVdf = UpdateOptionChainTable(i)
+                        CallOptionChainIVdf, PutOptionChainIVdf = UpdateOptionChainTable(i,self._symbol[1])
                         cones.scatter(CallOptionChainIVdf['DaysToExpiry'],CallOptionChainIVdf['IV'],color='g')
                         cones.scatter(PutOptionChainIVdf['DaysToExpiry'],PutOptionChainIVdf['IV1'],color='r')
                     except:
@@ -314,61 +319,18 @@ class VolatilityEstimator(object):
         
         return fig, plt
 
-
-        
-def get_estimator(price_data, window=30, trading_periods=252, clean=True):
-
-    log_ho = (price_data['High'] / price_data['Open']).apply(np.log)
-    log_lo = (price_data['Low'] / price_data['Open']).apply(np.log)
-    log_co = (price_data['Close'] / price_data['Open']).apply(np.log)
-    
-    log_oc = (price_data['Open'] / price_data['Close'].shift(1)).apply(np.log)
-    log_oc_sq = log_oc**2
-    
-    log_cc = (price_data['Close'] / price_data['Close'].shift(1)).apply(np.log)
-    log_cc_sq = log_cc**2
-    
-    rs = log_ho * (log_ho - log_co) + log_lo * (log_lo - log_co)
-    
-    close_vol = log_cc_sq.rolling(
-        window=window,
-        center=False
-    ).sum() * (1.0 / (window - 1.0))
-    open_vol = log_oc_sq.rolling(
-        window=window,
-        center=False
-    ).sum() * (1.0 / (window - 1.0))
-    window_rs = rs.rolling(
-        window=window,
-        center=False
-    ).sum() * (1.0 / (window - 1.0))
-
-    k = 0.34 / (1 + (window + 1) / (window - 1))
-    result = (open_vol + k * close_vol + (1 - k) * window_rs).apply(np.sqrt) * math.sqrt(trading_periods)
-
-    if clean:
-        return result.dropna()
-    else:
-        return result 
-
-
-# ESTIMATORS = [
-#     'GarmanKlass',
-#     'HodgesTompkins',
-#     'Kurtosis',
-#     'Parkinson',
-#     'Raw',
-#     'RogersSatchell',
-#     'Skew',
-#     'YangZhang'
-# ]
+# estimator windows
+window = 30
+windows = [3, 5, 10, 20, 30, 60, 90]
+quantiles = [0.25, 0.75]
+bins = 100
+normed = True
 
 # data
 sym = 'NIFTY'
-# bench = '^GSPC'
+bench = None #'NIFTY'
 data_file_path = './Datastore/'+sym+'_ohlc.ftr'
 bench_file_path = './Datastore/NIFTY_ohlc.ftr'
-est = 'Parkinson'
 
 CurrentDate = datetime.date.today()
 CurrentDay = CurrentDate.day
@@ -378,17 +340,10 @@ all_files = glob.glob(path + CurrentDate.strftime("%Y-%m-%d") + "*.csv")
 
 ExpiryDateList.clear()
 for filename in all_files:
-    Edate = datetime.datetime.strptime(filename[72:82], '%Y-%m-%d').date()
+    Edate = datetime.datetime.strptime(filename[-14:-4], '%Y-%m-%d').date()
     ExpiryDateList.append(Edate)
 
-# estimator windows
-window = 30
-windows = [3, 5, 10, 20, 30, 60, 90]
-quantiles = [0.25, 0.75]
-bins = 100
-normed = True
-
-# use the yahoo helper to correctly format data from finance.yahoo.com
+# Prepare the price and benchmark data to be used to calculate volatility
 price_data = feather.read_feather(data_file_path)
 price_data = price_data.iloc[-1000:]
 if 'Symbol' in price_data.columns:
@@ -400,16 +355,29 @@ bench_data = feather.read_feather(bench_file_path)
 bench_data = bench_data.iloc[-1000:]
 if 'Symbol' in bench_data.columns:
     bench_data.rename(columns={'Symbol': 'symbol'}, inplace=True)
-bench_data = bench_data.assign(symbol='NIFTY')        
+bench_data = bench_data.assign(symbol=bench)        
 bench_data = bench_data.set_index('Date')
 
 # spx_price_data = data.yahoo_helper(bench, bench_file_path)
-
+if sym is 'NIFTY':
+    bench_data = None
+    
+#     ESTIMATORS = [
+#     'GarmanKlass',
+#     'HodgesTompkins',
+#     'Kurtosis',
+#     'Parkinson',
+#     'Raw',
+#     'RogersSatchell',
+#     'Skew',
+#     'YangZhang'
+# ]
 # initialize class
+est = 'GarmanKlass'
 vol = VolatilityEstimator(
     price_data=price_data,
     estimator=est,
-    bench_data=None #bench_data
+    bench_data=bench_data
 )
 
 # call plt.show() on any of the below...
@@ -445,7 +413,7 @@ plt.show()
 #     if r.ok:
 #         data = r.content.decode('utf8')
 ###########################################################################
-# ExpiryDate = date(2020,12,31)
+# ExpiryDate = date(2021,2,4)
 # OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-NIFTYoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
 
 # OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+OptionChain, header = 1)
