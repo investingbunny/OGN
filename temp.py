@@ -35,6 +35,13 @@ Created on Sat Dec 12 16:44:30 2020
 
 
 """
+        
+# def GreaterThanCheck(QuantileList, val): 
+#     return(all(val > x for x in QuantileList))
+
+# def LessThanCheck(QuantileList, val): 
+#     return(all(x > val for x in QuantileList))
+
 # MidMonthDate = CurrentDate + relativedelta(months=1)
 # FarMonthDate = MidMonthDate + relativedelta(months=1)
 

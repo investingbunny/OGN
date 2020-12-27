@@ -22,6 +22,7 @@ from scipy.stats import norm
 
 ExpiryDates = []
 ExpiryDateList = []
+TopRecos = 2
 
 def FindFeather(name, path):
     for root, dirs, files in os.walk(path):
@@ -68,7 +69,7 @@ def UpdateOptionChainTable(ExpiryDate,Symbol):
     CallOptionChainIVdf['DaysToExpiry'] = (CallOptionChainIVdf['Expiry'] - CallOptionChainIVdf['Date']).dt.days
     PutOptionChainIVdf[['Date','Expiry']] = PutOptionChainIVdf[['Date','Expiry']].apply(pd.to_datetime) #if conversion required
     PutOptionChainIVdf['DaysToExpiry'] = (PutOptionChainIVdf['Expiry'] - PutOptionChainIVdf['Date']).dt.days
-
+    
     return CallOptionChainIVdf,PutOptionChainIVdf
 
 
@@ -260,7 +261,8 @@ class VolatilityEstimator(object):
         # print(*data, sep='\n')
         # print("The length of list is: ", len(data)) 
         # figure
-        fig = plt.figure(figsize=(8, 6))
+        fig = plt.figure(figsize=(16, 12))
+        ax0 = plt.subplots()
         fig.autofmt_xdate()
         left, width = 0.07, 0.65
         bottom, height = 0.2, 0.7
@@ -277,13 +279,51 @@ class VolatilityEstimator(object):
         cones.plot(windows, bottom_q, label=str(int(quantiles[0]*100)) + " Prctl")
         cones.plot(windows, min_, label="Min")
         cones.plot(windows, realized, 'r-.', label="Realized")
+
+        arrowprops = dict( 
+        arrowstyle = "->", 
+        connectionstyle = "angle, angleA = 0, angleB = 90,rad = 10") 
+      
+        offset = 72
         
         for i in ExpiryDateList:
                 if i > CurrentDate:
                     try:
                         CallOptionChainIVdf, PutOptionChainIVdf = UpdateOptionChainTable(i,self._symbol[1])
-                        cones.scatter(CallOptionChainIVdf['DaysToExpiry'],CallOptionChainIVdf['IV'],color='g')
+                        cones.scatter(CallOptionChainIVdf['DaysToExpiry'],CallOptionChainIVdf['IV'],color='b')
                         cones.scatter(PutOptionChainIVdf['DaysToExpiry'],PutOptionChainIVdf['IV1'],color='r')
+                        #Important to annotate only important points
+                        CallOptionChainIVdf = CallOptionChainIVdf.sort_values(by=['IV']) 
+                        PutOptionChainIVdf = PutOptionChainIVdf.sort_values(by=['IV1'])
+                        #Sell Recos for CE       + ',IV = ' (CallOptionChainIVdf['IV'][ind]*100).astype(str),
+                        for ind in CallOptionChainIVdf[-TopRecos:].index: 
+                            cones.annotate(CallOptionChainIVdf['STRIKE PRICE'][ind] + ' CE, LTP: ' + 
+                                           CallOptionChainIVdf['LTP'][ind] + ' ' + 
+                                           CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
+                                           xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),color='r', xytext =(2 * offset,2 * offset), textcoords ='offset points',arrowprops = arrowprops,
+                                           horizontalalignment='right', verticalalignment='top')
+                        #Sell Recos for PE     + ',IV1 = ' + (PutOptionChainIVdf['IV1'][ind]*100).astype(str)
+                        for ind in PutOptionChainIVdf[-TopRecos:].index:                            
+                            cones.annotate(PutOptionChainIVdf['STRIKE PRICE'][ind] + ' PE, LTP: ' + 
+                                            PutOptionChainIVdf['LTP.1'][ind] + ' ' +
+                                            PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
+                                            xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),color='r', xytext =(3 * offset, 2 * offset), textcoords ='offset points',arrowprops = arrowprops ,
+                                           horizontalalignment='left', verticalalignment='top')
+                        #Buy Recos for CE    + ',IV = ' + (CallOptionChainIVdf['IV'][ind]*100).astype(str)
+                        for ind in CallOptionChainIVdf.head(TopRecos).index: 
+                            cones.annotate(CallOptionChainIVdf['STRIKE PRICE'][ind] + ' CE, LTP: ' + 
+                                           CallOptionChainIVdf['LTP'][ind] + ' ' + 
+                                           CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
+                                           xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),color='b', xytext =(-1 * CallOptionChainIVdf['DaysToExpiry'][ind], -2 * CallOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = arrowprops,
+                                           horizontalalignment='left', verticalalignment='bottom')
+                        #Buy Recos for PE      + ',IV1 = ' + (PutOptionChainIVdf['IV1'][ind]*100).astype(str)
+                        for ind in PutOptionChainIVdf.head(TopRecos).index:                            
+                            cones.annotate(PutOptionChainIVdf['STRIKE PRICE'][ind] + ' PE, LTP: ' + 
+                                            PutOptionChainIVdf['LTP.1'][ind] + ' ' + 
+                                            PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
+                                            xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),color='b', xytext =(4 * offset, 2 * PutOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = arrowprops,
+                                           horizontalalignment='right', verticalalignment='bottom')
+                            
                     except:
                         print('Couldnt update table for date'+i.strftime("%Y%m%d"))
 
@@ -790,7 +830,7 @@ class VolatilityEstimator(object):
         benchmark_corr_fig, benchmark_corr_plt = self.benchmark_correlation(window=window)
         benchmark_regression = self.benchmark_regression(window=window)
         
-        filename = self._symbol[1] + '_termsheet_' + CurrentDate.strftime("%Y-%m-%d") + '.pdf'
+        filename = self._symbol[1] + self._estimator + '_termsheet_' + CurrentDate.strftime("%Y-%m-%d--%H-%M-%S %p") + '.pdf'
         fn = os.path.abspath(os.path.join(u'..', u'nsepywork/term-sheets', filename))
         pp = PdfPages(fn)
         
@@ -837,7 +877,7 @@ bench_file_path = './Datastore/NIFTY_ohlc.ftr'
 # CurrentDay = CurrentDate.day
 
 path = './Option chain - Dec 14/' # use your path
-all_files = glob.glob(path + CurrentDate.strftime("%Y-%m-%d") + "*.csv")
+all_files = glob.glob(path + CurrentDate.strftime("%Y-%m-%d") + '-' + sym + "*.csv")
 
 ExpiryDateList.clear()
 for filename in all_files:
@@ -847,21 +887,28 @@ for filename in all_files:
 # Prepare the price and benchmark data to be used to calculate volatility
 price_data = feather.read_feather(data_file_path)
 price_data = price_data.iloc[-300:]
+    
 if 'Symbol' in price_data.columns:
     price_data.rename(columns={'Symbol': 'symbol'}, inplace=True)
 price_data = price_data.assign(symbol=sym)        
 price_data = price_data.set_index('Date')
         
 bench_data = feather.read_feather(bench_file_path)
-bench_data = bench_data.iloc[-300:]
+if sym == 'NIFTY' or sym == 'BANKNIFTY':
+    bench_data = bench_data.iloc[-300:]
+else:
+    AnamolyDate = date(2020,9,28) #September 28 data for stock prices not available
+    bench_data = bench_data.iloc[-301:]
+    bench_data = bench_data[bench_data.Date != AnamolyDate]
+    
 if 'Symbol' in bench_data.columns:
     bench_data.rename(columns={'Symbol': 'symbol'}, inplace=True)
 bench_data = bench_data.assign(symbol=bench)        
 bench_data = bench_data.set_index('Date')
 
 # spx_price_data = data.yahoo_helper(bench, bench_file_path)
-if sym is 'NIFTY':
-    bench_data = None
+# if sym is 'NIFTY':
+#     bench_data = None
     
 #     ESTIMATORS = [
 #     'GarmanKlass',
@@ -875,6 +922,7 @@ if sym is 'NIFTY':
 # ]
 # initialize class
 est = 'YangZhang'
+TopRecos = 2
 vol = VolatilityEstimator(
     price_data=price_data,
     estimator=est,
@@ -901,10 +949,10 @@ vol.term_sheet(
 # if bench is not None:
 #     _, plt = vol.benchmark_compare(window=window)
 #     _, plt = vol.benchmark_correlation(window=window)
-# # plt.show()
+# plt.show()
 
 ###########################################################################
-# ExpiryDate = date(2021,1,7)
+# ExpiryDate = date(2020,12,31)
 # OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-BANKNIFTYoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
 
 # OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+OptionChain, header = 1)
@@ -927,6 +975,7 @@ vol.term_sheet(
 # PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].astype(float) 
 # CallOptionChainIVdf['IV'] = CallOptionChainIVdf['IV'].div(100).round(4)
 # PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].div(100).round(4)
+
 ###########################################################################
 # # ... or create a pdf term sheet with all metrics in term-sheets/
 
