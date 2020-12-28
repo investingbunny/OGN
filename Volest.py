@@ -31,9 +31,9 @@ def FindFeather(name, path):
 
 def UpdateOptionChainTable(ExpiryDate,Symbol):
     OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-' + Symbol + 'option-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
-    # OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-NIFTYoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
+    # OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-TATAMOTORSoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
     # print('Symbol = ' + Symbol)
-    print('expiry = ',ExpiryDate.strftime("%Y-%m-%d"))
+    # print('expiry = ',ExpiryDate.strftime("%Y-%m-%d"))
     
     OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+ OptionChain, header = 1)
     
@@ -46,7 +46,6 @@ def UpdateOptionChainTable(ExpiryDate,Symbol):
     PutOptionChaindf = OptionChainCSVdf.iloc[:,10:21]
     if 'IV.1' in PutOptionChaindf.columns:
         PutOptionChaindf.rename(columns={'IV.1': 'IV1'}, inplace=True)
-    
     
     CallOptionChainIVdf = CallOptionChaindf[CallOptionChaindf.IV != '-']
     PutOptionChainIVdf = PutOptionChaindf[PutOptionChaindf.IV1 != '-']
@@ -66,12 +65,19 @@ def UpdateOptionChainTable(ExpiryDate,Symbol):
     PutOptionChainIVdf['Expiry'] = ExpiryDate
     # d = ExpiryDate - CurrentDate Can add this to a column directly?
     CallOptionChainIVdf[['Date','Expiry']] = CallOptionChainIVdf[['Date','Expiry']].apply(pd.to_datetime) #if conversion required
-    CallOptionChainIVdf['DaysToExpiry'] = (CallOptionChainIVdf['Expiry'] - CallOptionChainIVdf['Date']).dt.days
+    CallOptionChainIVdf['DaysToExpiry'] = (CallOptionChainIVdf['Expiry'] - CallOptionChainIVdf['Date'])
+    CallOptionChainIVdf['DaysToExpiry'] = CallOptionChainIVdf['DaysToExpiry'].dt.days
     PutOptionChainIVdf[['Date','Expiry']] = PutOptionChainIVdf[['Date','Expiry']].apply(pd.to_datetime) #if conversion required
-    PutOptionChainIVdf['DaysToExpiry'] = (PutOptionChainIVdf['Expiry'] - PutOptionChainIVdf['Date']).dt.days
+    PutOptionChainIVdf['DaysToExpiry'] = (PutOptionChainIVdf['Expiry'] - PutOptionChainIVdf['Date'])
+    PutOptionChainIVdf['DaysToExpiry'] = PutOptionChainIVdf['DaysToExpiry'].dt.days
+
+    # df["Date"] = df["Date"].apply(pd.to_datetime, format='%d-%b-%Y')
+    CallOptionChainIVdf['Date'] = CallOptionChainIVdf['Date'].dt.date
+    CallOptionChainIVdf['Expiry'] = CallOptionChainIVdf['Expiry'].dt.date
+    PutOptionChainIVdf['Date'] = PutOptionChainIVdf['Date'].dt.date
+    PutOptionChainIVdf['Expiry'] = PutOptionChainIVdf['Expiry'].dt.date
     
     return CallOptionChainIVdf,PutOptionChainIVdf
-
 
 #from volatility import models
 
@@ -282,48 +288,55 @@ class VolatilityEstimator(object):
 
         arrowprops = dict( 
         arrowstyle = "->", 
-        connectionstyle = "angle, angleA = 0, angleB = 90,rad = 10") 
-      
+        connectionstyle = "angle3,angleA=90,angleB=0")
+          # connectionstyle = "angle, angleA = 0, angleB = 90,rad = 10"
+          
+        buyarrowprops = dict( 
+        arrowstyle = "->", 
+        connectionstyle = "angle, angleA = 0, angleB = 90,rad = 10")          
         offset = 72
         
         for i in ExpiryDateList:
                 if i > CurrentDate:
                     try:
+                            # print('Scattering for date '+ i.strftime("%Y%m%d"))
                         CallOptionChainIVdf, PutOptionChainIVdf = UpdateOptionChainTable(i,self._symbol[1])
                         cones.scatter(CallOptionChainIVdf['DaysToExpiry'],CallOptionChainIVdf['IV'],color='b')
                         cones.scatter(PutOptionChainIVdf['DaysToExpiry'],PutOptionChainIVdf['IV1'],color='r')
-                        #Important to annotate only important points
+                        #Important to annotate only outlier points
                         CallOptionChainIVdf = CallOptionChainIVdf.sort_values(by=['IV']) 
                         PutOptionChainIVdf = PutOptionChainIVdf.sort_values(by=['IV1'])
+                        
                         #Sell Recos for CE       + ',IV = ' (CallOptionChainIVdf['IV'][ind]*100).astype(str),
-                        for ind in CallOptionChainIVdf[-TopRecos:].index: 
-                            cones.annotate(CallOptionChainIVdf['STRIKE PRICE'][ind] + ' CE, LTP: ' + 
-                                           CallOptionChainIVdf['LTP'][ind] + ' ' + 
-                                           CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
-                                           xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),color='r', xytext =(2 * offset,2 * offset), textcoords ='offset points',arrowprops = arrowprops,
+                        for ind in CallOptionChainIVdf[-TopRecos:].index:
+                            cones.annotate(str(CallOptionChainIVdf['STRIKE PRICE'][ind]) + ' CE, LTP: ' + 
+                                           CallOptionChainIVdf['LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
+                                           xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),
+                                           color='r', xytext =(3 * offset,2 * offset), textcoords ='offset points',arrowprops = arrowprops,
                                            horizontalalignment='right', verticalalignment='top')
-                        #Sell Recos for PE     + ',IV1 = ' + (PutOptionChainIVdf['IV1'][ind]*100).astype(str)
-                        for ind in PutOptionChainIVdf[-TopRecos:].index:                            
-                            cones.annotate(PutOptionChainIVdf['STRIKE PRICE'][ind] + ' PE, LTP: ' + 
+                        # Sell Recos for PE     + ',IV1 = ' + (PutOptionChainIVdf['IV1'][ind]*100).astype(str)
+                        for ind in PutOptionChainIVdf[-TopRecos:].index:
+                            cones.annotate(str(PutOptionChainIVdf['STRIKE PRICE'][ind]) + ' PE, LTP: ' + 
                                             PutOptionChainIVdf['LTP.1'][ind] + ' ' +
                                             PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
-                                            xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),color='r', xytext =(3 * offset, 2 * offset), textcoords ='offset points',arrowprops = arrowprops ,
-                                           horizontalalignment='left', verticalalignment='top')
+                                            xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),
+                                            color='r', xytext =(3 * offset, 1 * offset), textcoords ='offset points',arrowprops = arrowprops ,
+                                            horizontalalignment='left', verticalalignment='top')
                         #Buy Recos for CE    + ',IV = ' + (CallOptionChainIVdf['IV'][ind]*100).astype(str)
-                        for ind in CallOptionChainIVdf.head(TopRecos).index: 
-                            cones.annotate(CallOptionChainIVdf['STRIKE PRICE'][ind] + ' CE, LTP: ' + 
-                                           CallOptionChainIVdf['LTP'][ind] + ' ' + 
-                                           CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
-                                           xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),color='b', xytext =(-1 * CallOptionChainIVdf['DaysToExpiry'][ind], -2 * CallOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = arrowprops,
-                                           horizontalalignment='left', verticalalignment='bottom')
+                        for ind in CallOptionChainIVdf.head(TopRecos).index:
+                            cones.annotate(str(CallOptionChainIVdf['STRIKE PRICE'][ind]) + ' CE, LTP: ' + 
+                                            CallOptionChainIVdf['LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
+                                            xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),
+                                            color='b', xytext =(2 * CallOptionChainIVdf['DaysToExpiry'][ind], -3 * CallOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = buyarrowprops,
+                                            horizontalalignment='left', verticalalignment='bottom')
                         #Buy Recos for PE      + ',IV1 = ' + (PutOptionChainIVdf['IV1'][ind]*100).astype(str)
-                        for ind in PutOptionChainIVdf.head(TopRecos).index:                            
-                            cones.annotate(PutOptionChainIVdf['STRIKE PRICE'][ind] + ' PE, LTP: ' + 
+                        for ind in PutOptionChainIVdf.head(TopRecos).index:
+                            cones.annotate(str(PutOptionChainIVdf['STRIKE PRICE'][ind]) + ' PE, LTP: ' + 
                                             PutOptionChainIVdf['LTP.1'][ind] + ' ' + 
                                             PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
-                                            xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),color='b', xytext =(4 * offset, 2 * PutOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = arrowprops,
-                                           horizontalalignment='right', verticalalignment='bottom')
-                            
+                                            xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),
+                                            color='b', xytext =(4 * offset, -4 * PutOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = buyarrowprops,
+                                            horizontalalignment='right', verticalalignment='bottom')
                     except:
                         print('Couldnt update table for date'+i.strftime("%Y%m%d"))
 
@@ -873,8 +886,8 @@ bench = 'NIFTY' #None #'NIFTY'
 data_file_path = './Datastore/'+sym+'_ohlc.ftr'
 bench_file_path = './Datastore/NIFTY_ohlc.ftr'
 
-# CurrentDate = datetime.date.today()
-# CurrentDay = CurrentDate.day
+CurrentDate = datetime.date.today()
+CurrentDay = CurrentDate.day
 
 path = './Option chain - Dec 14/' # use your path
 all_files = glob.glob(path + CurrentDate.strftime("%Y-%m-%d") + '-' + sym + "*.csv")
@@ -922,7 +935,7 @@ bench_data = bench_data.set_index('Date')
 # ]
 # initialize class
 est = 'YangZhang'
-TopRecos = 2
+TopRecos = 1
 vol = VolatilityEstimator(
     price_data=price_data,
     estimator=est,
@@ -953,7 +966,7 @@ vol.term_sheet(
 
 ###########################################################################
 # ExpiryDate = date(2020,12,31)
-# OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-BANKNIFTYoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
+# OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-TATAMOTORSoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
 
 # OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+OptionChain, header = 1)
 # OptionChainCSVdf = OptionChainCSVdf.rename(columns=lambda x: x.strip())

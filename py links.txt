@@ -10,3 +10,4 @@ https://github.com/GregoryMorse/trendln.git
 https://medium.com/swlh/creating-a-trading-strategy-using-the-rsi-the-bollinger-bands-new-ideas-using-python-4115e1fdfbba
 https://github.com/VarunS2002/Python-NSE-Option-Chain-Analyzer
 https://matplotlib.org/3.2.1/tutorials/text/annotations.html
+https://matplotlib.org/3.1.0/gallery/userdemo/connectionstyle_demo.html
