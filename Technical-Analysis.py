@@ -49,88 +49,6 @@ PEHistory = "PEHistory.ftr"
 RiskFreeRate = 0.033578 #https://www.rbi.org.in/
 Dividend = 0
 
-NSE500ScripList = ["3MINDIA","ACC","AIAENG","APLAPOLLO","AUBANK","AARTIIND","AAVAS","ABBOTINDIA",
-                    "ADANIGAS","ADANIGREEN","ADANIPORTS","ADANIPOWER","ADANITRANS","ABCAPITAL","ABFRL",
-                    "ADVENZYMES","AEGISCHEM","AFFLE","AJANTPHARM","AKZOINDIA","APLLTD","ALKEM","ALLCARGO",
-                    "AMARAJABAT","AMBER","AMBUJACEM","APOLLOHOSP","APOLLOTYRE","ARVINDFASN","ASAHIINDIA",
-                    "ASHOKLEY","ASHOKA","ASIANPAINT","ASTERDM","ASTRAZEN","ASTRAL","ATUL","AUROPHARMA",
-                    "AVANTIFEED","DMART","AXISBANK","BASF","BEML","BSE","BAJAJ-AUTO","BAJAJCON","BAJAJELEC",
-                    "BAJFINANCE","BAJAJFINSV","BAJAJHLDNG","BALKRISIND","BALMLAWRIE","BALRAMCHIN","BANDHANBNK",
-                    "BANKBARODA","BANKINDIA","MAHABANK","BATAINDIA","BAYERCROP","BERGEPAINT","BDL","BEL",
-                    "BHARATFORG","BHEL","BPCL","BHARTIARTL","INFRATEL","BIOCON","BIRLACORPN","BSOFT",
-                    "BLISSGVS","BLUEDART","BLUESTARCO","BBTC","BOMDYEING","BOSCHLTD","BRIGADE","BRITANNIA",
-                    "CARERATING","CCL","CESC","CRISIL","CADILAHC","CANFINHOME","CANBK","CAPLIPOINT","CGCL",
-                    "CARBORUNIV","CASTROLIND","CEATLTD","CENTRALBK","CDSL","CENTURYPLY","CERA","CHALET",
-                    "CHAMBLFERT","CHENNPETRO","CHOLAHLDNG","CHOLAFIN","CIPLA","CUB","COALINDIA","COCHINSHIP",
-                    "COLPAL","CONCOR","COROMANDEL","CREDITACC","CROMPTON","CUMMINSIND","CYIENT","DBCORP",
-                    "DCBBANK","DCMSHRIRAM","DLF","DABUR","DALBHARAT","DEEPAKNTR","DELTACORP","DHFL","DBL",
-                    "DISHTV","DCAL","DIVISLAB","DIXON","LALPATHLAB","DRREDDY","EIDPARRY","EIHOTEL","EDELWEISS",
-                    "EICHERMOT","ELGIEQUIP","EMAMILTD","ENDURANCE","ENGINERSIN","EQUITAS","ERIS","ESCORTS",
-                    "ESSELPACK","EXIDEIND","FDC","FEDERALBNK","FMGOETZE","FINEORG","FINCABLES","FINPIPE","FSL",
-                    "FORTIS","FCONSUMER","FLFL","FRETAIL","GAIL","GEPIL","GET&D","GHCL","GMRINFRA","GALAXYSURF",
-                    "GARFIBRES","GAYAPROJ","GICRE","GILLETTE","GLAXO","GLENMARK","GODFRYPHLP","GODREJAGRO",
-                    "GODREJCP","GODREJIND","GODREJPROP","GRANULES","GRAPHITE","GRASIM","GESHIP","GREAVESCOT",
-                    "GRINDWELL","GUJALKALI","GUJGASLTD","GMDCLTD","GNFC","GPPL","GSFC","GSPL","GULFOILLUB",
-                    "HEG","HCLTECH","HDFCAMC","HDFCBANK","HDFCLIFE","HFCL","HATSUN","HAVELLS","HEIDELBERG",
-                    "HERITGFOOD","HEROMOTOCO","HEXAWARE","HSCL","HIMATSEIDE","HINDALCO","HAL","HINDCOPPER",
-                    "HINDPETRO","HINDUNILVR","HINDZINC","HONAUT","HUDCO","HDFC","ICICIBANK","ICICIGI",
-                    "ICICIPRULI","ISEC","ICRA","IDBI","IDFCFIRSTB","IDFC","IFBIND","IFCI","IIFL","IRB",
-                    "IRCON","ITC","ITDCEM","ITI","INDIACEM","ITDC","IBULHSGFIN","IBULISL","IBREALEST",
-                    "IBVENTURES","INDIAMART","INDIANB","IEX","INDHOTEL","IOC","IOB","INDOSTAR","IGL",
-                    "INDUSINDBK","INFIBEAM","NAUKRI","INFY","INOXLEISUR","INTELLECT","INDIGO","IPCALAB",
-                    "JBCHEPHARM","JKCEMENT","JKLAKSHMI","JKPAPER","JKTYRE","JMFINANCIL","JSWENERGY","JSWSTEEL",
-                    "JAGRAN","JAICORPLTD","JISLJALEQS","J&KBANK","JAMNAAUTO","JINDALSAW","JSLHISAR","JSL",
-                    "JINDALSTEL","JCHAC","JUBLFOOD","JUBILANT","JUSTDIAL","JYOTHYLAB","KPRMILL","KEI","KNRCON",
-                    "KPITTECH","KRBL","KAJARIACER","KALPATPOWR","KANSAINER","KTKBANK","KARURVYSYA","KSCL",
-                    "KEC","KENNAMET","KIRLOSENG","KOLTEPATIL","KOTAKBANK","L&TFH","LTTS","LICHSGFIN",
-                    "LAXMIMACH","LAKSHVILAS","LTI","LT","LAURUSLABS","LEMONTREE","LINDEINDIA","LUPIN",
-                    "LUXIND","MASFIN","MMTC","MOIL","MRF","MAGMA","MGL","MAHSCOOTER","MAHSEAMLES","M&MFIN",
-                    "M&M","MAHINDCIE","MHRIL","MAHLOG","MANAPPURAM","MRPL","MARICO","MARUTI","MFSL",
-                    "METROPOLIS","MINDTREE","MINDACORP","MINDAIND","MIDHANI","MOTHERSUMI","MOTILALOFS",
-                    "MPHASIS","MCX","MUTHOOTFIN","NATCOPHARM","NBCC","NCC","NESCO","NHPC","NIITTECH",
-                    "NLCINDIA","NMDC","NTPC","NH","NATIONALUM","NFL","NBVENTURES","NAVINFLUOR","NESTLEIND",
-                    "NETWORK18","NILKAMAL","NAM-INDIA","OBEROIRLTY","ONGC","OIL","OMAXE","OFSS","ORIENTCEM",
-                    "ORIENTELEC","ORIENTREF","PCJEWELLER","PIIND","PNBHOUSING","PNCINFRA","PTC","PVR",
-                    "PAGEIND","PARAGMILK","PERSISTENT","PETRONET","PFIZER","PHILIPCARB","PHOENIXLTD",
-                    "PIDILITIND","PEL","POLYCAB","PFC","POWERGRID","PRAJIND","PRESTIGE","PRSMJOHNSN","PGHL",
-                    "PGHH","PNB","QUESS","RBLBANK","RECLTD","RITES","RADICO","RVNL","RAIN","RAJESHEXPO",
-                    "RALLIS","RCF","RATNAMANI","RAYMOND","REDINGTON","RELAXO","RELCAPITAL","RELIANCE",
-                    "RELINFRA","RPOWER","REPCOHOME","RESPONIND","SHK","SBILIFE","SJVN","SKFINDIA","SRF",
-                    "SADBHAV","SANOFI","SCHAEFFLER","SIS","SFL","SHILPAMED","SHOPERSTOP","SHREECEM","RENUKA",
-                    "SHRIRAMCIT","SRTRANSFIN","SIEMENS","SOBHA","SOLARINDS","SONATSOFTW","SOUTHBANK",
-                    "SPANDANA","SPICEJET","STARCEMENT","SBIN","SAIL","STRTECH","STAR","SUDARSCHEM","SPARC",
-                    "SUNPHARMA","SUNTV","SUNCLAYLTD","SUNDARMFIN","SUNDRMFAST","SUNTECK","SUPRAJIT",
-                    "SUPREMEIND","SUZLON","SWANENERGY","SYMPHONY","SYNGENE","TCIEXP","TCNSBRANDS","TTKPRESTIG",
-                    "TVTODAY","TV18BRDCST","TVSMOTOR","TAKE","TASTYBITE","TCS","TATAELXSI","TATAGLOBAL",
-                    "TATAINVEST","TATAMTRDVR","TATAMOTORS","TATAPOWER","TATASTLBSL","TATASTEEL","TEAMLEASE",
-                    "TECHM","TECHNOE","NIACL","RAMCOCEM","THERMAX","THYROCARE","TIMETECHNO","TIMKEN","TITAN",
-                    "TORNTPHARM","TORNTPOWER","TRENT","TRIDENT","TRITURBINE","TIINDIA","UCOBANK","UFLEX","UPL",
-                    "UJJIVAN","ULTRACEMCO","UNIONBANK","UBL","MCDOWELL-N","VGUARD","VMART","VIPIND","VRLLOG",
-                    "VSTIND","WABAG","VAIBHAVGBL","VAKRANGEE","VTL","VARROC","VBL","VEDL","VENKEYS",
-                    "VINATIORGA","IDEA","VOLTAS","WABCOINDIA","WELCORP","WELSPUNIND","WESTLIFE","WHIRLPOOL",
-                    "WIPRO","WOCKPHARMA","YESBANK","ZEEL","ZENSARTECH","ZYDUSWELL","ECLERX","TATACONSUM",
-                    "DEEPAKFERT","ADANIENT","CGPOWER","PENIND","BANKNIFTY","NIFTY"]
-
-NSEFnOList = ["BANKNIFTY","NIFTY","ACC","ADANIENT","ADANIPORTS","AMARAJABAT","AMBUJACEM","APOLLOHOSP",
-              "APOLLOTYRE","ASHOKLEY","ASIANPAINT","AUROPHARMA","AXISBANK","BAJAJ-AUTO","BAJAJFINSV",
-              "BAJFINANCE","BALKRISIND","BANDHANBNK","BANKBARODA","BATAINDIA","BEL","BERGEPAINT","BHARATFORG",
-              "BHARTIARTL","BHEL","BIOCON","BOSCHLTD","BPCL","BRITANNIA","CADILAHC","CANBK","CENTURYTEX",
-              "COFORGE","CHOLAFIN","CIPLA","COALINDIA","COLPAL","CONCOR","CUMMINSIND","DABUR","DIVISLAB","DLF",
-              "DRREDDY","EICHERMOT","EQUITAS","ESCORTS","EXIDEIND","FEDERALBNK","GAIL","GLENMARK","GMRINFRA",
-              "GODREJCP","GODREJPROP","GRASIM","HAVELLS","HCLTECH","HDFC","HDFCBANK","HDFCLIFE","HEROMOTOCO",
-               "HINDALCO","HINDPETRO","HINDUNILVR","IBULHSGFIN","ICICIBANK","ICICIPRULI","IDEA","IDFCFIRSTB",
-               "IGL","INDIGO","INDUSINDBK","INFRATEL","INFY","IOC","ITC","JINDALSTEL","JSWSTEEL","JUBLFOOD",
-               "JUSTDIAL","KOTAKBANK","L&TFH","LICHSGFIN","LT","LUPIN","M&M","M&MFIN","MANAPPURAM","MARICO",
-              "MARUTI","MCDOWELL-N","MFSL","MGL","MINDTREE","MOTHERSUMI","MRF","MUTHOOTFIN","NATIONALUM",
-              "NAUKRI","NCC","NESTLEIND","NIITTECH","NMDC","NTPC","ONGC","PAGEIND","PEL","PETRONET","PFC",
-              "PIDILITIND","PNB","POWERGRID","PVR","RAMCOCEM","RBLBANK","RECLTD","RELIANCE","SAIL","SBILIFE",
-              "SBIN","SHREECEM","SIEMENS","SRF","SRTRANSFIN","SUNPHARMA","SUNTV","TATACHEM","TATACONSUM",
-              "TATAMOTORS","TATAPOWER","TATASTEEL","TCS","TECHM","TITAN","TORNTPHARM","TORNTPOWER","TVSMOTOR",
-              "UBL","UJJIVAN","ULTRACEMCO","UPL","VEDL","VOLTAS","WIPRO","ZEEL"]
-
-Scriplist = ["TCS","TATAPOWER","REDINGTON","SAIL"]
-YahooScriplist = ["RELIANCE.NS", "HDFCBANK.NS", "TATASTEEL.NS", "TCS.NS", "TATAMOTORS.NS","TATAPOWER.NS","INDIGO.NS","IDEA.NS","OIL.NS","AUROPHARMA.NS","CIPLA.NS","FEDERALBNK.NS","AXISBANK.NS","ZEEL.NS"]
-IndexList = ["NIFTY","NIFTYIT","BANKNIFTY","INDIAVIX"]
 #################################Global Variables
 #Creating strike List
 strike = []
@@ -216,7 +134,7 @@ def GetMaxPain(Scrip,OptionsFrameStart): #Depth is considered in months to see h
         
 def MACD(DF,a,b,c):
     """function to calculate MACD
-       typical values a = 12; b =26, c =9"""
+       typical values a = 12; b =26, c =9""" #df =  Indicatordf.copy()
     df = DF.copy()
     df["MA_Fast"]=df["Close"].ewm(span=a,min_periods=a).mean()
     df["MA_Slow"]=df["Close"].ewm(span=b,min_periods=b).mean()
@@ -890,77 +808,88 @@ def GenerateMLdf(DF,Scrip):
 
 def TechAnalysis():
     Finaldf = pd.DataFrame()
-    # for Scrip in NSE500ScripList:#Scriplist:
-    for Scrip in NSE500ScripList:        
-        OHLCdf = None
-        Indicatordf = None
-        # Scrip = "RELIANCE"
-        print('Now for '+ Scrip)
-        OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
-        #Read from feather
-        if (FindFeather(OHLCFileName, './Datastore/')):
-            OHLCdf = feather.read_feather('./Datastore/'+OHLCFileName)
-            Indicatordf = OHLCdf.copy()
-            Indicatordf = Indicatordf.set_index("Date")
-            if(Scrip is not "INDIAVIX"):
-                Indicatordf = MACD(Indicatordf, 12, 26, 9)
-            
-            Indicatordf = BollBnd(Indicatordf,20)
-            # Calculate ATR
-            Indicatordf = ATR(Indicatordf,20) #20 day rolling mean
+    NiftyOHLC = feather.read_feather('./Datastore/NIFTY_ohlc.ftr')
+    OHLCStartDate = NiftyOHLC.iloc[-1].Date
+    OHLCBhavFtr = 'sec_bhavdata_full_' + OHLCStartDate.strftime("%d%m%Y") + '.csv.ftr'
+    NSESymbols = feather.read_feather('./New NSE site/'+ OHLCBhavFtr)
+    NSESymbols = NSESymbols['SYMBOL']
 
-            # Indicatordf["ADX"] = talib.ADX(Indicatordf["High"], Indicatordf["Low"],
-            #                                Indicatordf["Close"], timeperiod=20)
-            ADXdf = ADX(Indicatordf,20)
-            Indicatordf['ADX'] = ADXdf['ADX']
-            Indicatordf['DIplusN'] = ADXdf['DIplusN']
-            Indicatordf['DIminusN'] = ADXdf['DIminusN']
-            #5 day rolling ADX
-            Indicatordf['ADXRoll5'] = Indicatordf['ADX'].rolling(5).mean()
-            #15 day rolling volume
-            Indicatordf['ADXRoll10'] = Indicatordf['ADX'].rolling(15).mean()            
-            #5 day rolling volume
-            Indicatordf['VolRoll5'] = Indicatordf['Volume'].rolling(5).mean()
-            #10 day rolling volume
-            Indicatordf['VolRoll10'] = Indicatordf['Volume'].rolling(10).mean()
+    # sec_bhavdata_full_23122020.csv
 
-            # Identify chart patterns (e.g. two crows, three crows, three inside, engulging pattern etc.)
-            # OHLCdf["3I"] = talib.CDL3WHITESOLDIERS(OHLCdf["Open"],
-            #                                              OHLCdf["High"],
-            #                                              OHLCdf["Low"],
-            #                                              OHLCdf["Close"])
-            
-            # Statistical functions (e.g. beta, correlation etc.)
-            Indicatordf["Beta"] = talib.BETA(Indicatordf["High"],Indicatordf["Low"],timeperiod=14)
-            
-            Indicatordf["RSI"] = RSI(Indicatordf,14)
-            
-            OBVdf = OBV(Indicatordf)
-            Indicatordf["OBV"] = OBVdf["obv"]
-            Indicatordf["Daily_Ret"] = OBVdf['daily_ret']
-            Indicatordf["Log_Ret"] = np.log(1+ OBVdf['daily_ret'])
-            
-            Indicatordf["Slope"] = slope(Indicatordf["Close"],5)
-            
-            # Simple DMA - If you change MA timeframes here, you have to hcange in plot_chart
-            Indicatordf["10DMA"] = Indicatordf["Close"].rolling(window=10).mean()
-            Indicatordf["20DMA"] = Indicatordf["Close"].rolling(window=20).mean()
-            Indicatordf["50DMA"] = Indicatordf["Close"].rolling(window=50).mean()
-            Indicatordf["100DMA"] = Indicatordf["Close"].rolling(window=100).mean()
-            Indicatordf["200DMA"] = Indicatordf["Close"].rolling(window=200).mean() 
-           # Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip)     
-            # Exponential DMA - If you change MA timeframes here, you have to hcange in plot_chart
-            Indicatordf["10DMA-E"] = Indicatordf["Close"].ewm(span=10, adjust=False).mean()
-            Indicatordf["20DMA-E"] = Indicatordf["Close"].ewm(span=20, adjust=False).mean()
-            Indicatordf["50DMA-E"] = Indicatordf["Close"].ewm(span=50, adjust=False).mean()
-            Indicatordf["80DMA-E"] = Indicatordf["Close"].ewm(span=80, adjust=False).mean()
-            Indicatordf["140DMA-E"] = Indicatordf["Close"].ewm(span=140, adjust=False).mean()
-            #Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip) 
-            Indicatordf.reset_index(level=0, inplace=True)
-# ###################################################################################################            
-            # plot_chart(Indicatordf,20,Scrip,0)
-###################################################################################################
-            feather.write_feather(Indicatordf, 'E:/Harish/OGN/TechnicalFrames/'+Scrip+'-dataframe.ftr')
+    for Scrip in NSESymbols:
+        try:
+            OHLCdf = None
+            Indicatordf = None
+            # Scrip = "RELIANCE"
+            print('Now for '+ Scrip)
+            OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
+            #Read from feather
+            if (FindFeather(OHLCFileName, './Datastore/')):
+                OHLCdf = feather.read_feather('./Datastore/'+OHLCFileName)
+                Indicatordf = OHLCdf.copy()
+                Indicatordf = Indicatordf.set_index("Date")
+                if(Scrip is not "INDIAVIX"):
+                    Indicatordf = MACD(Indicatordf, 12, 26, 9)
+                
+                Indicatordf = BollBnd(Indicatordf,20)
+                # Calculate ATR
+                Indicatordf = ATR(Indicatordf,20) #20 day rolling mean
+    
+                # Indicatordf["ADX"] = talib.ADX(Indicatordf["High"], Indicatordf["Low"],
+                #                                Indicatordf["Close"], timeperiod=20)
+                ADXdf = ADX(Indicatordf,20)
+                Indicatordf['ADX'] = ADXdf['ADX']
+                Indicatordf['DIplusN'] = ADXdf['DIplusN']
+                Indicatordf['DIminusN'] = ADXdf['DIminusN']
+                #5 day rolling ADX
+                Indicatordf['ADXRoll5'] = Indicatordf['ADX'].rolling(5).mean()
+                #15 day rolling volume
+                Indicatordf['ADXRoll10'] = Indicatordf['ADX'].rolling(15).mean()            
+                #5 day rolling volume
+                Indicatordf['VolRoll5'] = Indicatordf['Volume'].rolling(5).mean()
+                #10 day rolling volume
+                Indicatordf['VolRoll10'] = Indicatordf['Volume'].rolling(10).mean()
+    
+                # Identify chart patterns (e.g. two crows, three crows, three inside, engulging pattern etc.)
+                # OHLCdf["3I"] = talib.CDL3WHITESOLDIERS(OHLCdf["Open"],
+                #                                              OHLCdf["High"],
+                #                                              OHLCdf["Low"],
+                #                                              OHLCdf["Close"])
+                
+                # Statistical functions (e.g. beta, correlation etc.)
+                Indicatordf["Beta"] = talib.BETA(Indicatordf["High"],Indicatordf["Low"],timeperiod=14)
+                
+                Indicatordf["RSI"] = RSI(Indicatordf,14)
+                
+                OBVdf = OBV(Indicatordf)
+                Indicatordf["OBV"] = OBVdf["obv"]
+                Indicatordf["Daily_Ret"] = OBVdf['daily_ret']
+                Indicatordf["Log_Ret"] = np.log(1+ OBVdf['daily_ret'])
+                
+                Indicatordf["Slope"] = slope(Indicatordf["Close"],5)
+                
+                # Simple DMA - If you change MA timeframes here, you have to hcange in plot_chart
+                Indicatordf["10DMA"] = Indicatordf["Close"].rolling(window=10).mean()
+                Indicatordf["20DMA"] = Indicatordf["Close"].rolling(window=20).mean()
+                Indicatordf["50DMA"] = Indicatordf["Close"].rolling(window=50).mean()
+                Indicatordf["100DMA"] = Indicatordf["Close"].rolling(window=100).mean()
+                Indicatordf["200DMA"] = Indicatordf["Close"].rolling(window=200).mean() 
+               # Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip)     
+                # Exponential DMA - If you change MA timeframes here, you have to hcange in plot_chart
+                Indicatordf["10DMA-E"] = Indicatordf["Close"].ewm(span=10, adjust=False).mean()
+                Indicatordf["20DMA-E"] = Indicatordf["Close"].ewm(span=20, adjust=False).mean()
+                Indicatordf["50DMA-E"] = Indicatordf["Close"].ewm(span=50, adjust=False).mean()
+                Indicatordf["80DMA-E"] = Indicatordf["Close"].ewm(span=80, adjust=False).mean()
+                Indicatordf["140DMA-E"] = Indicatordf["Close"].ewm(span=140, adjust=False).mean()
+                #Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip) 
+                Indicatordf.reset_index(level=0, inplace=True)
+    # ###################################################################################################            
+                # plot_chart(Indicatordf,20,Scrip,0)
+    ###################################################################################################
+                feather.write_feather(Indicatordf, 'E:/Harish/OGN/TechnicalFrames/'+Scrip+'-dataframe.ftr')
+                
+        except:
+            print('Couldnt Analyze:'+ Scrip)
     #         ReturnMLdf = GenerateMLdf(Indicatordf,Scrip)
     #         # ReturnMLdf.to_csv(r'./OutputFrames/pandas.txt', header=None, index=None, sep=' ', mode='a')
     #         Finaldf = Finaldf.append(ReturnMLdf, ignore_index=True)
@@ -971,9 +900,11 @@ def TechAnalysis():
 ###################################################################################################
 
 def main():
-   TechAnalysis()
-   
-   
+    TechAnalysis()
+
+            
+            
+            
 # G1MLdf = feather.read_feather('./Datastore/PEHistory.ftr')
 # FuturesFileName = Scrip + '_' + MonthlyFuturesFilePath
 # #Read from feather
@@ -981,3 +912,9 @@ def main():
 #     ReadFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
 #     ReadFuturesdf.info()
 
+        # Scrip = "3PLAND"
+        # print('Now for '+ Scrip)
+        # OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
+        # #Read from feather
+        # if (FindFeather(OHLCFileName, './Datastore/')):
+        #     OHLCdf = feather.read_feather('./Datastore/'+OHLCFileName)

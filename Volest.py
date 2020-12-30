@@ -935,7 +935,7 @@ bench_data = bench_data.set_index('Date')
 # ]
 # initialize class
 est = 'YangZhang'
-TopRecos = 1
+TopRecos = 2
 vol = VolatilityEstimator(
     price_data=price_data,
     estimator=est,
