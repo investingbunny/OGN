@@ -34,7 +34,7 @@ OHLCBhavCopy = 'https://archives.nseindia.com/products/content/' #sec_bhavdata_f
 OHLCBhavPR = 'https://archives.nseindia.com/archives/equities/bhavcopy/pr/' #PR151020.zip
 DailyOHLCFilePath = "ohlc.ftr"
 
-HolidayList = ['21-Feb-20','10-Mar-20','2-Apr-20','6-Apr-20','10-Apr-20','14-Apr-20','1-May-20','25-May-20','2-Oct-20','16-Nov-20','30-Nov-20','25-Dec-20']
+HolidayList = ['26-Jan-21','11-Mar-21','29-Mar-21','02-Apr-21','14-Apr-21','21-Apr-21','13-May-21','21-Jul-21','19-Aug-21','10-Sep-21','15-Oct-21','05-Nov-21','19-Nov-21']
 HolidayList = pd.to_datetime(pd.Series(HolidayList), format='%d-%b-%y')
 
 def FindFeather(name, path):
@@ -136,6 +136,7 @@ def UpdatetNSEFnOData():
     FnOSymbollist = list(dict.fromkeys(FnOSymbollist))
     
     for sym in FnOSymbollist: #sym = 'NIFTY'
+        MergeOptdf = pd.DataFrame()
         #Update the old Options file
         OptionsFileName = sym + '_' + MonthlyOptionsFilePath
         #Read from feather
@@ -155,6 +156,7 @@ def UpdatetNSEFnOData():
         #Update the old Futures file
         FuturesFileName = sym + '_' + FullFuturesFilePath
         #Read from feather
+        MergeFutdf = pd.DataFrame()
         if (FindFeather(FuturesFileName, './Datastore/')):
             OldFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
             # OldFuturesdf = OldFuturesdf[OldFuturesdf.Date < FnOStartDate]

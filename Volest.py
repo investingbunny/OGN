@@ -309,34 +309,36 @@ class VolatilityEstimator(object):
                         
                         #Sell Recos for CE       + ',IV = ' (CallOptionChainIVdf['IV'][ind]*100).astype(str),
                         for ind in CallOptionChainIVdf[-TopRecos:].index:
-                            cones.annotate(str(CallOptionChainIVdf['STRIKE PRICE'][ind]) + ' CE, LTP: ' + 
-                                           CallOptionChainIVdf['LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
+                            OptionString = str(CallOptionChainIVdf['STRIKE PRICE'][ind]) + ' CE, LTP: ' + CallOptionChainIVdf['LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
+                            cones.annotate(OptionString,
                                            xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),
                                            color='r', xytext =(3 * offset,2 * offset), textcoords ='offset points',arrowprops = arrowprops,
                                            horizontalalignment='right', verticalalignment='top')
+                            print('[SELL '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                         # Sell Recos for PE     + ',IV1 = ' + (PutOptionChainIVdf['IV1'][ind]*100).astype(str)
                         for ind in PutOptionChainIVdf[-TopRecos:].index:
-                            cones.annotate(str(PutOptionChainIVdf['STRIKE PRICE'][ind]) + ' PE, LTP: ' + 
-                                            PutOptionChainIVdf['LTP.1'][ind] + ' ' +
-                                            PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
+                            OptionString = str(PutOptionChainIVdf['STRIKE PRICE'][ind]) + ' PE, LTP: ' + PutOptionChainIVdf['LTP.1'][ind] + ' ' + PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
+                            cones.annotate(OptionString,
                                             xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),
                                             color='r', xytext =(3 * offset, 1 * offset), textcoords ='offset points',arrowprops = arrowprops ,
                                             horizontalalignment='left', verticalalignment='top')
+                            print('[SELL '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                         #Buy Recos for CE    + ',IV = ' + (CallOptionChainIVdf['IV'][ind]*100).astype(str)
                         for ind in CallOptionChainIVdf.head(TopRecos).index:
-                            cones.annotate(str(CallOptionChainIVdf['STRIKE PRICE'][ind]) + ' CE, LTP: ' + 
-                                            CallOptionChainIVdf['LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
+                            OptionString = str(CallOptionChainIVdf['STRIKE PRICE'][ind]) + ' CE, LTP: ' + CallOptionChainIVdf['LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
+                            cones.annotate(OptionString,
                                             xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),
                                             color='b', xytext =(2 * CallOptionChainIVdf['DaysToExpiry'][ind], -3 * CallOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = buyarrowprops,
                                             horizontalalignment='left', verticalalignment='bottom')
+                            print('[BUY '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                         #Buy Recos for PE      + ',IV1 = ' + (PutOptionChainIVdf['IV1'][ind]*100).astype(str)
                         for ind in PutOptionChainIVdf.head(TopRecos).index:
-                            cones.annotate(str(PutOptionChainIVdf['STRIKE PRICE'][ind]) + ' PE, LTP: ' + 
-                                            PutOptionChainIVdf['LTP.1'][ind] + ' ' + 
-                                            PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d"),
+                            OptionString = str(PutOptionChainIVdf['STRIKE PRICE'][ind]) + ' PE, LTP: ' + PutOptionChainIVdf['LTP.1'][ind] + ' ' + PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
+                            cones.annotate(OptionString,
                                             xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),
                                             color='b', xytext =(4 * offset, -4 * PutOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = buyarrowprops,
                                             horizontalalignment='right', verticalalignment='bottom')
+                            print('[BUY '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                     except:
                         print('Couldnt update table for date'+i.strftime("%Y%m%d"))
 

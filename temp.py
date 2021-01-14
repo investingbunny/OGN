@@ -35,7 +35,42 @@ Created on Sat Dec 12 16:44:30 2020
 
 
 """
+
+# def LastThursday(CurrentYear,CurrentMonth):
+#     for month in range(CurrentMonth, CurrentMonth+3):
+#         last_thursday = max(week[calendar.THURSDAY]
+#             for week in calendar.monthcalendar(CurrentYear,month))
+#         print('{:4d}-{:02d}-{:02d}'.format(CurrentYear,month, last_thursday))
         
+        
+# def get_random_ua():
+#     random_ua = ''
+#     ua_file = 'ua_file.txt'
+#     try:
+#         with open(ua_file) as f:
+#             lines = f.readlines()
+#         if len(lines) > 0:
+#             prng = np.random.RandomState()
+#             index = prng.permutation(len(lines) - 1)
+#             idx = np.asarray(index, dtype=np.integer)[0]
+#             random_proxy = lines[int(idx)]
+#     except Exception as ex:
+#         print('Exception in random_ua')
+#         print(str(ex))
+#     finally:
+#         return random_ua
+    
+# user_agent = get_random_ua()
+
+# headers = {
+#         'user-agent': user_agent,
+#         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+#         'Accept-Encoding': 'gzip, deflate, br',
+#         'Accept-Language': 'en-US,en;q=0.9',
+#         'Pragma': 'no-cache',
+#     }    
+
+    
 # def GreaterThanCheck(QuantileList, val): 
 #     return(all(val > x for x in QuantileList))
 
