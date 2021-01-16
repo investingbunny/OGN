@@ -1,5 +1,14 @@
-import datetime
+from selenium import webdriver
+from selenium.webdriver import Firefox
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+import shutil
 import os
+import calendar
+import time
 import pyarrow
 import pyarrow.feather as feather
 import pandas
@@ -12,7 +21,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import math
 from nsepy.derivatives import get_expiry_date
-import datetime
+import datetime as dt
 from datetime import date
 from dateutil.relativedelta import *
 import pandas as pd
@@ -22,7 +31,92 @@ from scipy.stats import norm
 
 ExpiryDates = []
 ExpiryDateList = []
+ThreeThursdayDateList = []
+AllThursdayDateList = []
 TopRecos = 2
+
+OptionChainHolidayList = ['2021-01-26','2021-03-11','2021-03-29','2021-04-02','2021-04-14','2021-04-21','2021-05-13','2021-07-21','2021-08-19','2021-09-10','2021-10-15','2021-11-05','2021-11-19']
+OptionChainHolidayList = [dt.datetime.strptime(date, '%Y-%m-%d').date() for date in OptionChainHolidayList]
+
+def Next3Thursdays(dt):
+    dt += relativedelta(day=31, weekday=TH(-1))
+    if dt in OptionChainHolidayList:
+        dt -= relativedelta(days=1)
+    ThreeThursdayDateList.append(dt)
+    for month in range(1,3):
+        dt += relativedelta(months=1)
+        dt += relativedelta(day=31, weekday=TH(-1))
+        if dt in OptionChainHolidayList:
+            dt -= relativedelta(days=1)
+        ThreeThursdayDateList.append(dt)
+        
+def AllThursdays(d):
+   CurrentDate = datetime.date.today()   # Today
+   CurrentYear = CurrentDate.year
+   CurrentMonth = CurrentDate.month
+   d += timedelta(days = (3 - d.weekday() + 7) % 7)         # First Thursday
+   while d.year == CurrentYear and d.month < (CurrentMonth + 3):
+      yield d
+      d += timedelta(days = 7)
+        
+def DownloadOptionChain(sym):
+    CurrentDate = datetime.date.today()
+    Next3Thursdays(CurrentDate)
+
+    for d in AllThursdays(CurrentDate):
+        if d in OptionChainHolidayList:
+            d -= relativedelta(days=1) 
+        AllThursdayDateList.append(d)
+
+    ChainOptions = webdriver.ChromeOptions()
+    ChainOptions.add_argument("--disable-blink-features")
+    ChainOptions.add_argument("--disable-blink-features=AutomationControlled")
+    # ChainOptions.add_argument('--headless')
+    browser = webdriver.Chrome(options=ChainOptions)
+    browser.implicitly_wait(10)
+    browser.set_page_load_timeout(20)
+    browser.get('https://www.nseindia.com/option-chain')
+    
+    timeout = 5
+    try:
+        element_present = EC.presence_of_element_located((By.ID, 'select_symbol'))
+        WebDriverWait(browser, timeout).until(element_present)
+    except TimeoutException:
+        print('Timed out waiting for page to load')
+
+    if(sym == 'NIFTY' or sym == 'BANKNIFTY' or sym == 'FINNIFTY'):
+        search_form = browser.find_element_by_id('equity_optionchain_select')
+        search_form.send_keys(sym)
+        for ExpiryDateDownload in AllThursdayDateList:
+            search_form = browser.find_element_by_id('expirySelect')
+            search_form.send_keys(ExpiryDateDownload.strftime("%d-%b-%Y"))
+            time.sleep(2)
+            content = browser.find_element_by_class_name('xlsdownload').click()
+            while not os.path.exists(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv'):
+                time.sleep(1)
+            shutil.move(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv',r'.\Option chain - Dec 14\option-chain-equity-derivatives.csv')
+            shutil.move(r'.\Option chain - Dec 14\option-chain-equity-derivatives.csv',r'.\Option chain - Dec 14\\' + 
+              CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 'option-chain-equity-derivatives-' +  
+              ExpiryDateDownload.strftime("%Y-%m-%d") + '.csv')
+    else:
+        search_form = browser.find_element_by_id('select_symbol')
+        search_form.send_keys(sym)
+        search_form = browser.find_element_by_id("symbolSearchGo")
+        # clicking on the button
+        search_form.click()
+        for ExpiryDateDownload in ThreeThursdayDateList:
+            search_form = browser.find_element_by_id('expirySelect')
+            search_form.send_keys(ExpiryDateDownload.strftime("%d-%b-%Y"))
+            time.sleep(2)
+            content = browser.find_element_by_class_name('xlsdownload').click()
+            while not os.path.exists(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv'):
+                time.sleep(1)
+            shutil.move(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv',r'.\Option chain - Dec 14\option-chain-equity-derivatives.csv')
+            shutil.move(r'.\Option chain - Dec 14\option-chain-equity-derivatives.csv',r'.\Option chain - Dec 14\\' + 
+              CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 'option-chain-equity-derivatives-' +  
+              ExpiryDateDownload.strftime("%Y-%m-%d") + '.csv')
+
+    browser.close()
 
 def FindFeather(name, path):
     for root, dirs, files in os.walk(path):
@@ -873,6 +967,32 @@ class VolatilityEstimator(object):
         
         print('%s output complete' % filename)
 
+
+def GetVolatilityData(sym,data_file_path,bench_file_path):
+    # Prepare the price and benchmark data to be used to calculate volatility
+    price_data = feather.read_feather(data_file_path)
+    price_data = price_data.iloc[-300:]
+        
+    if 'Symbol' in price_data.columns:
+        price_data.rename(columns={'Symbol': 'symbol'}, inplace=True)
+    price_data = price_data.assign(symbol=sym)        
+    price_data = price_data.set_index('Date')
+            
+    bench_data = feather.read_feather(bench_file_path)
+    if sym == 'NIFTY' or sym == 'BANKNIFTY':
+        bench_data = bench_data.iloc[-300:]
+    else:
+        AnamolyDate = date(2020,9,28) #September 28 data for stock prices not available
+        bench_data = bench_data.iloc[-301:]
+        bench_data = bench_data[bench_data.Date != AnamolyDate]
+        
+    if 'Symbol' in bench_data.columns:
+        bench_data.rename(columns={'Symbol': 'symbol'}, inplace=True)
+    bench_data = bench_data.assign(symbol='NIFTY')        
+    bench_data = bench_data.set_index('Date')
+    
+    return price_data, bench_data
+    
 #######################################################################################3
 
 # estimator windows
@@ -881,10 +1001,13 @@ windows = [3, 5, 10, 20, 30, 60, 90]
 quantiles = [0.25, 0.75]
 bins = 100
 density = True
+sym = 'RELIANCE'
 
-# data
-sym = 'BANKNIFTY'
-bench = 'NIFTY' #None #'NIFTY'
+ThreeThursdayDateList = []
+AllThursdayDateList = []
+DownloadOptionChain(sym)
+
+# bench = 'NIFTY' #None #'NIFTY'
 data_file_path = './Datastore/'+sym+'_ohlc.ftr'
 bench_file_path = './Datastore/NIFTY_ohlc.ftr'
 
@@ -899,28 +1022,7 @@ for filename in all_files:
     Edate = datetime.datetime.strptime(filename[-14:-4], '%Y-%m-%d').date()
     ExpiryDateList.append(Edate)
 
-# Prepare the price and benchmark data to be used to calculate volatility
-price_data = feather.read_feather(data_file_path)
-price_data = price_data.iloc[-300:]
-    
-if 'Symbol' in price_data.columns:
-    price_data.rename(columns={'Symbol': 'symbol'}, inplace=True)
-price_data = price_data.assign(symbol=sym)        
-price_data = price_data.set_index('Date')
-        
-bench_data = feather.read_feather(bench_file_path)
-if sym == 'NIFTY' or sym == 'BANKNIFTY':
-    bench_data = bench_data.iloc[-300:]
-else:
-    AnamolyDate = date(2020,9,28) #September 28 data for stock prices not available
-    bench_data = bench_data.iloc[-301:]
-    bench_data = bench_data[bench_data.Date != AnamolyDate]
-    
-if 'Symbol' in bench_data.columns:
-    bench_data.rename(columns={'Symbol': 'symbol'}, inplace=True)
-bench_data = bench_data.assign(symbol=bench)        
-bench_data = bench_data.set_index('Date')
-
+price_data, bench_data = GetVolatilityData(sym,data_file_path,bench_file_path)
 # spx_price_data = data.yahoo_helper(bench, bench_file_path)
 # if sym is 'NIFTY':
 #     bench_data = None
@@ -966,31 +1068,4 @@ vol.term_sheet(
 #     _, plt = vol.benchmark_correlation(window=window)
 # plt.show()
 
-###########################################################################
-# ExpiryDate = date(2020,12,31)
-# OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-TATAMOTORSoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
-
-# OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+OptionChain, header = 1)
-# OptionChainCSVdf = OptionChainCSVdf.rename(columns=lambda x: x.strip())
-# OptionChainCSVdf = OptionChainCSVdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-
-# OptionChainCSVdf.drop("Unnamed: 0", axis=1, inplace=True)
-# OptionChainCSVdf.drop("Unnamed: 22", axis=1, inplace=True)
-# CallOptionChaindf = OptionChainCSVdf.iloc[:,0:11]
-# PutOptionChaindf = OptionChainCSVdf.iloc[:,10:21]
-# if 'IV.1' in PutOptionChaindf.columns:
-#     PutOptionChaindf.rename(columns={'IV.1': 'IV1'}, inplace=True)
-
-
-# CallOptionChainIVdf = CallOptionChaindf[CallOptionChaindf.IV != '-']
-# PutOptionChainIVdf = PutOptionChaindf[PutOptionChaindf.IV1 != '-']
-
-# # covert IV string to an integer  to plot it
-# CallOptionChainIVdf['IV'] = CallOptionChainIVdf['IV'].astype(float) 
-# PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].astype(float) 
-# CallOptionChainIVdf['IV'] = CallOptionChainIVdf['IV'].div(100).round(4)
-# PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].div(100).round(4)
-
-###########################################################################
-# # ... or create a pdf term sheet with all metrics in term-sheets/
 
