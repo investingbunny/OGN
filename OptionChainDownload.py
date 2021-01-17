@@ -33,7 +33,7 @@ def Next3Thursdays(dt):
         ThreeThursdayDateList.append(dt)
         
 def AllThursdays(d):
-   CurrentDate = datetime.date.today()   # Today
+   CurrentDate = dt.date.today()   # Today
    CurrentYear = CurrentDate.year
    CurrentMonth = CurrentDate.month
    d += timedelta(days = (3 - d.weekday() + 7) % 7)         # First Thursday
@@ -61,10 +61,10 @@ def DownloadOptionChain(sym):
     
     timeout = 5
     try:
-        element_present = EC.presence_of_element_located((By.ID, 'select_symbol'))
+        element_present = EC.presence_of_element_located((By.ID, 'equity_optionChainTable'))
         WebDriverWait(browser, timeout).until(element_present)
     except TimeoutException:
-        print('Timed out waiting for page to load')
+        print('Timed out waiting for initial page to load')
 
     if(sym == 'NIFTY' or sym == 'BANKNIFTY' or sym == 'FINNIFTY'):
         search_form = browser.find_element_by_id('equity_optionchain_select')
@@ -72,7 +72,11 @@ def DownloadOptionChain(sym):
         for ExpiryDateDownload in AllThursdayDateList:
             search_form = browser.find_element_by_id('expirySelect')
             search_form.send_keys(ExpiryDateDownload.strftime("%d-%b-%Y"))
-            time.sleep(2)
+            try:
+                element_present = EC.presence_of_element_located((By.ID, 'equity_optionChainTable'))
+                WebDriverWait(browser, timeout).until(element_present)
+            except TimeoutException:
+                print('Timed out waiting for index page to load')
             content = browser.find_element_by_class_name('xlsdownload').click()
             while not os.path.exists(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv'):
                 time.sleep(1)
@@ -89,7 +93,11 @@ def DownloadOptionChain(sym):
         for ExpiryDateDownload in ThreeThursdayDateList:
             search_form = browser.find_element_by_id('expirySelect')
             search_form.send_keys(ExpiryDateDownload.strftime("%d-%b-%Y"))
-            time.sleep(2)
+            try:
+                element_present = EC.presence_of_element_located((By.ID, 'equity_optionChainTable'))
+                WebDriverWait(browser, timeout).until(element_present)
+            except TimeoutException:
+                print('Timed out waiting for stock page to load')
             content = browser.find_element_by_class_name('xlsdownload').click()
             while not os.path.exists(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv'):
                 time.sleep(1)
@@ -99,7 +107,6 @@ def DownloadOptionChain(sym):
               ExpiryDateDownload.strftime("%Y-%m-%d") + '.csv')
 
     browser.close()
-
 
 ThreeThursdayDateList = []
 AllThursdayDateList = []

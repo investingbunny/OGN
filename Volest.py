@@ -19,11 +19,12 @@ import matplotlib
 import matplotlib.mlab as mlab
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from adjustText import adjust_text
 import math
 from nsepy.derivatives import get_expiry_date
-import datetime as dt
+import datetime
 from datetime import date
-from dateutil.relativedelta import *
+from datetime import timedelta
 import pandas as pd
 import glob
 import models
@@ -36,7 +37,7 @@ AllThursdayDateList = []
 TopRecos = 2
 
 OptionChainHolidayList = ['2021-01-26','2021-03-11','2021-03-29','2021-04-02','2021-04-14','2021-04-21','2021-05-13','2021-07-21','2021-08-19','2021-09-10','2021-10-15','2021-11-05','2021-11-19']
-OptionChainHolidayList = [dt.datetime.strptime(date, '%Y-%m-%d').date() for date in OptionChainHolidayList]
+OptionChainHolidayList = [datetime.datetime.strptime(date, '%Y-%m-%d').date() for date in OptionChainHolidayList]
 
 def Next3Thursdays(dt):
     dt += relativedelta(day=31, weekday=TH(-1))
@@ -73,16 +74,16 @@ def DownloadOptionChain(sym):
     ChainOptions.add_argument("--disable-blink-features=AutomationControlled")
     # ChainOptions.add_argument('--headless')
     browser = webdriver.Chrome(options=ChainOptions)
-    browser.implicitly_wait(10)
-    browser.set_page_load_timeout(20)
+    browser.implicitly_wait(30)
+    browser.set_page_load_timeout(30)
     browser.get('https://www.nseindia.com/option-chain')
     
-    timeout = 5
+    timeout = 20
     try:
-        element_present = EC.presence_of_element_located((By.ID, 'select_symbol'))
+        element_present = EC.presence_of_element_located((By.ID, 'equity_optionChainTable'))
         WebDriverWait(browser, timeout).until(element_present)
     except TimeoutException:
-        print('Timed out waiting for page to load')
+        print('Timed out waiting for initial page to load')
 
     if(sym == 'NIFTY' or sym == 'BANKNIFTY' or sym == 'FINNIFTY'):
         search_form = browser.find_element_by_id('equity_optionchain_select')
@@ -90,7 +91,11 @@ def DownloadOptionChain(sym):
         for ExpiryDateDownload in AllThursdayDateList:
             search_form = browser.find_element_by_id('expirySelect')
             search_form.send_keys(ExpiryDateDownload.strftime("%d-%b-%Y"))
-            time.sleep(2)
+            try:
+                element_present = EC.presence_of_element_located((By.ID, 'equity_optionChainTable'))
+                WebDriverWait(browser, timeout).until(element_present)
+            except TimeoutException:
+                print('Timed out waiting for index page to load')
             content = browser.find_element_by_class_name('xlsdownload').click()
             while not os.path.exists(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv'):
                 time.sleep(1)
@@ -107,7 +112,11 @@ def DownloadOptionChain(sym):
         for ExpiryDateDownload in ThreeThursdayDateList:
             search_form = browser.find_element_by_id('expirySelect')
             search_form.send_keys(ExpiryDateDownload.strftime("%d-%b-%Y"))
-            time.sleep(2)
+            try:
+                element_present = EC.presence_of_element_located((By.ID, 'equity_optionChainTable'))
+                WebDriverWait(browser, timeout).until(element_present)
+            except TimeoutException:
+                print('Timed out waiting for stock page to load')
             content = browser.find_element_by_class_name('xlsdownload').click()
             while not os.path.exists(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv'):
                 time.sleep(1)
@@ -380,15 +389,17 @@ class VolatilityEstimator(object):
         cones.plot(windows, min_, label="Min")
         cones.plot(windows, realized, 'r-.', label="Realized")
 
-        arrowprops = dict( 
-        arrowstyle = "->", 
-        connectionstyle = "angle3,angleA=90,angleB=0")
-          # connectionstyle = "angle, angleA = 0, angleB = 90,rad = 10"
+        # arrowprops = dict( 
+        # arrowstyle = "->", 
+        # connectionstyle = "angle3,angleA=90,angleB=0")
+        #   # connectionstyle = "angle, angleA = 0, angleB = 90,rad = 10"
           
-        buyarrowprops = dict( 
-        arrowstyle = "->", 
-        connectionstyle = "angle, angleA = 0, angleB = 90,rad = 10")          
-        offset = 72
+        # buyarrowprops = dict( 
+        # arrowstyle = "->", 
+        # connectionstyle = "angle, angleA = 0, angleB = 90,rad = 10")          
+        # offset = 72
+        
+        texts = []
         
         for i in ExpiryDateList:
                 if i > CurrentDate:
@@ -404,38 +415,45 @@ class VolatilityEstimator(object):
                         #Sell Recos for CE       + ',IV = ' (CallOptionChainIVdf['IV'][ind]*100).astype(str),
                         for ind in CallOptionChainIVdf[-TopRecos:].index:
                             OptionString = str(CallOptionChainIVdf['STRIKE PRICE'][ind]) + ' CE, LTP: ' + CallOptionChainIVdf['LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
-                            cones.annotate(OptionString,
-                                           xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),
-                                           color='r', xytext =(3 * offset,2 * offset), textcoords ='offset points',arrowprops = arrowprops,
-                                           horizontalalignment='right', verticalalignment='top')
+                            # cones.annotate(OptionString,
+                            #                 xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),
+                            #                 color='r', xytext =(3 * offset,2 * offset), textcoords ='offset points',arrowprops = arrowprops,
+                            #                 horizontalalignment='right', verticalalignment='top')
+                            texts.append(plt.text(CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind], OptionString))
+                            # cones.annotate(OptionString, (0,0), (0, -20), xycoords='axes fraction', textcoords='offset points', va='top')
                             print('[SELL '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                         # Sell Recos for PE     + ',IV1 = ' + (PutOptionChainIVdf['IV1'][ind]*100).astype(str)
                         for ind in PutOptionChainIVdf[-TopRecos:].index:
                             OptionString = str(PutOptionChainIVdf['STRIKE PRICE'][ind]) + ' PE, LTP: ' + PutOptionChainIVdf['LTP.1'][ind] + ' ' + PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
-                            cones.annotate(OptionString,
-                                            xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),
-                                            color='r', xytext =(3 * offset, 1 * offset), textcoords ='offset points',arrowprops = arrowprops ,
-                                            horizontalalignment='left', verticalalignment='top')
+                            # cones.annotate(OptionString,
+                            #                 xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),
+                            #                 color='r', xytext =(3 * offset, 1 * offset), textcoords ='offset points',arrowprops = arrowprops ,
+                            #                 horizontalalignment='left', verticalalignment='top')
+                            texts.append(plt.text(PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind], OptionString))
                             print('[SELL '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                         #Buy Recos for CE    + ',IV = ' + (CallOptionChainIVdf['IV'][ind]*100).astype(str)
                         for ind in CallOptionChainIVdf.head(TopRecos).index:
                             OptionString = str(CallOptionChainIVdf['STRIKE PRICE'][ind]) + ' CE, LTP: ' + CallOptionChainIVdf['LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
-                            cones.annotate(OptionString,
-                                            xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),
-                                            color='b', xytext =(2 * CallOptionChainIVdf['DaysToExpiry'][ind], -3 * CallOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = buyarrowprops,
-                                            horizontalalignment='left', verticalalignment='bottom')
+                            # cones.annotate(OptionString,
+                            #                 xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),
+                            #                 color='b', xytext =(2 * CallOptionChainIVdf['DaysToExpiry'][ind], -3 * CallOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = buyarrowprops,
+                            #                 horizontalalignment='left', verticalalignment='bottom')
+                            texts.append(plt.text(CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind], OptionString))
                             print('[BUY '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                         #Buy Recos for PE      + ',IV1 = ' + (PutOptionChainIVdf['IV1'][ind]*100).astype(str)
                         for ind in PutOptionChainIVdf.head(TopRecos).index:
                             OptionString = str(PutOptionChainIVdf['STRIKE PRICE'][ind]) + ' PE, LTP: ' + PutOptionChainIVdf['LTP.1'][ind] + ' ' + PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
-                            cones.annotate(OptionString,
-                                            xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),
-                                            color='b', xytext =(4 * offset, -4 * PutOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = buyarrowprops,
-                                            horizontalalignment='right', verticalalignment='bottom')
+                            # cones.annotate(OptionString,
+                            #                 xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),
+                            #                 color='b', xytext =(4 * offset, -4 * PutOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = buyarrowprops,
+                            #                 horizontalalignment='right', verticalalignment='bottom')
+                            texts.append(plt.text(PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind], OptionString))
                             print('[BUY '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                     except:
                         print('Couldnt update table for date'+i.strftime("%Y%m%d"))
-
+        # print(texts)
+        adjust_text(texts, only_move={'points':'y', 'texts':'y'}, arrowprops=dict(arrowstyle="->", color='r', lw=0.5))
+        # plt.show()
         # set the x ticks and limits
         cones.set_xticks(windows)
         cones.set_xlim((windows[0]-5, windows[-1]+5))
@@ -994,39 +1012,7 @@ def GetVolatilityData(sym,data_file_path,bench_file_path):
     return price_data, bench_data
     
 #######################################################################################3
-
-# estimator windows
-window = 30
-windows = [3, 5, 10, 20, 30, 60, 90]
-quantiles = [0.25, 0.75]
-bins = 100
-density = True
-sym = 'RELIANCE'
-
-ThreeThursdayDateList = []
-AllThursdayDateList = []
-DownloadOptionChain(sym)
-
-# bench = 'NIFTY' #None #'NIFTY'
-data_file_path = './Datastore/'+sym+'_ohlc.ftr'
-bench_file_path = './Datastore/NIFTY_ohlc.ftr'
-
-CurrentDate = datetime.date.today()
-CurrentDay = CurrentDate.day
-
-path = './Option chain - Dec 14/' # use your path
-all_files = glob.glob(path + CurrentDate.strftime("%Y-%m-%d") + '-' + sym + "*.csv")
-
-ExpiryDateList.clear()
-for filename in all_files:
-    Edate = datetime.datetime.strptime(filename[-14:-4], '%Y-%m-%d').date()
-    ExpiryDateList.append(Edate)
-
-price_data, bench_data = GetVolatilityData(sym,data_file_path,bench_file_path)
-# spx_price_data = data.yahoo_helper(bench, bench_file_path)
-# if sym is 'NIFTY':
-#     bench_data = None
-    
+   
 #     ESTIMATORS = [
 #     'GarmanKlass',
 #     'HodgesTompkins',
@@ -1037,9 +1023,38 @@ price_data, bench_data = GetVolatilityData(sym,data_file_path,bench_file_path)
 #     'Skew',
 #     'YangZhang'
 # ]
-# initialize class
+# estimator windows
+window = 30
+windows = [3, 5, 10, 20, 30, 60, 90]
+quantiles = [0.25, 0.75]
+bins = 100
+density = True
+sym = 'DABUR'
 est = 'YangZhang'
 TopRecos = 2
+
+ThreeThursdayDateList = []
+AllThursdayDateList = []
+# DownloadOptionChain(sym)
+
+# bench = 'NIFTY' #None #'NIFTY'
+data_file_path = './Datastore/'+sym+'_ohlc.ftr'
+bench_file_path = './Datastore/NIFTY_ohlc.ftr'
+
+CurrentDate = datetime.date.today()
+# CurrentDay = CurrentDate.day
+
+path = './Option chain - Dec 14/' # use your path
+all_files = glob.glob(path + CurrentDate.strftime("%Y-%m-%d") + '-' + sym + "*.csv")
+
+ExpiryDateList.clear()
+for filename in all_files:
+    Edate = datetime.datetime.strptime(filename[-14:-4], '%Y-%m-%d').date()
+    ExpiryDateList.append(Edate)
+
+price_data, bench_data = GetVolatilityData(sym,data_file_path,bench_file_path)
+
+# initialize class
 vol = VolatilityEstimator(
     price_data=price_data,
     estimator=est,
