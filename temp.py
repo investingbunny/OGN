@@ -811,7 +811,7 @@ df['Month-str-full'] = df['Date'].dt.strftime('%B')
         OptionsFileName = Scrip + '_' + MonthlyOptionsFilePath
         #Read from feather
         if (FindFeather(OptionsFileName, './Datastore')):
-            Optionsdf = feather.read_feather('./Datastore/'+OptionsFileName)
+            Optionsdf = feather.read_feather('./Datastore/Nifty Fin Service_ohlc.ftr')
             try:
                 # Optionsdf['Date'] = Optionsdf['Date'].dt.date
                 Optionsdf['Expiry'] = Optionsdf['Expiry'].dt.date
