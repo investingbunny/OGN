@@ -5,6 +5,7 @@ from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
+import glob
 import shutil
 import os
 import calendar
@@ -62,10 +63,20 @@ def AllThursdays(d):
    while d.year == CurrentYear and d.month < (CurrentMonth + 3):
       yield d
       d += timedelta(days = 7)
+
+def check_for_files(filepath):
+    for filepath_object in glob.glob(filepath):
+        if os.path.isfile(filepath_object):
+            return True
+
+    return False
         
 def DownloadOptionChain(sym):
+    ThreeThursdayDateList = []
+    AllThursdayDateList = []
     CurrentDate = datetime.date.today()
     Next3Thursdays(CurrentDate)
+    sym = 'HDFCBANK'
 
     for d in AllThursdays(CurrentDate):
         if d in OptionChainHolidayList:
@@ -100,18 +111,16 @@ def DownloadOptionChain(sym):
             except TimeoutException:
                 print('Timed out waiting for index page to load')
             content = browser.find_element_by_class_name('xlsdownload').click()
-            while not os.path.exists(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv'):
+            #    option-chain-ED-NIFTY-11-Feb-2021
+            FileString = r'C:\Users\User\Downloads\option-chain-ED-'+sym+'*.csv'
+            while not check_for_files(FileString):
                 time.sleep(1)
-            shutil.move(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv',r'.\Option chain - Dec 14\option-chain-equity-derivatives.csv')
-            shutil.move(r'.\Option chain - Dec 14\option-chain-equity-derivatives.csv',r'.\Option chain - Dec 14\\' + 
-              CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 'option-chain-equity-derivatives-' +  
-              ExpiryDateDownload.strftime("%Y-%m-%d") + '.csv')
+            for filepath_object in glob.glob(FileString):
+                shutil.move(filepath_object ,'.\Option chain - Dec 14\\'+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
+                'option-chain-equity-derivatives-' + ExpiryDateDownload.strftime("%Y-%m-%d") + '.csv')
     else:
         search_form = browser.find_element_by_id('select_symbol')
         search_form.send_keys(sym)
-        search_form = browser.find_element_by_id("symbolSearchGo")
-        # clicking on the button
-        search_form.click()
         for ExpiryDateDownload in ThreeThursdayDateList:
             search_form = browser.find_element_by_id('expirySelect')
             search_form.send_keys(ExpiryDateDownload.strftime("%d-%b-%Y"))
@@ -121,12 +130,13 @@ def DownloadOptionChain(sym):
             except TimeoutException:
                 print('Timed out waiting for stock page to load')
             content = browser.find_element_by_class_name('xlsdownload').click()
-            while not os.path.exists(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv'):
+            # option-chain-ED-AARTIIND-25-Feb-2021
+            FileString = r'C:\Users\User\Downloads\option-chain-ED-'+sym+'*.csv'
+            while not check_for_files(FileString):
                 time.sleep(1)
-            shutil.move(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv',r'.\Option chain - Dec 14\option-chain-equity-derivatives.csv')
-            shutil.move(r'.\Option chain - Dec 14\option-chain-equity-derivatives.csv',r'.\Option chain - Dec 14\\' + 
-              CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 'option-chain-equity-derivatives-' +  
-              ExpiryDateDownload.strftime("%Y-%m-%d") + '.csv')
+            for filepath_object in glob.glob(FileString):
+                shutil.move(filepath_object ,'.\Option chain - Dec 14\\'+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
+                'option-chain-equity-derivatives-' + ExpiryDateDownload.strftime("%Y-%m-%d") + '.csv')
 
     browser.close()
 
@@ -1430,6 +1440,7 @@ def Technicals(Scrip):
 
 def GetVolatilityData(sym,data_file_path,bench_file_path):
     # Prepare the price and benchmark data to be used to calculate volatility
+    
     price_data = feather.read_feather(data_file_path)
     price_data = price_data.iloc[-300:]
         
@@ -1439,7 +1450,7 @@ def GetVolatilityData(sym,data_file_path,bench_file_path):
     price_data = price_data.set_index('Date')
             
     bench_data = feather.read_feather(bench_file_path)
-    if sym == 'NIFTY' or sym == 'BANKNIFTY':
+    if sym == 'NIFTY' or sym == 'BANKNIFTY' or sym == 'FINNIFTY':
         bench_data = bench_data.iloc[-300:]
     else:
         AnamolyDate = date(2020,9,28) #September 28 data for stock prices not available
@@ -1477,7 +1488,10 @@ TopRecos = 1
 
 ThreeThursdayDateList = []
 AllThursdayDateList = []
-# DownloadOptionChain(sym)
+DownloadOptionChain(sym)
+
+if sym == 'FINNIFTY':
+    sym = 'Nifty Fin Service'
 
 # bench = 'NIFTY' #None #'NIFTY'
 data_file_path = './Datastore/'+sym+'_ohlc.ftr'
