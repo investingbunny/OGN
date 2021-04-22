@@ -76,7 +76,7 @@ def DownloadOptionChain(sym):
     AllThursdayDateList = []
     CurrentDate = datetime.date.today()
     Next3Thursdays(CurrentDate)
-    sym = 'HDFCBANK'
+    # sym = 'RELIANCE'
 
     for d in AllThursdays(CurrentDate):
         if d in OptionChainHolidayList:
@@ -110,6 +110,7 @@ def DownloadOptionChain(sym):
                 WebDriverWait(browser, timeout).until(element_present)
             except TimeoutException:
                 print('Timed out waiting for index page to load')
+            # content = browser.find_element_by_class_name('refreshIcon').click()
             content = browser.find_element_by_class_name('xlsdownload').click()
             #    option-chain-ED-NIFTY-11-Feb-2021
             FileString = r'C:\Users\User\Downloads\option-chain-ED-'+sym+'*.csv'
@@ -129,6 +130,7 @@ def DownloadOptionChain(sym):
                 WebDriverWait(browser, timeout).until(element_present)
             except TimeoutException:
                 print('Timed out waiting for stock page to load')
+            # content = browser.find_element_by_class_name('refreshIcon').click()
             content = browser.find_element_by_class_name('xlsdownload').click()
             # option-chain-ED-AARTIIND-25-Feb-2021
             FileString = r'C:\Users\User\Downloads\option-chain-ED-'+sym+'*.csv'
@@ -404,11 +406,13 @@ class VolatilityEstimator(object):
 
         arrowprops = dict( 
         arrowstyle = "->", 
+        color='red',
         connectionstyle = "angle3,angleA=90,angleB=0")
           # connectionstyle = "angle, angleA = 0, angleB = 90,rad = 10"
           
         buyarrowprops = dict( 
-        arrowstyle = "->", 
+        arrowstyle = "->",
+        color='blue',
         connectionstyle = "angle, angleA = 0, angleB = 90,rad = 10")          
         offset = 72
         
@@ -1454,6 +1458,7 @@ def GetVolatilityData(sym,data_file_path,bench_file_path):
         bench_data = bench_data.iloc[-300:]
     else:
         AnamolyDate = date(2020,9,28) #September 28 data for stock prices not available
+        #March30 and march 31-2021 FnO data is not available on NSE site!!!!!!
         bench_data = bench_data.iloc[-301:]
         bench_data = bench_data[bench_data.Date != AnamolyDate]
         
@@ -1482,7 +1487,7 @@ windows = [3, 5, 10, 20, 30, 60, 90]
 quantiles = [0.25, 0.75]
 bins = 100
 density = True
-sym = 'BANKNIFTY'
+sym = 'NIFTY'
 est = 'YangZhang'
 TopRecos = 1
 
