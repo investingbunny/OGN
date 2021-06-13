@@ -28,15 +28,17 @@ from nsepython import *
 
 ExpiryDates = []
 ExpiryDateList = []
-# ThreeThursdayDateList = []
-# AllThursdayDateList = []
-TopRecos = 2
+ThreeThursdayDateList = []
+AllThursdayDateList = []
+CurrentDate = datetime.date.today()
+TopRecos = 1
 # global tech1, tech2, tech3, tech4
 
 OptionChainHolidayList = ['2021-01-26','2021-03-11','2021-03-29','2021-04-02','2021-04-14','2021-04-21','2021-05-13','2021-07-21','2021-08-19','2021-09-10','2021-10-15','2021-11-05','2021-11-19']
 OptionChainHolidayList = [datetime.datetime.strptime(date, '%Y-%m-%d').date() for date in OptionChainHolidayList]
 
 def Next3Thursdays(dt):
+    global ThreeThursdayDateList
     ThreeThursdayDateList = []
     dt += relativedelta(day=31, weekday=TH(-1))
     if dt in OptionChainHolidayList:
@@ -50,7 +52,7 @@ def Next3Thursdays(dt):
         ThreeThursdayDateList.append(dt)
         
 def AllThursdays(d):
-   CurrentDate = datetime.date.today()   # Today
+   # CurrentDate = datetime.date.today()   # Today
    CurrentYear = CurrentDate.year
    CurrentMonth = CurrentDate.month
    d += timedelta(days = (3 - d.weekday() + 7) % 7)         # First Thursday
@@ -67,14 +69,8 @@ def check_for_files(filepath):
         
 def DownloadOptionChain(sym):
     OptionsCumulative = pd.DataFrame()
-    AllThursdayDateList = []
-    CurrentDate = datetime.date.today()
-    Next3Thursdays(CurrentDate)
-
-    for d in AllThursdays(CurrentDate):
-        if d in OptionChainHolidayList:
-            d -= relativedelta(days=1) 
-        AllThursdayDateList.append(d)
+    global ThreeThursdayDateList
+    global AllThursdayDateList
 
     if(sym == 'NIFTY' or sym == 'BANKNIFTY' or sym == 'FINNIFTY'):
         for ExpiryDateDownload in AllThursdayDateList:
@@ -368,22 +364,23 @@ class VolatilityEstimator(object):
         connectionstyle = "angle, angleA = 0, angleB = 90,rad = 10")          
         offset = 72
         
-        # texts = []
+        global ExpiryDateList
         
         for i in ExpiryDateList:
                 if i > CurrentDate:
                     try:
                             # print('Scattering for date '+ i.strftime("%Y%m%d"))
+                        # CallOptionChainIVdf, PutOptionChainIVdf = UpdateOptionChainTable(datetime.date(2021, 6, 24),'RELIANCE')
                         CallOptionChainIVdf, PutOptionChainIVdf = UpdateOptionChainTable(i,self._symbol[1])
                         cones.scatter(CallOptionChainIVdf['DaysToExpiry'],CallOptionChainIVdf['CALLS_IV'],color='b')
                         cones.scatter(PutOptionChainIVdf['DaysToExpiry'],PutOptionChainIVdf['PUTS_IV'],color='r')
                         #Important to annotate only outlier points
                         CallOptionChainIVdf = CallOptionChainIVdf.sort_values(by=['CALLS_IV']) 
                         PutOptionChainIVdf = PutOptionChainIVdf.sort_values(by=['PUTS_IV'])
-                        
+                        # ind = 1
                         #Sell Recos for CE       + ',IV = ' (CallOptionChainIVdf['IV'][ind]*100).astype(str),
                         for ind in CallOptionChainIVdf[-TopRecos:].index:
-                            OptionString = str(CallOptionChainIVdf['Strike Price'][ind]) + ' CE, ' + CallOptionChainIVdf['CALLS_LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
+                            OptionString = str(CallOptionChainIVdf['Strike Price'][ind]) + ' CE, ' + str(CallOptionChainIVdf['CALLS_LTP'][ind]) + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
                             cones.annotate(OptionString,
                                             xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['CALLS_IV'][ind]),
                                             color='r', xytext =(1.5 * offset,6 * CallOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points',arrowprops = arrowprops,
@@ -392,7 +389,7 @@ class VolatilityEstimator(object):
                             print('[SELL '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                         # Sell Recos for PE     + ',IV1 = ' + (PutOptionChainIVdf['IV1'][ind]*100).astype(str)
                         for ind in PutOptionChainIVdf[-TopRecos:].index:
-                            OptionString = str(PutOptionChainIVdf['Strike Price'][ind]) + ' PE, ' + PutOptionChainIVdf['PUTS_LTP'][ind] + ' ' + PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
+                            OptionString = str(PutOptionChainIVdf['Strike Price'][ind]) + ' PE, ' + str(PutOptionChainIVdf['PUTS_LTP'][ind]) + ' ' + PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
                             cones.annotate(OptionString,
                                             xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['PUTS_IV'][ind]),
                                             color='r', xytext =(1.5 * PutOptionChainIVdf['DaysToExpiry'][ind], 6 * PutOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points',arrowprops = arrowprops ,
@@ -401,7 +398,7 @@ class VolatilityEstimator(object):
                             print('[SELL '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                         #Buy Recos for CE    + ',IV = ' + (CallOptionChainIVdf['IV'][ind]*100).astype(str)
                         for ind in CallOptionChainIVdf.head(TopRecos).index:
-                            OptionString = str(CallOptionChainIVdf['Strike Price'][ind]) + ' CE, ' + CallOptionChainIVdf['CALLS_LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
+                            OptionString = str(CallOptionChainIVdf['Strike Price'][ind]) + ' CE, ' + str(CallOptionChainIVdf['CALLS_LTP'][ind]) + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
                             cones.annotate(OptionString,
                                             xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['CALLS_IV'][ind]),
                                             color='b', xytext =(2 * CallOptionChainIVdf['DaysToExpiry'][ind], -3 * CallOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = buyarrowprops,
@@ -410,7 +407,7 @@ class VolatilityEstimator(object):
                             print('[BUY '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                         #Buy Recos for PE      + ',IV1 = ' + (PutOptionChainIVdf['IV1'][ind]*100).astype(str)
                         for ind in PutOptionChainIVdf.head(TopRecos).index:
-                            OptionString = str(PutOptionChainIVdf['Strike Price'][ind]) + ' PE, ' + PutOptionChainIVdf['PUTS_LTP'][ind] + ' ' + PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
+                            OptionString = str(PutOptionChainIVdf['Strike Price'][ind]) + ' PE, ' + str(PutOptionChainIVdf['PUTS_LTP'][ind]) + ' ' + PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
                             cones.annotate(OptionString,
                                             xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['PUTS_IV'][ind]),
                                             color='b', xytext =(4 * offset, -4 * PutOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = buyarrowprops,
@@ -419,6 +416,7 @@ class VolatilityEstimator(object):
                             print('[BUY '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                     except:
                         print('Couldnt plot IV spread for '+i.strftime("%Y%m%d"))
+                        # print("Oops!", sys.exc_info()[0], "occurred.")
 
         # set the x ticks and limits
         cones.set_xticks(windows)
@@ -1436,6 +1434,7 @@ def GetVolatilityData(sym,data_file_path,bench_file_path):
 # estimator windows
 
 def VolatilityTest(sym):
+    # sym = 'RELIANCE'
     window = 30
     windows = [3, 5, 10, 20, 30, 60, 90]
     quantiles = [0.25, 0.75]
@@ -1443,10 +1442,26 @@ def VolatilityTest(sym):
     density = True
     est = 'YangZhang'
     TopRecos = 1
+    global ExpiryDateList
+    global ThreeThursdayDateList
+    global AllThursdayDateList
     
-    # ThreeThursdayDateList = []
-    # AllThursdayDateList = []
+    ThreeThursdayDateList = []
+    AllThursdayDateList = []
+    Next3Thursdays(CurrentDate)
+
+    for d in AllThursdays(CurrentDate):
+        if d in OptionChainHolidayList:
+            d -= relativedelta(days=1) 
+        AllThursdayDateList.append(d)
+    
     DownloadOptionChain(sym)
+    
+    if(sym == 'NIFTY' or sym == 'BANKNIFTY' or sym == 'FINNIFTY'):
+        ExpiryDateList = AllThursdayDateList
+    else:
+        ExpiryDateList = ThreeThursdayDateList
+        
     
     if sym == 'FINNIFTY':
         sym = 'Nifty Fin Service'
@@ -1454,18 +1469,6 @@ def VolatilityTest(sym):
     # bench = 'NIFTY' #None #'NIFTY'
     data_file_path = './Datastore/'+sym+'_ohlc.ftr'
     bench_file_path = './Datastore/NIFTY_ohlc.ftr'
-    
-    CurrentDate = datetime.date.today()
-    # CurrentDay = CurrentDate.day
-    
-    path = './Option chain - Dec 14/' # use your path
-    all_files = glob.glob(path + CurrentDate.strftime("%Y-%m-%d") + '-' + sym + "*.csv")
-    
-    ExpiryDateList.clear()
-    for filename in all_files:
-        Edate = datetime.datetime.strptime(filename[-14:-4], '%Y-%m-%d').date()
-        ExpiryDateList.append(Edate)
-    
     price_data, bench_data = GetVolatilityData(sym,data_file_path,bench_file_path)
     
     # initialize class
@@ -1484,9 +1487,9 @@ def VolatilityTest(sym):
     )
 
 
-VolatilityTest('HDFCBANK')
+VolatilityTest('NIFTY')
 ############################################################################
-
+# OldOptionsdf = feather.read_feather('./Option chain - Dec 14/2021-06-13-RELIANCEoption-chain-equity-derivatives-2021-08-26.ftr')
 # call plt.show() on any of the below...
 # _, plt = vol.cones(windows=windows, quantiles=quantiles)
 # _, plt = vol.rolling_quantiles(window=window, quantiles=quantiles)
