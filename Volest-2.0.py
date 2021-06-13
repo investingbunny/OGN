@@ -1,11 +1,3 @@
-from selenium import webdriver
-from selenium.webdriver import Firefox
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.by import By
-import glob
 import shutil
 import os
 import calendar
@@ -32,11 +24,12 @@ import glob
 import models
 import TechnicalAnalysis
 from scipy.stats import norm
+from nsepython import *
 
 ExpiryDates = []
 ExpiryDateList = []
-ThreeThursdayDateList = []
-AllThursdayDateList = []
+# ThreeThursdayDateList = []
+# AllThursdayDateList = []
 TopRecos = 2
 # global tech1, tech2, tech3, tech4
 
@@ -44,6 +37,7 @@ OptionChainHolidayList = ['2021-01-26','2021-03-11','2021-03-29','2021-04-02','2
 OptionChainHolidayList = [datetime.datetime.strptime(date, '%Y-%m-%d').date() for date in OptionChainHolidayList]
 
 def Next3Thursdays(dt):
+    ThreeThursdayDateList = []
     dt += relativedelta(day=31, weekday=TH(-1))
     if dt in OptionChainHolidayList:
         dt -= relativedelta(days=1)
@@ -72,75 +66,41 @@ def check_for_files(filepath):
     return False
         
 def DownloadOptionChain(sym):
-    ThreeThursdayDateList = []
+    OptionsCumulative = pd.DataFrame()
     AllThursdayDateList = []
     CurrentDate = datetime.date.today()
     Next3Thursdays(CurrentDate)
-    # sym = 'NIFTY'
 
     for d in AllThursdays(CurrentDate):
         if d in OptionChainHolidayList:
             d -= relativedelta(days=1) 
         AllThursdayDateList.append(d)
 
-    ChainOptions = webdriver.ChromeOptions()
-    ChainOptions.add_argument("--disable-blink-features")
-    ChainOptions.add_argument("--disable-blink-features=AutomationControlled")
-    # ChainOptions.add_argument('--headless')
-    browser = webdriver.Chrome(options=ChainOptions)
-    browser.implicitly_wait(30)
-    browser.set_page_load_timeout(30)
-    browser.get('https://www.nseindia.com/option-chain')
-    
-    timeout = 20
-    try:
-        element_present = EC.presence_of_element_located((By.ID, 'equity_optionChainTable'))
-        WebDriverWait(browser, timeout).until(element_present)
-    except TimeoutException:
-        print('Timed out waiting for initial page to load')
-
     if(sym == 'NIFTY' or sym == 'BANKNIFTY' or sym == 'FINNIFTY'):
-        search_form = browser.find_element_by_id('equity_optionchain_select')
-        search_form.send_keys(sym)
         for ExpiryDateDownload in AllThursdayDateList:
-            search_form = browser.find_element_by_id('expirySelect')
-            search_form.send_keys(ExpiryDateDownload.strftime("%d-%b-%Y"))
+            print('Downloading option chain for '+ sym + 'Expiry = ' + ExpiryDateDownload.strftime("%d-%b-%Y"))
             try:
-                element_present = EC.presence_of_element_located((By.ID, 'equity_optionChainTable'))
-                WebDriverWait(browser, timeout).until(element_present)
-            except TimeoutException:
-                print('Timed out waiting for index page to load')
-            # content = browser.find_element_by_class_name('refreshIcon').click()
-            content = browser.find_element_by_class_name('xlsdownload').click()
-            #    option-chain-ED-NIFTY-11-Feb-2021
-            FileString = r'C:\Users\User\Downloads\option-chain-ED-'+sym+'*.csv'
-            while not check_for_files(FileString):
-                time.sleep(1)
-            for filepath_object in glob.glob(FileString):
-                shutil.move(filepath_object ,'.\Option chain - Dec 14\\'+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
-                'option-chain-equity-derivatives-' + ExpiryDateDownload.strftime("%Y-%m-%d") + '.csv')
+                oi_data, ltp, crontime = oi_chain_builder(sym,ExpiryDateDownload.strftime("%d-%b-%Y"),"full")
+            except:
+                print('Timed out waiting for options page to load for '+ sym)
+            if not oi_data.empty:
+                feather.write_feather(oi_data, './Option chain - Dec 14/'+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
+                'option-chain-equity-derivatives-' + ExpiryDateDownload.strftime("%Y-%m-%d")+'.ftr')
+            else:
+                print('Options df failed to load for '+ sym + 'for expiry' + ExpiryDateDownload.strftime("%Y-%m-%d"))
     else:
-        search_form = browser.find_element_by_id('select_symbol')
-        search_form.send_keys(sym)
         for ExpiryDateDownload in ThreeThursdayDateList:
-            search_form = browser.find_element_by_id('expirySelect')
-            search_form.send_keys(ExpiryDateDownload.strftime("%d-%b-%Y"))
+            print('Downloading option chain for '+ sym + ', Expiry = ' + ExpiryDateDownload.strftime("%d-%b-%Y"))
             try:
-                element_present = EC.presence_of_element_located((By.ID, 'equity_optionChainTable'))
-                WebDriverWait(browser, timeout).until(element_present)
-            except TimeoutException:
-                print('Timed out waiting for stock page to load')
-            # content = browser.find_element_by_class_name('refreshIcon').click()
-            content = browser.find_element_by_class_name('xlsdownload').click()
-            # option-chain-ED-AARTIIND-25-Feb-2021
-            FileString = r'C:\Users\User\Downloads\option-chain-ED-'+sym+'*.csv'
-            while not check_for_files(FileString):
-                time.sleep(1)
-            for filepath_object in glob.glob(FileString):
-                shutil.move(filepath_object ,'.\Option chain - Dec 14\\'+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
-                'option-chain-equity-derivatives-' + ExpiryDateDownload.strftime("%Y-%m-%d") + '.csv')
-
-    browser.close()
+                oi_data, ltp, crontime = oi_chain_builder(sym,ExpiryDateDownload.strftime("%d-%b-%Y"),"full")
+            except:
+                print('Timed out waiting for options page to load for '+ sym)
+            if not oi_data.empty:
+                # 2021-06-13-NIFTYoption-chain-equity-derivatives-2021-08-26
+                feather.write_feather(oi_data, './Option chain - Dec 14/'+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
+                'option-chain-equity-derivatives-' + ExpiryDateDownload.strftime("%Y-%m-%d")+'.ftr')
+            else:
+                print('Options df failed to load for '+ sym)
 
 def FindFeather(name, path):
     for root, dirs, files in os.walk(path):
@@ -148,33 +108,24 @@ def FindFeather(name, path):
             return os.path.join(root, name)
 
 def UpdateOptionChainTable(ExpiryDate,Symbol):
-    OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-' + Symbol + 'option-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
-    # OptionChain = CurrentDate.strftime("%Y-%m-%d") + '-TATAMOTORSoption-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.csv'
-    # print('Symbol = ' + Symbol)
-    # Symbol = 'NIFTY'  ExpiryDate = '24-Jun-2021'   ExpiryDate = datetime.date(2021,6,24)
-    # print('expiry = ',ExpiryDate.strftime("%Y-%m-%d"))
-    
-    OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+ OptionChain, header = 1)
+    OptionsFileName = CurrentDate.strftime("%Y-%m-%d") + '-' + Symbol + 'option-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.ftr'
+    OptionChainCSVdf = feather.read_feather('./Option chain - Dec 14/'+OptionsFileName)    
     
     OptionChainCSVdf = OptionChainCSVdf.rename(columns=lambda x: x.strip())
     OptionChainCSVdf = OptionChainCSVdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
     
-    OptionChainCSVdf.drop("Unnamed: 0", axis=1, inplace=True)
-    OptionChainCSVdf.drop("Unnamed: 22", axis=1, inplace=True)
+    OptionChainCSVdf.drop("CALLS_Chart", axis=1, inplace=True)
+    OptionChainCSVdf.drop("PUTS_Chart", axis=1, inplace=True)
     CallOptionChaindf = OptionChainCSVdf.iloc[:,0:11]
     PutOptionChaindf = OptionChainCSVdf.iloc[:,10:21]
-    if 'IV.1' in PutOptionChaindf.columns:
-        PutOptionChaindf.rename(columns={'IV.1': 'IV1'}, inplace=True)
     
-    CallOptionChainIVdf = CallOptionChaindf[CallOptionChaindf.IV != '-']
-    PutOptionChainIVdf = PutOptionChaindf[PutOptionChaindf.IV1 != '-']
+    CallOptionChainIVdf = CallOptionChaindf[CallOptionChaindf.CALLS_IV != 0]
+    PutOptionChainIVdf = PutOptionChaindf[PutOptionChaindf.PUTS_IV != 0]
     
     # covert IV string to an integer  to plot it
-    CallOptionChainIVdf['IV'] = CallOptionChainIVdf['IV'].astype(float) 
-    PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].astype(float) 
-    CallOptionChainIVdf['IV'] = CallOptionChainIVdf['IV'].div(100).round(4)
-    PutOptionChainIVdf['IV1'] = PutOptionChainIVdf['IV1'].div(100).round(4)
-    #Reset the index
+    CallOptionChainIVdf['CALLS_IV'] = CallOptionChainIVdf['CALLS_IV'].div(100).round(4)
+    PutOptionChainIVdf['PUTS_IV'] = PutOptionChainIVdf['PUTS_IV'].div(100).round(4)
+    #Reset the index ???
     CallOptionChainIVdf.reset_index(level=0, inplace=True, drop=True)
     PutOptionChainIVdf.reset_index(level=0, inplace=True, drop=True)
     
@@ -424,50 +375,50 @@ class VolatilityEstimator(object):
                     try:
                             # print('Scattering for date '+ i.strftime("%Y%m%d"))
                         CallOptionChainIVdf, PutOptionChainIVdf = UpdateOptionChainTable(i,self._symbol[1])
-                        cones.scatter(CallOptionChainIVdf['DaysToExpiry'],CallOptionChainIVdf['IV'],color='b')
-                        cones.scatter(PutOptionChainIVdf['DaysToExpiry'],PutOptionChainIVdf['IV1'],color='r')
+                        cones.scatter(CallOptionChainIVdf['DaysToExpiry'],CallOptionChainIVdf['CALLS_IV'],color='b')
+                        cones.scatter(PutOptionChainIVdf['DaysToExpiry'],PutOptionChainIVdf['PUTS_IV'],color='r')
                         #Important to annotate only outlier points
-                        CallOptionChainIVdf = CallOptionChainIVdf.sort_values(by=['IV']) 
-                        PutOptionChainIVdf = PutOptionChainIVdf.sort_values(by=['IV1'])
+                        CallOptionChainIVdf = CallOptionChainIVdf.sort_values(by=['CALLS_IV']) 
+                        PutOptionChainIVdf = PutOptionChainIVdf.sort_values(by=['PUTS_IV'])
                         
                         #Sell Recos for CE       + ',IV = ' (CallOptionChainIVdf['IV'][ind]*100).astype(str),
                         for ind in CallOptionChainIVdf[-TopRecos:].index:
-                            OptionString = str(CallOptionChainIVdf['STRIKE PRICE'][ind]) + ' CE, ' + CallOptionChainIVdf['LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
+                            OptionString = str(CallOptionChainIVdf['Strike Price'][ind]) + ' CE, ' + CallOptionChainIVdf['CALLS_LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
                             cones.annotate(OptionString,
-                                            xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),
+                                            xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['CALLS_IV'][ind]),
                                             color='r', xytext =(1.5 * offset,6 * CallOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points',arrowprops = arrowprops,
                                             horizontalalignment='right', verticalalignment='top')
                             # texts.append(cones.text(CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind], OptionString),ha='center', va='center')
                             print('[SELL '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                         # Sell Recos for PE     + ',IV1 = ' + (PutOptionChainIVdf['IV1'][ind]*100).astype(str)
                         for ind in PutOptionChainIVdf[-TopRecos:].index:
-                            OptionString = str(PutOptionChainIVdf['STRIKE PRICE'][ind]) + ' PE, ' + PutOptionChainIVdf['LTP.1'][ind] + ' ' + PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
+                            OptionString = str(PutOptionChainIVdf['Strike Price'][ind]) + ' PE, ' + PutOptionChainIVdf['PUTS_LTP'][ind] + ' ' + PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
                             cones.annotate(OptionString,
-                                            xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),
+                                            xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['PUTS_IV'][ind]),
                                             color='r', xytext =(1.5 * PutOptionChainIVdf['DaysToExpiry'][ind], 6 * PutOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points',arrowprops = arrowprops ,
                                             horizontalalignment='left', verticalalignment='top')
                             # texts.append(cones.text(PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind], OptionString),ha='center', va='center')
                             print('[SELL '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                         #Buy Recos for CE    + ',IV = ' + (CallOptionChainIVdf['IV'][ind]*100).astype(str)
                         for ind in CallOptionChainIVdf.head(TopRecos).index:
-                            OptionString = str(CallOptionChainIVdf['STRIKE PRICE'][ind]) + ' CE, ' + CallOptionChainIVdf['LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
+                            OptionString = str(CallOptionChainIVdf['Strike Price'][ind]) + ' CE, ' + CallOptionChainIVdf['CALLS_LTP'][ind] + ' ' + CallOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
                             cones.annotate(OptionString,
-                                            xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind]),
+                                            xy = (CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['CALLS_IV'][ind]),
                                             color='b', xytext =(2 * CallOptionChainIVdf['DaysToExpiry'][ind], -3 * CallOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = buyarrowprops,
                                             horizontalalignment='left', verticalalignment='bottom')
                             # texts.append(cones.text(CallOptionChainIVdf['DaysToExpiry'][ind], CallOptionChainIVdf['IV'][ind], OptionString),ha='center', va='center')
                             print('[BUY '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                         #Buy Recos for PE      + ',IV1 = ' + (PutOptionChainIVdf['IV1'][ind]*100).astype(str)
                         for ind in PutOptionChainIVdf.head(TopRecos).index:
-                            OptionString = str(PutOptionChainIVdf['STRIKE PRICE'][ind]) + ' PE, ' + PutOptionChainIVdf['LTP.1'][ind] + ' ' + PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
+                            OptionString = str(PutOptionChainIVdf['Strike Price'][ind]) + ' PE, ' + PutOptionChainIVdf['PUTS_LTP'][ind] + ' ' + PutOptionChainIVdf['Expiry'][ind].strftime("%b-%d")
                             cones.annotate(OptionString,
-                                            xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind]),
+                                            xy = (PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['PUTS_IV'][ind]),
                                             color='b', xytext =(4 * offset, -4 * PutOptionChainIVdf['DaysToExpiry'][ind]), textcoords ='offset points', arrowprops = buyarrowprops,
                                             horizontalalignment='right', verticalalignment='bottom')
                             # texts.append(cones.text(PutOptionChainIVdf['DaysToExpiry'][ind], PutOptionChainIVdf['IV1'][ind], OptionString),ha='center', va='center')
                             print('[BUY '+ self._symbol[1] +'] '+ OptionString, sep='\n')
                     except:
-                        print('Couldnt update table for date'+i.strftime("%Y%m%d"))
+                        print('Couldnt plot IV spread for '+i.strftime("%Y%m%d"))
 
         # set the x ticks and limits
         cones.set_xticks(windows)
@@ -1483,54 +1434,57 @@ def GetVolatilityData(sym,data_file_path,bench_file_path):
 #     'YangZhang'
 # ]
 # estimator windows
-window = 30
-windows = [3, 5, 10, 20, 30, 60, 90]
-quantiles = [0.25, 0.75]
-bins = 100
-density = True
-sym = 'NIFTY'
-est = 'YangZhang'
-TopRecos = 1
 
-ThreeThursdayDateList = []
-AllThursdayDateList = []
-DownloadOptionChain(sym)
+def VolatilityTest(sym):
+    window = 30
+    windows = [3, 5, 10, 20, 30, 60, 90]
+    quantiles = [0.25, 0.75]
+    bins = 100
+    density = True
+    est = 'YangZhang'
+    TopRecos = 1
+    
+    # ThreeThursdayDateList = []
+    # AllThursdayDateList = []
+    DownloadOptionChain(sym)
+    
+    if sym == 'FINNIFTY':
+        sym = 'Nifty Fin Service'
+    
+    # bench = 'NIFTY' #None #'NIFTY'
+    data_file_path = './Datastore/'+sym+'_ohlc.ftr'
+    bench_file_path = './Datastore/NIFTY_ohlc.ftr'
+    
+    CurrentDate = datetime.date.today()
+    # CurrentDay = CurrentDate.day
+    
+    path = './Option chain - Dec 14/' # use your path
+    all_files = glob.glob(path + CurrentDate.strftime("%Y-%m-%d") + '-' + sym + "*.csv")
+    
+    ExpiryDateList.clear()
+    for filename in all_files:
+        Edate = datetime.datetime.strptime(filename[-14:-4], '%Y-%m-%d').date()
+        ExpiryDateList.append(Edate)
+    
+    price_data, bench_data = GetVolatilityData(sym,data_file_path,bench_file_path)
+    
+    # initialize class
+    vol = VolatilityEstimator(
+        price_data=price_data,
+        estimator=est,
+        bench_data=bench_data
+    )
+    
+    vol.term_sheet(
+        window,
+        windows,
+        quantiles,
+        bins,
+        density
+    )
 
-if sym == 'FINNIFTY':
-    sym = 'Nifty Fin Service'
 
-# bench = 'NIFTY' #None #'NIFTY'
-data_file_path = './Datastore/'+sym+'_ohlc.ftr'
-bench_file_path = './Datastore/NIFTY_ohlc.ftr'
-
-CurrentDate = datetime.date.today()
-# CurrentDay = CurrentDate.day
-
-path = './Option chain - Dec 14/' # use your path
-all_files = glob.glob(path + CurrentDate.strftime("%Y-%m-%d") + '-' + sym + "*.csv")
-
-ExpiryDateList.clear()
-for filename in all_files:
-    Edate = datetime.datetime.strptime(filename[-14:-4], '%Y-%m-%d').date()
-    ExpiryDateList.append(Edate)
-
-price_data, bench_data = GetVolatilityData(sym,data_file_path,bench_file_path)
-
-# initialize class
-vol = VolatilityEstimator(
-    price_data=price_data,
-    estimator=est,
-    bench_data=bench_data
-)
-
-vol.term_sheet(
-    window,
-    windows,
-    quantiles,
-    bins,
-    density
-)
-
+VolatilityTest('HDFCBANK')
 ############################################################################
 
 # call plt.show() on any of the below...
