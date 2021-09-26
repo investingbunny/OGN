@@ -36,6 +36,7 @@ TopRecos = 1
 
 OptionChainHolidayList = ['2021-01-26','2021-03-11','2021-03-29','2021-04-02','2021-04-14','2021-04-21','2021-05-13','2021-07-21','2021-08-19','2021-09-10','2021-10-15','2021-11-05','2021-11-19']
 OptionChainHolidayList = [datetime.datetime.strptime(date, '%Y-%m-%d').date() for date in OptionChainHolidayList]
+DailyOHLCFilePath = "ohlc.ftr";
 
 def Next3Thursdays(dt):
     global ThreeThursdayDateList
@@ -333,16 +334,16 @@ class VolatilityEstimator(object):
         # print(*data, sep='\n')
         # print("The length of list is: ", len(data)) 
         # figure
-        fig = plt.figure(figsize=(16, 12))
+        Conesfig = plt.figure(figsize=(16, 12))
         ax0 = plt.subplots()
-        fig.autofmt_xdate()
+        Conesfig.autofmt_xdate()
         left, width = 0.07, 0.65
         bottom, height = 0.2, 0.7
         left_h = left+width+0.02
         rect_cones = [left, bottom, width, height]
         rect_box = [left_h, bottom, 0.17, height]
-        cones = fig.add_axes(rect_cones)
-        box = fig.add_axes(rect_box)
+        cones = Conesfig.add_axes(rect_cones)
+        box = Conesfig.add_axes(rect_box)
 
         # set the plots
         cones.plot(windows, max_, label="Max")
@@ -450,7 +451,7 @@ class VolatilityEstimator(object):
         # turn on the grid
         box.grid(True, axis='y', which='major', alpha=0.5)
         
-        return fig, plt
+        return Conesfig, plt
 
 
     def rolling_quantiles(self, window=30, quantiles=[0.25, 0.75]):
@@ -913,7 +914,8 @@ class VolatilityEstimator(object):
             bins=100,
             density=True,
             open=False):
-        
+
+        tech1, tech2, tech3, tech4 = Technicals(self._symbol[1])        
         cones_fig, cones_plt = self.cones(windows=windows, quantiles=quantiles)
         rolling_quantiles_fig, rolling_quantiles_plt = self.rolling_quantiles(window=window, quantiles=quantiles)
         rolling_extremes_fig, rolling_extremes_plt = self.rolling_extremes(window=window)
@@ -922,14 +924,13 @@ class VolatilityEstimator(object):
         benchmark_compare_fig, benchmark_compare_plt = self.benchmark_compare(window=window)
         benchmark_corr_fig, benchmark_corr_plt = self.benchmark_correlation(window=window)
         benchmark_regression = self.benchmark_regression(window=window)
-        tech2, tech3, tech4 = Technicals(self._symbol[1])
         
         filename = self._symbol[1] + self._estimator + '_termsheet_' + pd.datetime.now().strftime("%Y-%m-%d--%H-%M-%S %p") + '.pdf'
         fn = os.path.abspath(os.path.join(u'..', u'nsepywork/term-sheets', filename))
         pp = PdfPages(fn)
         
+        pp.savefig(tech1)
         pp.savefig(cones_fig)
-        # pp.savefig(tech1)
         pp.savefig(tech2)
         pp.savefig(tech3)
         pp.savefig(tech4)        
@@ -963,9 +964,9 @@ def plot_chart(DF, n, ticker, Dividend):
     # data = Indicatordf.copy()
     data = DF.copy()
 
-    # Renkodata = Renko_DF(data,ticker)
+    Renkodata = Renko_DF(data,ticker)
     #DF amd number of latest bricks
-    # tech1 = PlotRenko(Renkodata,100)
+    tech1 = PlotRenko(Renkodata,100)
 
     data = data.iloc[-n:]    
     if(ticker != "NIFTY" and ticker != "BANKNIFTY"):
@@ -1318,7 +1319,7 @@ def plot_chart(DF, n, ticker, Dividend):
     # plt.savefig('suppres.svg', format='svg')
     plt.show()
     
-    return tech2, tech3, tech4
+    return tech1, tech2, tech3, tech4
 
 def Technicals(Scrip):
     OHLCdf = None
@@ -1387,10 +1388,10 @@ def Technicals(Scrip):
         #Indicatordf.iloc[-150:,[8,-1,-2,-3,-4,-5]].plot(figsize=(16,9),grid = True,title = Scrip) 
         Indicatordf.reset_index(level=0, inplace=True)
 # ###################################################################################################            
-        tech2, tech3, tech4 = plot_chart(Indicatordf,50,Scrip,0)
+        tech1, tech2, tech3, tech4 = plot_chart(Indicatordf,50,Scrip,0)
 ###################################################################################################
         # feather.write_feather(Indicatordf, 'E:/Harish/OGN/TechnicalFrames/'+Scrip+'-dataframe.ftr')
-    return tech2, tech3, tech4
+    return tech1, tech2, tech3, tech4
 
 def GetVolatilityData(sym,data_file_path,bench_file_path):
     # Prepare the price and benchmark data to be used to calculate volatility
@@ -1487,7 +1488,29 @@ def VolatilityTest(sym):
     )
 
 
-VolatilityTest('NIFTY')
+def OnlyTechnicalCharts(sym):
+    tech1, onlytech1, onlytech2, onlytech3 = Technicals(sym)
+    
+    filename = sym + '_Technicals_' + pd.datetime.now().strftime("%Y-%m-%d--%H-%M-%S %p") + '.pdf'
+    fn = os.path.abspath(os.path.join(u'..', u'nsepywork/term-sheets', filename))
+    ppt = PdfPages(fn)
+    
+    ppt.savefig(tech1)
+    ppt.savefig(onlytech1)
+    ppt.savefig(onlytech2)
+    ppt.savefig(onlytech3)        
+
+    figt = plt.figure(figsize=(8, 6))
+
+    plt.axis('off')
+    figt.tight_layout()
+    ppt.savefig(figt)
+    ppt.close()
+    
+    print('%s output complete' % filename)
+
+# VolatilityTest('COROMANDEL')
+# OnlyTechnicalCharts('COROMANDEL')
 ############################################################################
 # OldOptionsdf = feather.read_feather('./Option chain - Dec 14/2021-06-13-RELIANCEoption-chain-equity-derivatives-2021-08-26.ftr')
 # call plt.show() on any of the below...

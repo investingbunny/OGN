@@ -76,8 +76,9 @@ def DownloadNewNSEFnO():
         FnOBhavArg = 'fo' + weekday.strftime("%d%b%Y").upper() + 'bhav.csv.zip'
         FnOBhavURL = FnOBhavcopy + FnOBhavYear + '/' + FnOBhavMonth + '/' + FnOBhavArg
         try:
-            r = requests.get(FnOBhavURL, allow_redirects=True) #Download FnO Market report for 'weekday'
+            r = requests.get(FnOBhavURL) #Download FnO Market report for 'weekday'
             open('./New NSE site/'+FnOBhavArg, 'wb').write(r.content)
+            print('Download:'+ FnOBhavURL)
         except:
             print('Couldnt download:'+ FnOBhavURL)
         
@@ -92,20 +93,20 @@ def DownloadNewNSEFnO():
             print('Couldnt download:'+ FnOReportURL)
             
         #FnO Volatility report download
-        FnOVolatilityArg = 'FOVOLT_' + weekday.strftime("%d%m%Y") + '.csv'
-        FnOVolatilityURL = FnOVolatility + FnOVolatilityArg
-        try:
-            r = requests.get(FnOVolatilityURL, allow_redirects=True) #Download FnO Volatility report for 'weekday'
-            if r.ok:
-                data = r.content.decode('utf8')
-                Voldf = pd.read_csv(io.StringIO(data))
-                Voldf = Voldf.rename(columns=lambda x: x.strip())
-                Voldf = Voldf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-        except:
-            print('Couldnt download:'+ FnOVolatilityURL)    
+        # FnOVolatilityArg = 'FOVOLT_' + weekday.strftime("%d%m%Y") + '.csv'
+        # FnOVolatilityURL = FnOVolatility + FnOVolatilityArg
+        # try:
+        #     r = requests.get(FnOVolatilityURL, allow_redirects=True) #Download FnO Volatility report for 'weekday'
+        #     if r.ok:
+        #         data = r.content.decode('utf8')
+        #         Voldf = pd.read_csv(io.StringIO(data))
+        #         Voldf = Voldf.rename(columns=lambda x: x.strip())
+        #         Voldf = Voldf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        # except:
+        #     print('Couldnt download:'+ FnOVolatilityURL)    
             
-        if not Voldf.empty:
-            feather.write_feather(Voldf, './New NSE site/'+FnOVolatilityArg+'.ftr')
+        # if not Voldf.empty:
+        #     feather.write_feather(Voldf, './New NSE site/'+FnOVolatilityArg+'.ftr')
 
 def UpdatetNSEFnOData():
     TotalNewOptionsdf = pd.DataFrame()

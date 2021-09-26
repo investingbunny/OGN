@@ -266,7 +266,8 @@ def Renko_DF(DF,ticker):
         df = df.iloc[:,[0,5,6,4,8,10]]
     df.rename(columns = {"Date" : "date", "High" : "high","Low" : "low", "Open" : "open","Close" : "close", "Volume" : "volume"}, inplace = True)
     df2 = Renko(df)
-    df2.brick_size = round(ATR(DF,120)["ATR"].iloc[-1],0)
+    # df2.brick_size = round(ATR(DF,120)["ATR"].iloc[-1],0)
+    df2.brick_size = round(ATR(DF,50)["ATR"].iloc[-1],0)
     renko_df = df2.get_ohlc_data() #if using older version of the library please use get_bricks() instead
     return renko_df
 
@@ -283,9 +284,9 @@ def PlotRenko(DF,num_bars):
     price_move = abs(df.iloc[1]['open'] - df.iloc[1]['close'])
  
     # create the figure
-    fig = plt.figure(1)
-    fig.clf()
-    axes = fig.gca()
+    RenkoFig = plt.figure(1)
+    RenkoFig.clf()
+    axes = RenkoFig.gca()
  
     # plot the bars, blue for 'up', red for 'down'
     index = 1
@@ -301,14 +302,14 @@ def PlotRenko(DF,num_bars):
     # adjust the axes
     plt.xlim([0, num_bars])
     plt.ylim([min(min(df['open']),min(df['close'])), max(max(df['open']),max(df['close']))])
-    fig.suptitle('Bars from ' + min(df['date']).strftime("%d-%b-%Y") + " to " + max(df['date']).strftime("%d-%b-%Y") \
+    RenkoFig.suptitle('Bars from ' + min(df['date']).strftime("%d-%b-%Y") + " to " + max(df['date']).strftime("%d-%b-%Y") \
         + '\nPrice movement = ' + str(price_move), fontsize=14)
     plt.xlabel('Bar Number')
     plt.ylabel('Price')
     #plt.figsize = (16,9)
     plt.grid(True)
     plt.show()
-    return fig
+    return RenkoFig
 
 def BollBnd(DF,n):
     "function to calculate Bollinger Band"
