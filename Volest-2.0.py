@@ -1509,7 +1509,7 @@ def OnlyTechnicalCharts(sym):
     
     print('%s output complete' % filename)
 
-# VolatilityTest('COROMANDEL')
+VolatilityTest('NIFTY')
 # OnlyTechnicalCharts('COROMANDEL')
 ############################################################################
 # OldOptionsdf = feather.read_feather('./Option chain - Dec 14/2021-06-13-RELIANCEoption-chain-equity-derivatives-2021-08-26.ftr')

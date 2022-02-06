@@ -34,7 +34,7 @@ OHLCBhavCopy = 'https://archives.nseindia.com/products/content/' #sec_bhavdata_f
 OHLCBhavPR = 'https://archives.nseindia.com/archives/equities/bhavcopy/pr/' #PR151020.zip
 DailyOHLCFilePath = "ohlc.ftr"
 
-HolidayList = ['26-Jan-21','11-Mar-21','29-Mar-21','30-Mar-21','31-Mar-21','02-Apr-21','14-Apr-21','21-Apr-21','13-May-21','21-Jul-21','19-Aug-21','10-Sep-21','15-Oct-21','05-Nov-21','19-Nov-21']
+HolidayList = ['26-Jan-22','01-Mar-22','18-Mar-22','14-Apr-22','15-Apr-22','03-May-22','09-Aug-22','15-Aug-22','31-Aug-22','05-Oct-22','24-Oct-22','26-Oct-22','08-Nov-22']
 HolidayList = pd.to_datetime(pd.Series(HolidayList), format='%d-%b-%y')
 
 def FindFeather(name, path):
