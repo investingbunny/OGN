@@ -1,471 +1,378 @@
 # -*- coding: utf-8 -*-
 """
-Created on Sat Oct  3 17:35:42 2020
-This file is intended to download F&O data from the new NSE website.
-The file is a consolidated daily report which has to be dissected.
-@author: User
+Modernized NSE Market Data Downloader
+Created on Feb 21, 2026
+Author: Jules (Modernized from original OGN v2.0)
+
+This script downloads Equity (CM), Derivatives (FO), and Indices data from the NSE website.
+It supports both legacy archive formats and the new UDiFF format (post July 2024).
+Data is stored in Parquet format for optimal space and performance.
 """
-import requests
-from zipfile import ZipFile
-import pandas as pd
-import datetime
-from datetime import date
-from dateutil.relativedelta import *
-import time
-import numpy as np
-import io
+
 import os
-import pyarrow
-import pyarrow.feather as feather
-from functools import reduce
+import io
+import time
+import zipfile
+import datetime
+import requests
+import urllib.parse
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from typing import Optional, List, Dict, Any
 
-# FnOStartDate = date(2020,9,28)
-FnOReport = 'https://archives.nseindia.com/archives/fo/mkt/'
-FnOVolatility = 'https://archives.nseindia.com/archives/nsccl/volt/'
-FnOSettlement = 'https://archives.nseindia.com/archives/nsccl/sett/'
-FnOBhavcopy = 'https://archives.nseindia.com/content/historical/DERIVATIVES/'
-MonthlyFuturesFilePath = "monthly-futures.ftr"
-FullFuturesFilePath = "full-futures.ftr"
-MonthlyOptionsFilePath = "monthly-options.ftr"
+# --- Constants & Configuration ---
+BASE_URL = "https://www.nseindia.com"
+ALL_REPORTS_URL = f"{BASE_URL}/all-reports"
+ARCHIVE_URL = "https://nsearchives.nseindia.com"
 
-# OHLCStartDate = date(2020,10,1)
-OHLCVolatility = 'https://archives.nseindia.com/archives/nsccl/volt/' # CMVOLT_09102020.CSV
-OHLCBhavCopy = 'https://archives.nseindia.com/products/content/' #sec_bhavdata_full_15102020.csv
-OHLCBhavPR = 'https://archives.nseindia.com/archives/equities/bhavcopy/pr/' #PR151020.zip
-DailyOHLCFilePath = "ohlc.ftr"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+}
 
-HolidayList = ['26-Jan-22','01-Mar-22','18-Mar-22','14-Apr-22','15-Apr-22','03-May-22','09-Aug-22','15-Aug-22','31-Aug-22','05-Oct-22','24-Oct-22','26-Oct-22','08-Nov-22']
-HolidayList = pd.to_datetime(pd.Series(HolidayList), format='%d-%b-%y')
+UDIFF_START_DATE = datetime.date(2024, 7, 8)
+DEFAULT_START_DATE = datetime.date(2010, 1, 1)
 
-def FindFeather(name, path):
-    for root, dirs, files in os.walk(path):
-        if name in files:
-            return os.path.join(root, name)
+DATA_ROOT = Path("MarketData_Parquet")
+EQUITY_RAW = DATA_ROOT / "Equity" / "Raw"
+EQUITY_PROCESSED = DATA_ROOT / "Equity" / "Processed"
+DERIVATIVES_RAW = DATA_ROOT / "Derivatives" / "Raw"
+DERIVATIVES_PROCESSED = DATA_ROOT / "Derivatives" / "Processed"
+INDICES_RAW = DATA_ROOT / "Indices" / "Raw"
+INDICES_PROCESSED = DATA_ROOT / "Indices" / "Processed"
 
-def UpdateBusinessDays():
-    #Check Index futures for last update NiftyFullFutures.info()
-    NiftyFullFutures = feather.read_feather('./Datastore/NIFTY_full-futures.ftr')
-    FuturesStartDate = NiftyFullFutures.iloc[-1].Date
-    FuturesStartDate += datetime.timedelta(days=1)
-    YesterdayDate = datetime.date.today() - datetime.timedelta(days=1) # weekday = YesterdayDate
+# Holiday List (Simplified - ideally fetch from NSE)
+HOLIDAYS = [
+    '2026-01-26', '2026-03-06', '2026-03-30', '2026-04-10', '2026-04-14',
+    '2026-05-01', '2026-10-02', '2026-10-21', '2026-11-05', '2026-12-25'
+]
+HOLIDAYS = pd.to_datetime(HOLIDAYS).date
 
-    bday = pd.bdate_range(FuturesStartDate, YesterdayDate) #To be replaced with LastRecordDate, CurrentDate
-    bday = set(bday).difference(HolidayList)
-    print('UpdateBusinessDays complete ')
+class NSEMarketDataDownloader:
+    """Class to handle robust downloading and storage of NSE market data."""
 
-def UpdateOHLCBusinessDays():
-    #Check Index futures for last update
-    SBINOHLC = feather.read_feather('./Datastore/SBIN_ohlc.ftr')
-    OHLCStartDate = SBINOHLC.iloc[-1].Date
-    OHLCStartDate += datetime.timedelta(days=1)
-    YesterdayOHLCDate = datetime.date.today() - datetime.timedelta(days=1)
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
+        self._init_session()
+        self._create_dirs()
 
-    ohlcbday = pd.bdate_range(OHLCStartDate, YesterdayOHLCDate) #To be replaced with LastRecordDate, CurrentDate
-    ohlcbday = set(ohlcbday).difference(HolidayList)
-    print('UpdateOHLCBusinessDays complete ')
-
-def DownloadNewNSEFnO():        
-    #Loop through dates to download NSE Futures data
-    for weekday in bday:
-        # 2020/OCT/fo14OCT2020bhav.csv.zip
-        FnOBhavMonth = weekday.strftime("%b").upper()
-        FnOBhavYear = weekday.strftime("%Y")
-        
-        print('Download NSEFnOBhav for '+ weekday.strftime("%Y-%m-%d"))
-        #FnO Bhav report download
-        FnOBhavArg = 'fo' + weekday.strftime("%d%b%Y").upper() + 'bhav.csv.zip'
-        FnOBhavURL = FnOBhavcopy + FnOBhavYear + '/' + FnOBhavMonth + '/' + FnOBhavArg
+    def _init_session(self):
+        """Initializes the session with NSE cookies."""
         try:
-            r = requests.get(FnOBhavURL) #Download FnO Market report for 'weekday'
-            open('./New NSE site/'+FnOBhavArg, 'wb').write(r.content)
-            print('Download:'+ FnOBhavURL)
-        except:
-            print('Couldnt download:'+ FnOBhavURL)
+            self.session.get(BASE_URL, timeout=15)
+            self.session.get(ALL_REPORTS_URL, timeout=15)
+        except Exception as e:
+            print(f"Warning: Failed to initialize session: {e}")
+
+    def _create_dirs(self):
+        """Ensures all necessary directories exist."""
+        for path in [EQUITY_RAW, EQUITY_PROCESSED, DERIVATIVES_RAW, DERIVATIVES_PROCESSED, INDICES_RAW, INDICES_PROCESSED]:
+            path.mkdir(parents=True, exist_ok=True)
+
+    def get_trading_days(self, start_date: datetime.date, end_date: datetime.date) -> List[datetime.date]:
+        """Returns a list of business days excluding holidays."""
+        bdays = pd.bdate_range(start=start_date, end=end_date)
+        days = [d.date() for d in bdays if d.date() not in HOLIDAYS]
+        return days
+
+    def _download_file(self, url: str, referer: Optional[str] = None) -> Optional[bytes]:
+        """Downloads a file with proper error handling and retry logic."""
+        if referer:
+            self.session.headers.update({"Referer": referer})
         
-        print('DownloadNewNSEFnO for'+ weekday.strftime("%Y-%m-%d"))
-        #FnO Market report download
-        FnOReportArg = 'fo' + weekday.strftime("%d%m%Y") + '.zip'
-        FnOReportURL = FnOReport + FnOReportArg
-        try:
-            r = requests.get(FnOReportURL, allow_redirects=True) #Download FnO Market report for 'weekday'
-            open('./New NSE site/'+FnOReportArg, 'wb').write(r.content)
-        except:
-            print('Couldnt download:'+ FnOReportURL)
-            
-        #FnO Volatility report download
-        # FnOVolatilityArg = 'FOVOLT_' + weekday.strftime("%d%m%Y") + '.csv'
-        # FnOVolatilityURL = FnOVolatility + FnOVolatilityArg
-        # try:
-        #     r = requests.get(FnOVolatilityURL, allow_redirects=True) #Download FnO Volatility report for 'weekday'
-        #     if r.ok:
-        #         data = r.content.decode('utf8')
-        #         Voldf = pd.read_csv(io.StringIO(data))
-        #         Voldf = Voldf.rename(columns=lambda x: x.strip())
-        #         Voldf = Voldf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-        # except:
-        #     print('Couldnt download:'+ FnOVolatilityURL)    
-            
-        # if not Voldf.empty:
-        #     feather.write_feather(Voldf, './New NSE site/'+FnOVolatilityArg+'.ftr')
+        for attempt in range(3):
+            try:
+                r = self.session.get(url, timeout=20)
+                if r.status_code == 200:
+                    # Check if it's actually an HTML error page disguised as 200
+                    if r.headers.get('Content-Type', '').startswith('text/html') and b'<!DOCTYPE html>' in r.content[:100]:
+                        return None
+                    return r.content
+                elif r.status_code == 404:
+                    return None
+                time.sleep(1)
+            except Exception as e:
+                print(f"Attempt {attempt+1} failed for {url}: {e}")
+                time.sleep(2)
+        return None
 
-def UpdatetNSEFnOData():
-    TotalNewOptionsdf = pd.DataFrame()
-    TotalNewFuturesdf = pd.DataFrame()
-    for weekday in bday:  # weekday = YesterdayDate
-        FnOBhavArg = 'fo' + weekday.strftime("%d%b%Y").upper() + 'bhav'
-        print('Processing '+FnOBhavArg)
-        zf = ZipFile('New NSE site/'+FnOBhavArg+ '.csv.zip')  #fo12OCT2020bhav.csv.zip
-        CSVdf = pd.read_csv(zf.open(FnOBhavArg+'.csv'), parse_dates=[2], dayfirst=True) #fo12OCT2020bhav
-        CSVdf = CSVdf.rename(columns=lambda x: x.strip())
-        CSVdf = CSVdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-        NewFnOdf = RefineNSEFnOData(CSVdf)
-        NewFuturesdf = NewFnOdf[(NewFnOdf["Instrument"] == 'FUTIDX') | (NewFnOdf["Instrument"] == 'FUTSTK')]
-        NewOptionsdf = NewFnOdf[(NewFnOdf["Instrument"] == 'OPTIDX') | (NewFnOdf["Instrument"] == 'OPTSTK')]
-        
-        TotalNewOptionsdf = TotalNewOptionsdf.append(NewOptionsdf, ignore_index=True)
-        TotalNewFuturesdf = TotalNewFuturesdf.append(NewFuturesdf, ignore_index=True)
-    
-    TotalNewOptionsdf = TotalNewOptionsdf.sort_values(by=['Symbol', 'Date'])
-    TotalNewFuturesdf = TotalNewFuturesdf.sort_values(by=['Symbol', 'Date'])
-    TotalNewOptionsdf = TotalNewOptionsdf.drop_duplicates()
-    TotalNewFuturesdf = TotalNewFuturesdf.drop_duplicates()
-    
-    FnOSymbollist = []
-    #Adding values to list
-    FnOSymbollist = list(TotalNewOptionsdf['Symbol'])
-    #Removing duplicates in list
-    FnOSymbollist = list(dict.fromkeys(FnOSymbollist))
-    
-    for sym in FnOSymbollist: #sym = 'NIFTY'
-        MergeOptdf = pd.DataFrame()
-        #Update the old Options file
-        OptionsFileName = sym + '_' + MonthlyOptionsFilePath
-        #Read from feather
-        if (FindFeather(OptionsFileName, './Datastore/')):
-            OldOptionsdf = feather.read_feather('./Datastore/'+OptionsFileName)
-            # OldOptionsdf = OldOptionsdf[OldOptionsdf.Date < FnOStartDate] 
-            print('Updating Options for '+ sym)
-            MergeOptdf = OldOptionsdf.append(TotalNewOptionsdf[TotalNewOptionsdf["Symbol"] == sym], ignore_index = True)            
-        else: #A new symbol has been added, create a feather for it
-            print('Creating new Options DB for '+ sym)
-            MergeOptdf.reset_index(level=0, inplace=True, drop=True)
-            MergeOptdf = TotalNewOptionsdf[TotalNewOptionsdf["Symbol"] == sym]
-            
-        if not MergeOptdf.empty:
-            feather.write_feather(MergeOptdf, './Datastore/'+OptionsFileName)
-        
-        #Update the old Futures file
-        FuturesFileName = sym + '_' + FullFuturesFilePath
-        #Read from feather
-        MergeFutdf = pd.DataFrame()
-        if (FindFeather(FuturesFileName, './Datastore/')):
-            OldFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
-            # OldFuturesdf = OldFuturesdf[OldFuturesdf.Date < FnOStartDate]
-            print('Updating Futures for '+ sym)
-            MergeFutdf = OldFuturesdf.append(TotalNewFuturesdf[TotalNewFuturesdf["Symbol"] == sym], ignore_index = True)            
-        else: #A new symbol has been added, create a feather for it
-            print('Creating new Futures DB for '+ sym)
-            MergeFutdf.reset_index(level=0, inplace=True, drop=True)
-            MergeFutdf = TotalNewFuturesdf[TotalNewFuturesdf["Symbol"] == sym]
-            
-        if not MergeFutdf.empty:
-            MergeFutdf.drop("Strike Price", axis=1, inplace=True)
-            MergeFutdf.drop("Option type", axis=1, inplace=True)
-            feather.write_feather(MergeFutdf, './Datastore/'+FuturesFileName)
-
-def RefineNSEFnOData(DF):
-    df = DF.copy()
-    
-    if 'INSTRUMENT' in df.columns:
-        df.rename(columns={'INSTRUMENT': 'Instrument'}, inplace=True)
-        
-    if 'SYMBOL' in df.columns:
-        df.rename(columns={'SYMBOL': 'Symbol'}, inplace=True)
-    
-    if 'EXPIRY_DT' in df.columns:
-        df.rename(columns={'EXPIRY_DT': 'Expiry'}, inplace=True)
-        # df["Expiry"] = df["EXP_DATE"].apply(pd.to_datetime, format='%d-%b-%Y')
-        df['Expiry'] = df['Expiry'].dt.date
-
-    if 'STRIKE_PR' in df.columns:
-        df.rename(columns={'STRIKE_PR': 'Strike Price'}, inplace=True)
-
-    if 'OPTION_TYP' in df.columns:
-        df.rename(columns={'OPTION_TYP': 'Option type'}, inplace=True)
-        
-    if 'OPEN' in df.columns:
-        df.rename(columns={'OPEN': 'Open'}, inplace=True)        
-        
-    if 'HIGH' in df.columns:
-        df.rename(columns={'HIGH': 'High'}, inplace=True)
-
-    if 'LOW' in df.columns:
-        df.rename(columns={'LOW': 'Low'}, inplace=True)
-    
-    if 'CLOSE' in df.columns:
-        df.rename(columns={'CLOSE': 'Close'}, inplace=True)
-
-    if 'SETTLE_PR' in df.columns:
-        df.rename(columns={'SETTLE_PR': 'Settle Price'}, inplace=True)
-        
-    if 'CONTRACTS' in df.columns:
-        df.rename(columns={'CONTRACTS': 'No. of contracts'}, inplace=True)          
-
-    if 'VAL_INLAKH' in df.columns:
-        df.rename(columns={'VAL_INLAKH': 'Turnover in Lacs'}, inplace=True)
-
-    if 'OPEN_INT' in df.columns:
-        df.rename(columns={'OPEN_INT': 'Open Int'}, inplace=True)
-
-    if 'CHG_IN_OI' in df.columns:
-        df.rename(columns={'CHG_IN_OI': 'Change in OI'}, inplace=True)
-        
-    if 'TIMESTAMP' in df.columns:
-        df.rename(columns={'TIMESTAMP': 'Date'}, inplace=True)
-        df["Date"] = df["Date"].apply(pd.to_datetime, format='%d-%b-%Y')
-        df['Date'] = df['Date'].dt.date
-        
-    if 'Unnamed: 15' in df.columns:
-        df.drop("Unnamed: 15", axis=1, inplace=True)
-        
-    return df
-
-def DownloadNewNSEOHLC():        
-    #Loop through dates to download NSE OHLC data
-    for weekday in ohlcbday: # weekday = date(2020,9,28)
-        print('DownloadNewNSEOHLC for'+ weekday.strftime("%Y-%m-%d"))
-        #OHLC Market report download # sec_bhavdata_full_09102020.csv
-        OHLCBhavArg = 'sec_bhavdata_full_' + weekday.strftime("%d%m%Y") + '.csv'
-        OHLCReportURL = OHLCBhavCopy + OHLCBhavArg
-        try:
-            r = requests.get(OHLCReportURL, allow_redirects=True) #Download OHLC Market report for 'weekday'
-            if r.ok:
-                data = r.content.decode('utf8')
-                OHLCdf = pd.read_csv(io.StringIO(data))
-                OHLCdf = OHLCdf.rename(columns=lambda x: x.strip())
-                OHLCdf = OHLCdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-        except:
-            print('Couldnt download:'+ OHLCReportURL)    
-            
-        if not OHLCdf.empty:
-            feather.write_feather(OHLCdf, './New NSE site/'+OHLCBhavArg+'.ftr')
-            
-        #OHLC Volatility report download
-        OHLCVolatilityArg = 'CMVOLT_' + weekday.strftime("%d%m%Y") + '.CSV' # CMVOLT_09102020.CSV
-        OHLCVolatilityURL = OHLCVolatility + OHLCVolatilityArg
-        try:
-            r = requests.get(OHLCVolatilityURL, allow_redirects=True) #Download OHLC Volatility report for 'weekday'
-            if r.ok:
-                data = r.content.decode('utf8')
-                Voldf = pd.read_csv(io.StringIO(data))
-                Voldf = Voldf.rename(columns=lambda x: x.strip())
-                Voldf = Voldf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-        except:
-            print('Couldnt download:'+ OHLCVolatilityURL)    
-            
-        if not Voldf.empty:
-            feather.write_feather(Voldf, './New NSE site/'+OHLCVolatilityArg+'.ftr')
-
-        print('Download Bhav PR for '+ weekday.strftime("%Y-%m-%d"))
-        #Bhav PR report download
-        OHLCBhavPRArg = 'PR' + weekday.strftime("%d%m%y") + '.zip' #PR151020.zip
-        OHLCBhavPRURL = OHLCBhavPR + OHLCBhavPRArg
-        try:
-            r = requests.get(OHLCBhavPRURL, allow_redirects=True) #Download Bhav PR report for 'weekday'
-            open('./New NSE site/'+OHLCBhavPRArg, 'wb').write(r.content)
-        except:
-            print('Couldnt download:'+ OHLCBhavPRURL)
-
-def UpdatetNSEOHLCData():
-    TotalNewOHLCdf = pd.DataFrame()
-    TotalNewIndexOHLCdf = pd.DataFrame()
-    for weekday in ohlcbday:
-        OHLCBhavArg = 'sec_bhavdata_full_' + weekday.strftime("%d%m%Y") + '.csv.ftr'
-        print('Adding OHLC data for '+ weekday.strftime("%d%m%Y"))
-        if (FindFeather(OHLCBhavArg, './New NSE site/')):
-            OHLCBhavdf = feather.read_feather('./New NSE site/'+OHLCBhavArg) #OHLCBhavdf.info()
-            TotalNewOHLCdf = TotalNewOHLCdf.append(OHLCBhavdf, ignore_index=True)
+    def download_cm_bhavcopy(self, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads Equity (Capital Market) Bhavcopy for a given date."""
+        if date >= UDIFF_START_DATE:
+            # UDiFF Format
+            report_name = "CM-UDiFF Common Bhavcopy Final (zip)"
+            archives = [{"name": report_name, "type": "archives", "category": "capital-market", "section": "equities"}]
+            archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+            url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
-            print('Couldnt find: ' + OHLCBhavArg)
-            continue
-        
-        IndexBhavZip = 'PR' + weekday.strftime("%d%m%y") #IndexBhavZip = 'PR161020'
-        IndexBhavArg = 'Pr' + weekday.strftime("%d%m%y") #IndexBhavArg = 'Pr161020'
-        print('Processing '+ IndexBhavZip)
-        zf = ZipFile('New NSE site/'+IndexBhavZip + '.zip')  #PR161020.zip
-        CSVIndexdf = pd.read_csv(zf.open(IndexBhavArg+'.csv'), parse_dates=[2], dayfirst=True,error_bad_lines=False) #fo12OCT2020bhav
-        CSVIndexdf = CSVIndexdf.head(57)
-        CSVIndexdf = CSVIndexdf.rename(columns=lambda x: x.strip())
-        CSVIndexdf = CSVIndexdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-        
-        if not 'Date' in CSVIndexdf.columns:
-            CSVIndexdf["Date"] = np.nan
-        CSVIndexdf.Date = pd.to_datetime(weekday)
-        
-        TotalNewIndexOHLCdf = TotalNewIndexOHLCdf.append(CSVIndexdf, ignore_index=True)
-        
-#####################################################################################
-    TotalNewOHLCdf = RefineNewNSEOHLC(TotalNewOHLCdf) #TotalNewOHLCdf.info()
-    TotalNewOHLCdf = TotalNewOHLCdf[TotalNewOHLCdf.Series == "EQ"] #Only considering EQ, no debentures(?)
-    TotalNewOHLCdf = TotalNewOHLCdf.sort_values(by=['Symbol', 'Date'])
-    TotalNewOHLCdf = TotalNewOHLCdf.drop_duplicates()
-    OHLCSymbollist = []
-    #Adding values to list
-    OHLCSymbollist = list(TotalNewOHLCdf['Symbol'])
-    #Removing duplicates in list
-    OHLCSymbollist = list(dict.fromkeys(OHLCSymbollist))
-    
-    #Update the old OHLC file
-    for sym in OHLCSymbollist: # sym = 'HDFC'
-        OHLCFileName = sym + '_' + DailyOHLCFilePath
-        #Read from feather
-        if (FindFeather(OHLCFileName, './Datastore/')):
-            OldOHLCdf = feather.read_feather('./Datastore/'+OHLCFileName) # OldOHLCdf.info()
-            # OldOHLCdf = OldOHLCdf[OldOHLCdf.Date < FnOStartDate]
-            print('Updating OHLC for '+ sym)
-            Mergedf = OldOHLCdf.append(TotalNewOHLCdf[TotalNewOHLCdf["Symbol"] == sym], ignore_index = True)            
-        else: #A new symbol has been added, create a feather for it
-            print('Creating new OHLC DB for '+ sym)
-            Mergedf = TotalNewOHLCdf[TotalNewOHLCdf["Symbol"] == sym]
-            Mergedf.reset_index(level=0, inplace=True, drop=True)
-            
-        if not Mergedf.empty:
-            feather.write_feather(Mergedf, './Datastore/'+OHLCFileName)
+            # Legacy Archive Format
+            # https://nsearchives.nseindia.com/content/historical/EQUITIES/2024/FEB/cm20FEB2024bhav.csv.zip
+            url = f"{ARCHIVE_URL}/content/historical/EQUITIES/{date.strftime('%Y')}/{date.strftime('%b').upper()}/cm{date.strftime('%d%b%Y').upper()}bhav.csv.zip"
+            content = self._download_file(url)
+
+        if not content:
+            return None
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                csv_filename = z.namelist()[0]
+                with z.open(csv_filename) as f:
+                    df = pd.read_csv(f)
+                    return self._clean_cm_data(df, date)
+        except Exception as e:
+            print(f"Error parsing CM Bhavcopy for {date}: {e}")
+            return None
+
+    def download_fo_bhavcopy(self, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads Derivatives (F&O) Bhavcopy for a given date."""
+        if date >= UDIFF_START_DATE:
+            # UDiFF Format
+            report_name = "F&O - UDiFF Common Bhavcopy Final (zip)"
+            archives = [{"name": report_name, "type": "archives", "category": "derivatives", "section": "derivatives"}]
+            archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+            url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=derivatives&mode=single"
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
-            print(sym + ' not updated, in Series '+ Mergedf.iloc[-1].Series)
-            
-############################################## For Indices below
+            # Legacy Archive Format
+            # https://nsearchives.nseindia.com/content/historical/DERIVATIVES/2024/FEB/fo20FEB2024bhav.csv.zip
+            url = f"{ARCHIVE_URL}/content/historical/DERIVATIVES/{date.strftime('%Y')}/{date.strftime('%b').upper()}/fo{date.strftime('%d%b%Y').upper()}bhav.csv.zip"
+            content = self._download_file(url)
 
-    TotalNewIndexOHLCdf.drop(["MKT","IND_SEC","CORP_IND"], axis=1, inplace=True)
-    TotalNewIndexOHLCdf['Date'] = TotalNewIndexOHLCdf['Date'].dt.date
-    NewNSEIndexdf = RefineNewNSEOHLC(TotalNewIndexOHLCdf) # NewNSEIndexdf.info()
+        if not content:
+            return None
 
-    cols=[i for i in NewNSEIndexdf.columns if i not in ["Symbol","Date"]]
-    for col in cols:
-        NewNSEIndexdf[col]=pd.to_numeric(NewNSEIndexdf[col])
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                csv_filename = z.namelist()[0]
+                with z.open(csv_filename) as f:
+                    df = pd.read_csv(f)
+                    return self._clean_fo_data(df, date)
+        except Exception as e:
+            print(f"Error parsing FO Bhavcopy for {date}: {e}")
+            return None
+
+    def download_indices_report(self, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads Indices PR report for a given date."""
+        # https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR200226.zip
+        url = f"{ARCHIVE_URL}/archives/equities/bhavcopy/pr/PR{date.strftime('%d%m%y')}.zip"
+        content = self._download_file(url)
+
+        if not content:
+            return None
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                # PR zip contains many CSVs, we want the one like PrDDMMYY.csv
+                target_csv = f"Pr{date.strftime('%d%m%y')}.csv"
+                if target_csv not in z.namelist():
+                    # Sometimes casing differs
+                    target_csv = [n for n in z.namelist() if n.lower() == target_csv.lower()][0]
+
+                with z.open(target_csv) as f:
+                    # Index PR files often have issues with trailers or leading spaces
+                    df = pd.read_csv(f, skipinitialspace=True)
+                    # The first ~57 lines are usually the indices
+                    df = df.head(100) # Safety margin
+                    return self._clean_indices_data(df, date)
+        except Exception as e:
+            print(f"Error parsing Indices PR for {date}: {e}")
+            return None
+
+    def _clean_cm_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
+        """Standardizes Equity data."""
+        df.columns = [c.strip() for c in df.columns]
         
-    NewNSEIndexdf['Symbol'].replace('Nifty 50','NIFTY',inplace=True)
-    NewNSEIndexdf['Symbol'].replace('Nifty Bank','BANKNIFTY',inplace=True)
-    NewNSEIndexdf = NewNSEIndexdf.sort_values(by=['Date', 'Symbol'])
-    NewNSEIndexdf = NewNSEIndexdf.drop_duplicates()
-
-    IndexSymbollist = []
-    #Adding values to list
-    IndexSymbollist = list(NewNSEIndexdf['Symbol'])
-    #Removing duplicates in list
-    IndexSymbollist = list(dict.fromkeys(IndexSymbollist))
+        # UDiFF Mapping
+        mapping = {
+            'TradDt': 'Date', 'TckrSymb': 'Symbol', 'SctySrs': 'Series',
+            'OpnPric': 'Open', 'HghPric': 'High', 'LwPric': 'Low', 'ClsPric': 'Close',
+            'LastPric': 'Last', 'PrvsClsgPric': 'Prev Close', 'TtlTradgVol': 'Volume',
+            'TtlTrfVal': 'Turnover', 'TtlNbOfTxsExctd': 'Trades',
+            'TIMESTAMP': 'Date', 'SYMBOL': 'Symbol', 'SERIES': 'Series',
+            'OPEN': 'Open', 'HIGH': 'High', 'LOW': 'Low', 'CLOSE': 'Close',
+            'LAST': 'Last', 'PREVCLOSE': 'Prev Close', 'TOTTRDQTY': 'Volume',
+            'TOTTRDVAL': 'Turnover', 'TOTALITM': 'Trades'
+        }
+        df = df.rename(columns=mapping)
         
-    #Update the old OHLC file
-    for sym in IndexSymbollist: # sym = 'HDFC'
-        OHLCFileName = sym + '_' + DailyOHLCFilePath
-        #Read from feather
-        if (FindFeather(OHLCFileName, './Datastore/')):
-            OldIndexOHLCdf = feather.read_feather('./Datastore/'+OHLCFileName) # OldOHLCdf.info()
-            # OldIndexOHLCdf = OldIndexOHLCdf[OldIndexOHLCdf.Date < FnOStartDate]
-            print('Updating OHLC for '+ sym)
-            MergeIndexdf = OldIndexOHLCdf.append(NewNSEIndexdf[NewNSEIndexdf["Symbol"] == sym], ignore_index = True)            
-        else: #A new symbol has been added, create a feather for it
-            print('Creating new OHLC DB for '+ sym)
-            MergeIndexdf = NewNSEIndexdf[NewNSEIndexdf["Symbol"] == sym]
-            MergeIndexdf.reset_index(level=0, inplace=True, drop=True)
-            
-        if not MergeIndexdf.empty:
-            feather.write_feather(MergeIndexdf, './Datastore/'+OHLCFileName)
+        # Select important columns
+        cols = ['Date', 'Symbol', 'Series', 'Open', 'High', 'Low', 'Close', 'Last', 'Prev Close', 'Volume', 'Turnover']
+        available_cols = [c for c in cols if c in df.columns]
+        df = df[available_cols].copy()
+        
+        df['Date'] = pd.to_datetime(df['Date']).dt.date
+        numeric_cols = ['Open', 'High', 'Low', 'Close', 'Last', 'Prev Close', 'Volume', 'Turnover']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        return df
+
+    def _clean_fo_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
+        """Standardizes F&O data."""
+        df.columns = [c.strip() for c in df.columns]
+        
+        mapping = {
+            'TradDt': 'Date', 'TckrSymb': 'Symbol', 'FinInstrmTp': 'Instrument',
+            'OpnPric': 'Open', 'HghPric': 'High', 'LwPric': 'Low', 'ClsPric': 'Close',
+            'SttlmPric': 'Settle Price', 'OpnIntrst': 'Open Int', 'ChngInOpnIntrst': 'Change in OI',
+            'TtlTradgVol': 'Contracts', 'TtlTrfVal': 'Value', 'XpryDt': 'Expiry',
+            'StrkPric': 'Strike Price', 'OptnTp': 'Option type',
+            'TIMESTAMP': 'Date', 'SYMBOL': 'Symbol', 'INSTRUMENT': 'Instrument',
+            'OPEN': 'Open', 'HIGH': 'High', 'LOW': 'Low', 'CLOSE': 'Close',
+            'SETTLE_PR': 'Settle Price', 'OPEN_INT': 'Open Int', 'CHG_IN_OI': 'Change in OI',
+            'CONTRACTS': 'Contracts', 'VAL_INLAKH': 'Value', 'EXPIRY_DT': 'Expiry',
+            'STRIKE_PR': 'Strike Price', 'OPTION_TYP': 'Option type'
+        }
+        df = df.rename(columns=mapping)
+        
+        df['Date'] = pd.to_datetime(df['Date']).dt.date
+        df['Expiry'] = pd.to_datetime(df['Expiry']).dt.date
+        
+        numeric_cols = ['Open', 'High', 'Low', 'Close', 'Settle Price', 'Open Int', 'Change in OI', 'Contracts', 'Value', 'Strike Price']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        return df
+
+    def _clean_indices_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
+        """Standardizes Indices data from PR report."""
+        # Index PR reports are a bit messy.
+        # Typically: Index Name, Open, High, Low, Close, Prev Close, Change, % Change, Volume, Turnover, PE, PB, DY
+        # We need to find the right columns.
+        df.columns = [c.strip() for c in df.columns]
+
+        mapping = {
+            'Index Name': 'Symbol', 'Index Name ': 'Symbol',
+            'INDEX_NAME': 'Symbol', 'Index': 'Symbol',
+            'Index Date': 'Date', 'Date': 'Date',
+            'Open Index Value': 'Open', 'High Index Value': 'High',
+            'Low Index Value': 'Low', 'Closing Index Value': 'Close',
+            'Points Change': 'Change', 'Change(%)': 'Percent Change',
+            'Volume': 'Volume', 'Turnover (Rs. Cr.)': 'Turnover'
+        }
+        df = df.rename(columns=mapping)
+        
+        # If 'Date' column is missing (often is in PR files), add it
+        if 'Date' not in df.columns:
+            df['Date'] = date
         else:
-            print(sym + ' not updated, is empty')
+            df['Date'] = pd.to_datetime(df['Date']).dt.date
 
-def RefineNewNSEOHLC(DF):
-    df = DF.copy()
-    
-    if 'SERIES' in df.columns:
-        df.rename(columns={'SERIES': 'Series'}, inplace=True)
+        # Standardize Symbol names
+        if 'Symbol' in df.columns:
+            df['Symbol'] = df['Symbol'].str.strip()
+            df['Symbol'] = df['Symbol'].replace({'Nifty 50': 'NIFTY', 'Nifty Bank': 'BANKNIFTY'})
+
+        # Filter for known indices to avoid trash
+        known_indices = ['NIFTY', 'BANKNIFTY', 'Nifty Next 50', 'Nifty 500', 'Nifty Midcap 50']
+        df = df[df['Symbol'].isin(known_indices)].copy()
         
-    if 'SYMBOL' in df.columns:
-        df.rename(columns={'SYMBOL': 'Symbol'}, inplace=True)
-    
-    if 'DATE1' in df.columns:
-        df.rename(columns={'DATE1': 'Date'}, inplace=True)
-        df["Date"] = df["Date"].apply(pd.to_datetime, format='%d-%b-%Y')
-        df['Date'] = df['Date'].dt.date
+        return df
 
-    if 'PREV_CLOSE' in df.columns:
-        df.rename(columns={'PREV_CLOSE': 'Prev Close'}, inplace=True) 
+    def update_processed_data(self, df: pd.DataFrame, target_dir: Path, group_col: str = 'Symbol'):
+        """Appends new data to per-symbol Parquet files."""
+        if df is None or df.empty:
+            return
 
-    if 'OPEN_PRICE' in df.columns:
-        df.rename(columns={'OPEN_PRICE': 'Open'}, inplace=True) 
+        for name, group in df.groupby(group_col):
+            file_path = target_dir / f"{name}.parquet"
+            if file_path.exists():
+                existing_df = pd.read_parquet(file_path, engine='pyarrow')
+                # Merge and drop duplicates
+                combined_df = pd.concat([existing_df, group]).drop_duplicates(subset=['Date'], keep='last')
+                combined_df = combined_df.sort_values('Date')
+                combined_df.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
+            else:
+                group = group.sort_values('Date')
+                group.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
+
+    def get_last_date(self, processed_dir: Path) -> datetime.date:
+        """Finds the latest date across all processed files."""
+        files = list(processed_dir.glob("*.parquet"))
+        if not files:
+            return DEFAULT_START_DATE
         
-    if 'HIGH_PRICE' in df.columns:
-        df.rename(columns={'HIGH_PRICE': 'High'}, inplace=True)
+        # Check a few major files for efficiency
+        major_files = [processed_dir / "NIFTY.parquet", processed_dir / "SBIN.parquet", processed_dir / "RELIANCE.parquet"]
+        last_dates = []
+        for f in major_files:
+            if f.exists():
+                try:
+                    df = pd.read_parquet(f, engine='pyarrow', columns=['Date'])
+                    last_dates.append(df['Date'].max())
+                except:
+                    pass
         
-    if 'LOW_PRICE' in df.columns:
-        df.rename(columns={'LOW_PRICE': 'Low'}, inplace=True)
+        if last_dates:
+            return max(last_dates)
 
-    if 'LAST_PRICE' in df.columns:
-        df.rename(columns={'LAST_PRICE': 'Last'}, inplace=True)
-        df['Last'] = pd.to_numeric(df['Last'], errors='coerce')
-    
-    if 'CLOSE_PRICE' in df.columns:
-        df.rename(columns={'CLOSE_PRICE': 'Close'}, inplace=True)
+        return DEFAULT_START_DATE
 
-    if 'AVG_PRICE' in df.columns:
-        df.rename(columns={'AVG_PRICE': 'VWAP'}, inplace=True)
+    def run_incremental_update(self):
+        """Main loop to download and update data incrementally."""
+        print("Starting Incremental Update...")
 
-    if 'TTL_TRD_QNTY' in df.columns:
-        df.rename(columns={'TTL_TRD_QNTY': 'Volume'}, inplace=True)                  
+        # 1. Equity
+        last_cm_date = self.get_last_date(EQUITY_PROCESSED)
+        print(f"Last Equity Date: {last_cm_date}")
+        cm_days = self.get_trading_days(last_cm_date + datetime.timedelta(days=1), datetime.date.today())
+
+        for day in cm_days:
+            print(f"Downloading CM Bhavcopy for {day}...")
+            df = self.download_cm_bhavcopy(day)
+            if df is not None:
+                # Save Raw
+                df.to_parquet(EQUITY_RAW / f"cm_{day.strftime('%Y%m%d')}.parquet", engine='pyarrow', compression='zstd', index=False)
+                # Update Processed
+                self.update_processed_data(df, EQUITY_PROCESSED)
+                print(f"Updated Equity for {day}")
+            time.sleep(1) # Be gentle with NSE
+
+        # 2. Derivatives
+        last_fo_date = self.get_last_date(DERIVATIVES_PROCESSED)
+        print(f"Last Derivatives Date: {last_fo_date}")
+        fo_days = self.get_trading_days(last_fo_date + datetime.timedelta(days=1), datetime.date.today())
+
+        for day in fo_days:
+            print(f"Downloading FO Bhavcopy for {day}...")
+            df = self.download_fo_bhavcopy(day)
+            if df is not None:
+                # Save Raw
+                df.to_parquet(DERIVATIVES_RAW / f"fo_{day.strftime('%Y%m%d')}.parquet", engine='pyarrow', compression='zstd', index=False)
+                # Update Processed
+                self.update_processed_data(df, DERIVATIVES_PROCESSED)
+                print(f"Updated Derivatives for {day}")
+            time.sleep(1)
+
+        # 3. Indices
+        last_idx_date = self.get_last_date(INDICES_PROCESSED)
+        print(f"Last Indices Date: {last_idx_date}")
+        idx_days = self.get_trading_days(last_idx_date + datetime.timedelta(days=1), datetime.date.today())
         
-    if 'TURNOVER_LACS' in df.columns:
-        df.rename(columns={'TURNOVER_LACS': 'Turnover'}, inplace=True)      
+        for day in idx_days:
+            print(f"Downloading Indices for {day}...")
+            df = self.download_indices_report(day)
+            if df is not None:
+                # Save Raw
+                df.to_parquet(INDICES_RAW / f"idx_{day.strftime('%Y%m%d')}.parquet", engine='pyarrow', compression='zstd', index=False)
+                # Update Processed
+                self.update_processed_data(df, INDICES_PROCESSED)
+                print(f"Updated Indices for {day}")
+            time.sleep(1)
 
-    if 'NO_OF_TRADES' in df.columns:
-        df.rename(columns={'NO_OF_TRADES': 'Trades'}, inplace=True)
-
-    if 'DELIV_QTY' in df.columns:
-        df.rename(columns={'DELIV_QTY': 'Deliverable Volume'}, inplace=True)
-        df['Deliverable Volume'] = pd.to_numeric(df['Deliverable Volume'], errors='coerce')
-        
-    if 'DELIV_PER' in df.columns:
-        df.rename(columns={'DELIV_PER': '%Deliverble'}, inplace=True)
-        df['%Deliverble'] = pd.to_numeric(df['%Deliverble'], errors='coerce')
-        df['%Deliverble'] = df['%Deliverble'].div(100)
-
-####Specific for Index below
-    if 'SECURITY' in df.columns:
-        df.rename(columns={'SECURITY': 'Symbol'}, inplace=True)
-
-    if 'PREV_CL_PR' in df.columns:
-        df.rename(columns={'PREV_CL_PR': 'Prev Close'}, inplace=True)
-
-    if 'NET_TRDVAL' in df.columns:
-        df.rename(columns={'NET_TRDVAL': 'Turnover'}, inplace=True)
-
-    if 'NET_TRDQTY' in df.columns:
-        df.rename(columns={'NET_TRDQTY': 'Volume'}, inplace=True)
-
-    if 'TRADES' in df.columns:
-        df.rename(columns={'TRADES': 'No. of Trades'}, inplace=True)
-        
-    return df
+        print("Update Complete.")
 
 def main():
-    NiftyFullFutures = feather.read_feather('./Datastore/NIFTY_full-futures.ftr')
-    FuturesStartDate = NiftyFullFutures.iloc[-1].Date
-    FuturesStartDate += datetime.timedelta(days=1)
-    YesterdayDate = datetime.date.today() - datetime.timedelta(days=1) # weekday = YesterdayDate
+    downloader = NSEMarketDataDownloader()
+    downloader.run_incremental_update()
 
-    bday = pd.bdate_range(FuturesStartDate, YesterdayDate) #To be replaced with LastRecordDate, CurrentDate
-    bday = set(bday).difference(HolidayList)
-    print('UpdateBusinessDays complete ')
-    
-    SBINOHLC = feather.read_feather('./Datastore/SBIN_ohlc.ftr')
-    OHLCStartDate = SBINOHLC.iloc[-1].Date
-    OHLCStartDate += datetime.timedelta(days=1)
-    YesterdayOHLCDate = datetime.date.today() - datetime.timedelta(days=1)
-
-    ohlcbday = pd.bdate_range(OHLCStartDate, YesterdayOHLCDate) #To be replaced with LastRecordDate, CurrentDate
-    ohlcbday = set(ohlcbday).difference(HolidayList)
-    print('UpdateOHLCBusinessDays complete ')
-    
-    DownloadNewNSEFnO()
-    UpdatetNSEFnOData()
-    DownloadNewNSEOHLC()
-    UpdatetNSEOHLCData()
+if __name__ == '__main__':
+    main()
