@@ -435,7 +435,7 @@ class NSEMarketDataDownloader:
             now = time.time()
             if now - last_progress_time >= 10 or done_symbols == total_symbols:
                 pct = done_symbols * 100 // total_symbols
-                print(f"  [{label}] Merged {done_symbols}/{total_symbols} ({pct}%) symbols...")
+                print(f"  [{label}] Merged {done_symbols}/{total_symbols} ({pct}%) symbols...", flush=True)
                 last_progress_time = now
 
     def get_last_date(self, processed_dir: Path) -> datetime.date:
@@ -495,14 +495,11 @@ class NSEMarketDataDownloader:
         success_count = 0
         failed_days = []
         last_progress_time = time.time()
-        print(f"  Downloading {total} days of {label} data ({self.MAX_WORKERS} workers)...")
+        print(f"  Downloading {total} days of {label} data ({self.MAX_WORKERS} workers)...", flush=True)
 
         with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
-            futures = {}
-            for day in days:
-                future = executor.submit(download_fn, day)
-                futures[future] = day
-                time.sleep(self.DOWNLOAD_DELAY)  # Stagger submissions to avoid burst
+            # Submit all at once — max_workers already limits concurrency
+            futures = {executor.submit(download_fn, day): day for day in days}
 
             for future in as_completed(futures):
                 day = futures[future]
@@ -526,7 +523,7 @@ class NSEMarketDataDownloader:
                     if now - last_progress_time >= 10 or done_count == total:
                         pct = done_count * 100 // total
                         elapsed = now - last_progress_time
-                        print(f"  [{label}] {done_count}/{total} ({pct}%) days processed, {success_count} successful, {len(failed_days)} failed")
+                        print(f"  [{label}] {done_count}/{total} ({pct}%) days processed, {success_count} successful, {len(failed_days)} failed", flush=True)
                         last_progress_time = now
                 except Exception as e:
                     print(f"  [{label}] Error for {day}: {type(e).__name__}: {e}")
