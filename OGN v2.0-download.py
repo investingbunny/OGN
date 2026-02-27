@@ -14,12 +14,15 @@ import io
 import time
 import zipfile
 import datetime
+import threading
 import requests
+import requests.exceptions
 import urllib.parse
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Constants & Configuration ---
 BASE_URL = "https://www.nseindia.com"
@@ -58,16 +61,28 @@ class NSEMarketDataDownloader:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
+        self._session_lock = threading.Lock()
+        self._last_session_init = 0.0
+        self._consecutive_failures = 0
         self._init_session()
         self._create_dirs()
 
     def _init_session(self):
-        """Initializes the session with NSE cookies."""
-        try:
-            self.session.get(BASE_URL, timeout=15)
-            self.session.get(ALL_REPORTS_URL, timeout=15)
-        except Exception as e:
-            print(f"Warning: Failed to initialize session: {e}")
+        """Initializes the session with NSE cookies (thread-safe)."""
+        with self._session_lock:
+            # Avoid re-initializing too frequently (min 10s gap)
+            now = time.time()
+            if now - self._last_session_init < 10:
+                return
+            try:
+                self.session.cookies.clear()
+                self.session.get(BASE_URL, timeout=15)
+                self.session.get(ALL_REPORTS_URL, timeout=15)
+                self._last_session_init = now
+                self._consecutive_failures = 0
+                print("Session (re)initialized successfully.")
+            except Exception as e:
+                print(f"Warning: Failed to initialize session: {e}")
 
     def _create_dirs(self):
         """Ensures all necessary directories exist."""
@@ -81,24 +96,117 @@ class NSEMarketDataDownloader:
         return days
 
     def _download_file(self, url: str, referer: Optional[str] = None) -> Optional[bytes]:
-        """Downloads a file with proper error handling and retry logic."""
+        """Downloads a file with comprehensive error handling, retry logic, and backoff.
+
+        Handles:
+        - HTTP 403/429: Rate limiting — backs off and re-initializes session
+        - HTTP 5xx: Server errors — retries with exponential backoff
+        - HTTP 404: Not found — returns None immediately (no retry)
+        - ConnectionError: Network issues, resets — retries with backoff
+        - Timeout: Slow server — retries with increasing timeout
+        - SSLError: Certificate issues — retries once then skips
+        - ChunkedEncodingError: Incomplete response — retries
+        - HTML error pages disguised as 200 — detected and treated as failure
+        """
+        headers = {}
         if referer:
-            self.session.headers.update({"Referer": referer})
-        
-        for attempt in range(3):
+            headers["Referer"] = referer
+
+        max_retries = 5
+        base_delay = 1.0
+
+        for attempt in range(max_retries):
+            delay = base_delay * (2 ** attempt)  # Exponential backoff: 1, 2, 4, 8, 16s
             try:
-                r = self.session.get(url, timeout=20)
+                r = self.session.get(url, timeout=20 + attempt * 5, headers=headers)
+
                 if r.status_code == 200:
                     # Check if it's actually an HTML error page disguised as 200
-                    if r.headers.get('Content-Type', '').startswith('text/html') and b'<!DOCTYPE html>' in r.content[:100]:
+                    content_type = r.headers.get('Content-Type', '')
+                    if content_type.startswith('text/html') and b'<!DOCTYPE html>' in r.content[:100]:
+                        # Likely a login/block page — re-init session and retry
+                        if attempt < max_retries - 1:
+                            print(f"  HTML error page received for {url.split('?')[0]}... re-initializing session.")
+                            self._init_session()
+                            time.sleep(delay)
+                            continue
                         return None
+                    self._consecutive_failures = 0
                     return r.content
+
                 elif r.status_code == 404:
+                    # Not found — no point retrying
                     return None
-                time.sleep(1)
+
+                elif r.status_code in (403, 401):
+                    # Forbidden/Unauthorized — likely session expired or IP blocked
+                    print(f"  HTTP {r.status_code} for {url.split('?')[0]}... "
+                          f"re-initializing session (attempt {attempt+1}/{max_retries}).")
+                    self._init_session()
+                    time.sleep(delay + 2)  # Extra pause for auth issues
+
+                elif r.status_code == 429:
+                    # Rate limited — back off significantly
+                    retry_after = int(r.headers.get('Retry-After', delay * 3))
+                    print(f"  Rate limited (429). Waiting {retry_after}s before retry "
+                          f"(attempt {attempt+1}/{max_retries}).")
+                    time.sleep(retry_after)
+
+                elif r.status_code >= 500:
+                    # Server error — transient, retry with backoff
+                    print(f"  Server error {r.status_code} for {url.split('?')[0]}... "
+                          f"retrying in {delay:.0f}s (attempt {attempt+1}/{max_retries}).")
+                    time.sleep(delay)
+
+                else:
+                    # Other unexpected status codes
+                    print(f"  Unexpected HTTP {r.status_code} for {url.split('?')[0]}... "
+                          f"retrying in {delay:.0f}s (attempt {attempt+1}/{max_retries}).")
+                    time.sleep(delay)
+
+            except requests.exceptions.ConnectionError as e:
+                # Connection reset, refused, DNS failure, etc.
+                self._consecutive_failures += 1
+                print(f"  Connection error (attempt {attempt+1}/{max_retries}): {type(e).__name__}")
+                if self._consecutive_failures >= 5:
+                    print("  Multiple consecutive connection failures — re-initializing session.")
+                    self._init_session()
+                time.sleep(delay + 1)
+
+            except requests.exceptions.Timeout as e:
+                # Request timed out
+                print(f"  Timeout (attempt {attempt+1}/{max_retries}): {e}")
+                time.sleep(delay)
+
+            except requests.exceptions.SSLError as e:
+                # SSL/TLS certificate issues
+                print(f"  SSL error (attempt {attempt+1}/{max_retries}): {e}")
+                if attempt >= 1:
+                    # SSL errors are usually not transient — don't keep retrying
+                    return None
+                time.sleep(delay)
+
+            except requests.exceptions.ChunkedEncodingError as e:
+                # Incomplete response / connection dropped mid-transfer
+                print(f"  Incomplete response (attempt {attempt+1}/{max_retries}): {e}")
+                time.sleep(delay)
+
+            except requests.exceptions.ContentDecodingError as e:
+                # Corrupted gzip/deflate response
+                print(f"  Decoding error (attempt {attempt+1}/{max_retries}): {e}")
+                time.sleep(delay)
+
+            except requests.exceptions.RequestException as e:
+                # Catch-all for any other requests library errors
+                print(f"  Request error (attempt {attempt+1}/{max_retries}): {type(e).__name__}: {e}")
+                time.sleep(delay)
+
             except Exception as e:
-                print(f"Attempt {attempt+1} failed for {url}: {e}")
-                time.sleep(2)
+                # Truly unexpected errors (shouldn't happen, but don't crash)
+                print(f"  Unexpected error (attempt {attempt+1}/{max_retries}): {type(e).__name__}: {e}")
+                time.sleep(delay)
+
+        print(f"  All {max_retries} attempts exhausted for {url.split('?')[0]}")
         return None
 
     def download_cm_bhavcopy(self, date: datetime.date) -> Optional[pd.DataFrame]:
@@ -294,6 +402,30 @@ class NSEMarketDataDownloader:
                 group = group.sort_values('Date')
                 group.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
 
+    def batch_update_processed_data(self, all_dfs: List[pd.DataFrame], target_dir: Path, group_col: str = 'Symbol'):
+        """Batch-merges multiple days of data into per-symbol Parquet files in one pass.
+        
+        Instead of reading/writing each symbol file once per day, this concatenates
+        ALL new data first, then reads each symbol file only once, merges, and writes once.
+        This reduces I/O from (days × symbols) to just (symbols).
+        """
+        if not all_dfs:
+            return
+
+        combined_new = pd.concat(all_dfs, ignore_index=True)
+        if combined_new.empty:
+            return
+
+        for name, group in combined_new.groupby(group_col):
+            file_path = target_dir / f"{name}.parquet"
+            if file_path.exists():
+                existing_df = pd.read_parquet(file_path, engine='pyarrow')
+                merged = pd.concat([existing_df, group]).drop_duplicates(subset=['Date'], keep='last')
+            else:
+                merged = group
+            merged = merged.sort_values('Date')
+            merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
+
     def get_last_date(self, processed_dir: Path) -> datetime.date:
         """Finds the latest date across all processed files."""
         files = list(processed_dir.glob("*.parquet"))
@@ -316,59 +448,146 @@ class NSEMarketDataDownloader:
 
         return DEFAULT_START_DATE
 
+    # --- Concurrent download helpers ---
+    MAX_WORKERS = 4  # Max parallel downloads (be respectful to NSE servers)
+    DOWNLOAD_DELAY = 0.3  # Delay between scheduling downloads (seconds)
+
+    def _download_day_cm(self, day: datetime.date) -> tuple:
+        """Download CM bhavcopy for one day. Returns (day, df_or_None)."""
+        df = self.download_cm_bhavcopy(day)
+        return (day, df)
+
+    def _download_day_fo(self, day: datetime.date) -> tuple:
+        """Download FO bhavcopy for one day. Returns (day, df_or_None)."""
+        df = self.download_fo_bhavcopy(day)
+        return (day, df)
+
+    def _download_day_idx(self, day: datetime.date) -> tuple:
+        """Download Indices report for one day. Returns (day, df_or_None)."""
+        df = self.download_indices_report(day)
+        return (day, df)
+
+    def _concurrent_download(self, days, download_fn, raw_dir, raw_prefix, label):
+        """Downloads data for multiple days concurrently and returns list of DataFrames.
+
+        Uses ThreadPoolExecutor for parallel HTTP requests, saves raw files as they
+        arrive, and returns all successful DataFrames for batch processing.
+        Failed days are retried once with reduced concurrency.
+        """
+        all_dfs = []
+        if not days:
+            return all_dfs
+
+        total = len(days)
+        done_count = 0
+        failed_days = []
+        print(f"  Downloading {total} days of {label} data ({self.MAX_WORKERS} workers)...")
+
+        with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
+            futures = {}
+            for day in days:
+                future = executor.submit(download_fn, day)
+                futures[future] = day
+                time.sleep(self.DOWNLOAD_DELAY)  # Stagger submissions to avoid burst
+
+            for future in as_completed(futures):
+                day = futures[future]
+                done_count += 1
+                try:
+                    _, df = future.result()
+                    if df is not None:
+                        # Save raw file
+                        try:
+                            df.to_parquet(
+                                raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet",
+                                engine='pyarrow', compression='zstd', index=False
+                            )
+                        except (OSError, IOError) as e:
+                            print(f"  [{label}] Failed to save raw file for {day}: {e}")
+                        all_dfs.append(df)
+                    else:
+                        failed_days.append(day)
+                    if done_count % 50 == 0 or done_count == total:
+                        print(f"  [{label}] {done_count}/{total} days processed...")
+                except Exception as e:
+                    print(f"  [{label}] Error for {day}: {type(e).__name__}: {e}")
+                    failed_days.append(day)
+
+        # --- Retry failed days with reduced concurrency ---
+        if failed_days:
+            retry_count = len(failed_days)
+            print(f"  [{label}] Retrying {retry_count} failed days (1 worker, slower pace)...")
+            self._init_session()  # Fresh session before retries
+            time.sleep(2)
+
+            for day in failed_days:
+                try:
+                    _, df = download_fn(day)
+                    if df is not None:
+                        try:
+                            df.to_parquet(
+                                raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet",
+                                engine='pyarrow', compression='zstd', index=False
+                            )
+                        except (OSError, IOError) as e:
+                            print(f"  [{label}] Failed to save raw file for {day} on retry: {e}")
+                        all_dfs.append(df)
+                    time.sleep(1)  # Slower pace for retries
+                except Exception as e:
+                    print(f"  [{label}] Retry also failed for {day}: {type(e).__name__}: {e}")
+
+        success = len(all_dfs)
+        final_failed = total - success
+        msg = f"  [{label}] Download complete: {success}/{total} days successful."
+        if final_failed > 0:
+            msg += f" ({final_failed} days failed even after retry)"
+        print(msg)
+        return all_dfs
+
     def run_incremental_update(self):
-        """Main loop to download and update data incrementally."""
+        """Main loop to download and update data incrementally.
+        
+        Performance optimizations vs original:
+        - Concurrent downloads with ThreadPoolExecutor (4 workers)
+        - Batch parquet merges: reads/writes each symbol file only ONCE instead
+          of once per trading day, reducing I/O from O(days×symbols) to O(symbols)
+        - Reduced inter-request sleep from 1s to 0.3s stagger
+        """
         print("Starting Incremental Update...")
+        t0 = time.time()
 
         # 1. Equity
         last_cm_date = self.get_last_date(EQUITY_PROCESSED)
         print(f"Last Equity Date: {last_cm_date}")
         cm_days = self.get_trading_days(last_cm_date + datetime.timedelta(days=1), datetime.date.today())
 
-        for day in cm_days:
-            print(f"Downloading CM Bhavcopy for {day}...")
-            df = self.download_cm_bhavcopy(day)
-            if df is not None:
-                # Save Raw
-                df.to_parquet(EQUITY_RAW / f"cm_{day.strftime('%Y%m%d')}.parquet", engine='pyarrow', compression='zstd', index=False)
-                # Update Processed
-                self.update_processed_data(df, EQUITY_PROCESSED)
-                print(f"Updated Equity for {day}")
-            time.sleep(1) # Be gentle with NSE
+        cm_dfs = self._concurrent_download(cm_days, self._download_day_cm, EQUITY_RAW, "cm", "Equity")
+        print(f"  Merging {len(cm_dfs)} days into per-symbol Equity files...")
+        self.batch_update_processed_data(cm_dfs, EQUITY_PROCESSED)
+        print(f"  Equity update done.")
 
         # 2. Derivatives
         last_fo_date = self.get_last_date(DERIVATIVES_PROCESSED)
         print(f"Last Derivatives Date: {last_fo_date}")
         fo_days = self.get_trading_days(last_fo_date + datetime.timedelta(days=1), datetime.date.today())
 
-        for day in fo_days:
-            print(f"Downloading FO Bhavcopy for {day}...")
-            df = self.download_fo_bhavcopy(day)
-            if df is not None:
-                # Save Raw
-                df.to_parquet(DERIVATIVES_RAW / f"fo_{day.strftime('%Y%m%d')}.parquet", engine='pyarrow', compression='zstd', index=False)
-                # Update Processed
-                self.update_processed_data(df, DERIVATIVES_PROCESSED)
-                print(f"Updated Derivatives for {day}")
-            time.sleep(1)
+        fo_dfs = self._concurrent_download(fo_days, self._download_day_fo, DERIVATIVES_RAW, "fo", "Derivatives")
+        print(f"  Merging {len(fo_dfs)} days into per-symbol Derivatives files...")
+        self.batch_update_processed_data(fo_dfs, DERIVATIVES_PROCESSED)
+        print(f"  Derivatives update done.")
 
         # 3. Indices
         last_idx_date = self.get_last_date(INDICES_PROCESSED)
         print(f"Last Indices Date: {last_idx_date}")
         idx_days = self.get_trading_days(last_idx_date + datetime.timedelta(days=1), datetime.date.today())
-        
-        for day in idx_days:
-            print(f"Downloading Indices for {day}...")
-            df = self.download_indices_report(day)
-            if df is not None:
-                # Save Raw
-                df.to_parquet(INDICES_RAW / f"idx_{day.strftime('%Y%m%d')}.parquet", engine='pyarrow', compression='zstd', index=False)
-                # Update Processed
-                self.update_processed_data(df, INDICES_PROCESSED)
-                print(f"Updated Indices for {day}")
-            time.sleep(1)
 
-        print("Update Complete.")
+        idx_dfs = self._concurrent_download(idx_days, self._download_day_idx, INDICES_RAW, "idx", "Indices")
+        print(f"  Merging {len(idx_dfs)} days into per-symbol Indices files...")
+        self.batch_update_processed_data(idx_dfs, INDICES_PROCESSED)
+        print(f"  Indices update done.")
+
+        elapsed = time.time() - t0
+        print(f"Update Complete. Total time: {elapsed:.1f}s")
 
 def main():
     downloader = NSEMarketDataDownloader()
