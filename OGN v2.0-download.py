@@ -340,8 +340,8 @@ class NSEMarketDataDownloader:
         }
         df = df.rename(columns=mapping)
         
-        df['Date'] = pd.to_datetime(df['Date']).dt.date
-        df['Expiry'] = pd.to_datetime(df['Expiry']).dt.date
+        df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True).dt.date
+        df['Expiry'] = pd.to_datetime(df['Expiry'], format='mixed', dayfirst=True).dt.date
         
         numeric_cols = ['Open', 'High', 'Low', 'Close', 'Settle Price', 'Open Int', 'Change in OI', 'Contracts', 'Value', 'Strike Price']
         for col in numeric_cols:
