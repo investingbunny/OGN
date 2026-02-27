@@ -402,40 +402,50 @@ class NSEMarketDataDownloader:
                 group = group.sort_values('Date')
                 group.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
 
+    BATCH_MERGE_SIZE = 200  # Number of day-DataFrames to concat at a time
+
     def batch_update_processed_data(self, all_dfs: List[pd.DataFrame], target_dir: Path, group_col: str = 'Symbol'):
-        """Batch-merges multiple days of data into per-symbol Parquet files in one pass.
+        """Batch-merges multiple days of data into per-symbol Parquet files.
         
-        Instead of reading/writing each symbol file once per day, this concatenates
-        ALL new data first, then reads each symbol file only once, merges, and writes once.
-        This reduces I/O from (days × symbols) to just (symbols).
+        Processes data in chunks of BATCH_MERGE_SIZE days to avoid OOM errors
+        when dealing with large datasets (e.g. years of derivatives data).
+        Each chunk is concatenated, grouped by symbol, and merged into the
+        existing per-symbol Parquet files.
         """
         if not all_dfs:
             return
 
-        combined_new = pd.concat(all_dfs, ignore_index=True)
-        if combined_new.empty:
-            return
-
-        groups = list(combined_new.groupby(group_col))
-        total_symbols = len(groups)
-        done_symbols = 0
-        last_progress_time = time.time()
         label = target_dir.parent.name  # e.g. Equity, Derivatives, Indices
+        total_days = len(all_dfs)
+        batch_size = self.BATCH_MERGE_SIZE
+        num_batches = (total_days + batch_size - 1) // batch_size
+        last_progress_time = time.time()
 
-        for name, group in groups:
-            file_path = target_dir / f"{name}.parquet"
-            if file_path.exists():
-                existing_df = pd.read_parquet(file_path, engine='pyarrow')
-                merged = pd.concat([existing_df, group]).drop_duplicates(subset=['Date'], keep='last')
-            else:
-                merged = group
-            merged = merged.sort_values('Date')
-            merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
-            done_symbols += 1
+        for batch_idx in range(num_batches):
+            start = batch_idx * batch_size
+            end = min(start + batch_size, total_days)
+            batch = all_dfs[start:end]
+
+            combined_new = pd.concat(batch, ignore_index=True)
+            if combined_new.empty:
+                continue
+
+            for name, group in combined_new.groupby(group_col):
+                file_path = target_dir / f"{name}.parquet"
+                if file_path.exists():
+                    existing_df = pd.read_parquet(file_path, engine='pyarrow')
+                    merged = pd.concat([existing_df, group]).drop_duplicates(subset=['Date'], keep='last')
+                else:
+                    merged = group
+                merged = merged.sort_values('Date')
+                merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
+
+            # Free memory
+            del combined_new
+
             now = time.time()
-            if now - last_progress_time >= 10 or done_symbols == total_symbols:
-                pct = done_symbols * 100 // total_symbols
-                print(f"  [{label}] Merged {done_symbols}/{total_symbols} ({pct}%) symbols...", flush=True)
+            if now - last_progress_time >= 10 or (batch_idx + 1) == num_batches:
+                print(f"  [{label}] Merged batch {batch_idx + 1}/{num_batches} (days {start + 1}-{end} of {total_days})", flush=True)
                 last_progress_time = now
 
     def get_last_date(self, processed_dir: Path) -> datetime.date:
