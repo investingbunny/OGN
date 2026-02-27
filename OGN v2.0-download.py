@@ -416,7 +416,13 @@ class NSEMarketDataDownloader:
         if combined_new.empty:
             return
 
-        for name, group in combined_new.groupby(group_col):
+        groups = list(combined_new.groupby(group_col))
+        total_symbols = len(groups)
+        done_symbols = 0
+        last_progress_time = time.time()
+        label = target_dir.parent.name  # e.g. Equity, Derivatives, Indices
+
+        for name, group in groups:
             file_path = target_dir / f"{name}.parquet"
             if file_path.exists():
                 existing_df = pd.read_parquet(file_path, engine='pyarrow')
@@ -425,6 +431,12 @@ class NSEMarketDataDownloader:
                 merged = group
             merged = merged.sort_values('Date')
             merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
+            done_symbols += 1
+            now = time.time()
+            if now - last_progress_time >= 10 or done_symbols == total_symbols:
+                pct = done_symbols * 100 // total_symbols
+                print(f"  [{label}] Merged {done_symbols}/{total_symbols} ({pct}%) symbols...")
+                last_progress_time = now
 
     def get_last_date(self, processed_dir: Path) -> datetime.date:
         """Finds the latest date across all processed files."""
@@ -480,7 +492,9 @@ class NSEMarketDataDownloader:
 
         total = len(days)
         done_count = 0
+        success_count = 0
         failed_days = []
+        last_progress_time = time.time()
         print(f"  Downloading {total} days of {label} data ({self.MAX_WORKERS} workers)...")
 
         with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
@@ -505,10 +519,15 @@ class NSEMarketDataDownloader:
                         except (OSError, IOError) as e:
                             print(f"  [{label}] Failed to save raw file for {day}: {e}")
                         all_dfs.append(df)
+                        success_count += 1
                     else:
                         failed_days.append(day)
-                    if done_count % 50 == 0 or done_count == total:
-                        print(f"  [{label}] {done_count}/{total} days processed...")
+                    now = time.time()
+                    if now - last_progress_time >= 10 or done_count == total:
+                        pct = done_count * 100 // total
+                        elapsed = now - last_progress_time
+                        print(f"  [{label}] {done_count}/{total} ({pct}%) days processed, {success_count} successful, {len(failed_days)} failed")
+                        last_progress_time = now
                 except Exception as e:
                     print(f"  [{label}] Error for {day}: {type(e).__name__}: {e}")
                     failed_days.append(day)
