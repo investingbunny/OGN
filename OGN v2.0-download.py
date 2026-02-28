@@ -284,7 +284,8 @@ class NSEMarketDataDownloader:
 
                 with z.open(target_csv) as f:
                     # Index PR files often have issues with trailers or leading spaces
-                    df = pd.read_csv(f, skipinitialspace=True)
+                    # on_bad_lines handles rows with inconsistent field counts
+                    df = pd.read_csv(f, skipinitialspace=True, on_bad_lines='skip')
                     # The first ~57 lines are usually the indices
                     df = df.head(100) # Safety margin
                     return self._clean_indices_data(df, date)
@@ -351,36 +352,70 @@ class NSEMarketDataDownloader:
         return df
 
     def _clean_indices_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
-        """Standardizes Indices data from PR report."""
-        # Index PR reports are a bit messy.
-        # Typically: Index Name, Open, High, Low, Close, Prev Close, Change, % Change, Volume, Turnover, PE, PB, DY
-        # We need to find the right columns.
+        """Standardizes Indices data from PR report.
+        
+        Handles varying column formats across different years of NSE PR reports.
+        Uses fuzzy matching to find the symbol/name column regardless of header naming.
+        """
         df.columns = [c.strip() for c in df.columns]
 
         mapping = {
             'Index Name': 'Symbol', 'Index Name ': 'Symbol',
             'INDEX_NAME': 'Symbol', 'Index': 'Symbol',
-            'Index Date': 'Date', 'Date': 'Date',
+            'INDEX': 'Symbol', 'INDEX NAME': 'Symbol',
+            'Index Date': 'Date', 'Date': 'Date', 'DATE': 'Date',
+            'INDEX_DATE': 'Date', 'TRADING_DATE': 'Date',
             'Open Index Value': 'Open', 'High Index Value': 'High',
             'Low Index Value': 'Low', 'Closing Index Value': 'Close',
+            'OPEN': 'Open', 'HIGH': 'High', 'LOW': 'Low', 'CLOSE': 'Close',
+            'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close',
             'Points Change': 'Change', 'Change(%)': 'Percent Change',
-            'Volume': 'Volume', 'Turnover (Rs. Cr.)': 'Turnover'
+            'CHANGE': 'Change', '%CHANGE': 'Percent Change',
+            'Volume': 'Volume', 'VOLUME': 'Volume',
+            'Turnover (Rs. Cr.)': 'Turnover', 'TURNOVER': 'Turnover',
+            'Turnover': 'Turnover',
+            'P/E': 'PE', 'P/B': 'PB', 'Div Yield': 'DY',
+            'PE': 'PE', 'PB': 'PB', 'DY': 'DY',
         }
         df = df.rename(columns=mapping)
-        
+
+        # If no 'Symbol' column found via mapping, try to detect it
+        if 'Symbol' not in df.columns:
+            # Look for any column that contains index-like names (first col is often the name)
+            for col in df.columns:
+                col_lower = col.lower()
+                if any(keyword in col_lower for keyword in ['index', 'name', 'symbol']):
+                    df = df.rename(columns={col: 'Symbol'})
+                    break
+            else:
+                # Last resort: assume first column is the index name
+                first_col = df.columns[0]
+                # Check if first column has string values that look like index names
+                sample = df[first_col].dropna().astype(str).head(5)
+                if sample.str.contains('Nifty|NIFTY|nifty|S&P|CNX|BSE', case=False, regex=True).any():
+                    df = df.rename(columns={first_col: 'Symbol'})
+                else:
+                    # Can't identify symbol column — skip this file
+                    return pd.DataFrame()
+
         # If 'Date' column is missing (often is in PR files), add it
         if 'Date' not in df.columns:
             df['Date'] = date
         else:
-            df['Date'] = pd.to_datetime(df['Date']).dt.date
+            df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
 
         # Standardize Symbol names
-        if 'Symbol' in df.columns:
-            df['Symbol'] = df['Symbol'].str.strip()
-            df['Symbol'] = df['Symbol'].replace({'Nifty 50': 'NIFTY', 'Nifty Bank': 'BANKNIFTY'})
+        df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        df['Symbol'] = df['Symbol'].replace({
+            'Nifty 50': 'NIFTY', 'NIFTY 50': 'NIFTY', 'S&P CNX NIFTY': 'NIFTY',
+            'Nifty Bank': 'BANKNIFTY', 'NIFTY BANK': 'BANKNIFTY', 'CNX BANK': 'BANKNIFTY',
+            'Nifty Next 50': 'NIFTYNEXT50', 'NIFTY NEXT 50': 'NIFTYNEXT50',
+            'Nifty 500': 'NIFTY500', 'NIFTY 500': 'NIFTY500', 'CNX 500': 'NIFTY500',
+            'Nifty Midcap 50': 'NIFTYMIDCAP50', 'NIFTY MIDCAP 50': 'NIFTYMIDCAP50',
+        })
 
         # Filter for known indices to avoid trash
-        known_indices = ['NIFTY', 'BANKNIFTY', 'Nifty Next 50', 'Nifty 500', 'Nifty Midcap 50']
+        known_indices = ['NIFTY', 'BANKNIFTY', 'NIFTYNEXT50', 'NIFTY500', 'NIFTYMIDCAP50']
         df = df[df['Symbol'].isin(known_indices)].copy()
         
         return df
@@ -394,8 +429,13 @@ class NSEMarketDataDownloader:
             file_path = target_dir / f"{name}.parquet"
             if file_path.exists():
                 existing_df = pd.read_parquet(file_path, engine='pyarrow')
-                # Merge and drop duplicates
-                combined_df = pd.concat([existing_df, group]).drop_duplicates(subset=['Date'], keep='last')
+                # pd.concat automatically handles differing columns
+                combined_df = pd.concat([existing_df, group], ignore_index=True)
+                dedup_cols = ['Date']
+                for extra_key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
+                    if extra_key in combined_df.columns:
+                        dedup_cols.append(extra_key)
+                combined_df = combined_df.drop_duplicates(subset=dedup_cols, keep='last')
                 combined_df = combined_df.sort_values('Date')
                 combined_df.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
             else:
@@ -467,7 +507,14 @@ class NSEMarketDataDownloader:
                 file_path = target_dir / f"{name}.parquet"
                 if file_path.exists():
                     existing_df = pd.read_parquet(file_path, engine='pyarrow')
-                    merged = pd.concat([existing_df, group]).drop_duplicates(subset=['Date'], keep='last')
+                    # pd.concat automatically handles differing columns (new cols get NaN in old rows)
+                    merged = pd.concat([existing_df, group], ignore_index=True)
+                    # Determine dedup key: use all key columns that exist
+                    dedup_cols = ['Date']
+                    for extra_key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
+                        if extra_key in merged.columns:
+                            dedup_cols.append(extra_key)
+                    merged = merged.drop_duplicates(subset=dedup_cols, keep='last')
                     del existing_df
                 else:
                     merged = group
