@@ -277,18 +277,74 @@ class NSEMarketDataDownloader:
         try:
             with zipfile.ZipFile(io.BytesIO(content)) as z:
                 # PR zip contains many CSVs, we want the one like PrDDMMYY.csv
-                target_csv = f"Pr{date.strftime('%d%m%y')}.csv"
-                if target_csv not in z.namelist():
-                    # Sometimes casing differs
-                    target_csv = [n for n in z.namelist() if n.lower() == target_csv.lower()][0]
+                # The naming pattern varies: Pr280226.csv, PR280226.csv, pd280226.csv, etc.
+                all_files = z.namelist()
+                target_csv = None
+
+                # Try exact patterns first
+                for pattern in [
+                    f"Pr{date.strftime('%d%m%y')}.csv",
+                    f"PR{date.strftime('%d%m%y')}.csv",
+                    f"pr{date.strftime('%d%m%y')}.csv",
+                ]:
+                    if pattern in all_files:
+                        target_csv = pattern
+                        break
+
+                # Case-insensitive search
+                if target_csv is None:
+                    date_str = date.strftime('%d%m%y')
+                    matches = [n for n in all_files if n.lower() == f"pr{date_str}.csv"]
+                    if matches:
+                        target_csv = matches[0]
+
+                # Broader search: any CSV with "pr" or "Pr" prefix and the date digits
+                if target_csv is None:
+                    date_str = date.strftime('%d%m%y')
+                    matches = [n for n in all_files if date_str in n and n.lower().endswith('.csv')
+                               and n.lower().startswith('pr')]
+                    if matches:
+                        target_csv = matches[0]
+
+                # Last resort: any CSV containing index-like data (pick the first/largest CSV)
+                if target_csv is None:
+                    csv_files = [n for n in all_files if n.lower().endswith('.csv')]
+                    if csv_files:
+                        # Pick the largest CSV (most likely the index data)
+                        target_csv = max(csv_files, key=lambda n: z.getinfo(n).file_size)
+
+                if target_csv is None:
+                    print(f"No suitable CSV found in PR zip for {date}. Files: {all_files[:5]}")
+                    return None
 
                 with z.open(target_csv) as f:
-                    # Index PR files often have issues with trailers or leading spaces
-                    # on_bad_lines handles rows with inconsistent field counts
-                    df = pd.read_csv(f, skipinitialspace=True, on_bad_lines='skip')
-                    # The first ~57 lines are usually the indices
-                    df = df.head(100) # Safety margin
-                    return self._clean_indices_data(df, date)
+                    raw_bytes = f.read()
+
+                # Try multiple encodings
+                df = None
+                for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                    try:
+                        df = pd.read_csv(
+                            io.BytesIO(raw_bytes),
+                            skipinitialspace=True,
+                            on_bad_lines='skip',
+                            encoding=encoding
+                        )
+                        break
+                    except (UnicodeDecodeError, UnicodeError):
+                        continue
+                    except Exception:
+                        break
+
+                if df is None or df.empty:
+                    return None
+
+                # The first ~57 lines are usually the indices
+                df = df.head(100)  # Safety margin
+                return self._clean_indices_data(df, date)
+        except zipfile.BadZipFile:
+            # Not a valid zip (might be HTML error page)
+            return None
         except Exception as e:
             print(f"Error parsing Indices PR for {date}: {e}")
             return None
