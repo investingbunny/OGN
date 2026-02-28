@@ -402,32 +402,65 @@ class NSEMarketDataDownloader:
                 group = group.sort_values('Date')
                 group.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
 
-    BATCH_MERGE_SIZE = 200  # Number of day-DataFrames to concat at a time
+    BATCH_MERGE_SIZE = 50  # Number of raw files to read and merge at a time
 
-    def batch_update_processed_data(self, all_dfs: List[pd.DataFrame], target_dir: Path, group_col: str = 'Symbol'):
-        """Batch-merges multiple days of data into per-symbol Parquet files.
+    def merge_raw_to_processed(self, raw_dir: Path, raw_prefix: str, target_dir: Path, label: str, group_col: str = 'Symbol'):
+        """Merges raw day-parquet files from disk into per-symbol processed files.
         
-        Processes data in chunks of BATCH_MERGE_SIZE days to avoid OOM errors
-        when dealing with large datasets (e.g. years of derivatives data).
-        Each chunk is concatenated, grouped by symbol, and merged into the
-        existing per-symbol Parquet files.
+        Reads raw files from disk in small batches to avoid OOM.
+        After successfully merging a batch, the raw files are left on disk
+        as a cache (they'll be skipped on next download run).
         """
-        if not all_dfs:
+        raw_files = sorted(raw_dir.glob(f"{raw_prefix}_*.parquet"))
+        if not raw_files:
+            print(f"  [{label}] No raw files to merge.", flush=True)
             return
 
-        label = target_dir.parent.name  # e.g. Equity, Derivatives, Indices
-        total_days = len(all_dfs)
+        # Determine which raw files are newer than the last processed date
+        last_processed = self.get_last_date(target_dir)
+        files_to_merge = []
+        for f in raw_files:
+            # Extract date from filename like fo_20100503.parquet
+            try:
+                date_str = f.stem.split('_', 1)[1]  # "20100503"
+                file_date = datetime.datetime.strptime(date_str, '%Y%m%d').date()
+                if file_date > last_processed:
+                    files_to_merge.append(f)
+            except (IndexError, ValueError):
+                files_to_merge.append(f)  # Include if we can't parse the date
+
+        if not files_to_merge:
+            print(f"  [{label}] All raw files already merged.", flush=True)
+            return
+
+        total_files = len(files_to_merge)
         batch_size = self.BATCH_MERGE_SIZE
-        num_batches = (total_days + batch_size - 1) // batch_size
+        num_batches = (total_files + batch_size - 1) // batch_size
         last_progress_time = time.time()
+        print(f"  [{label}] Merging {total_files} raw files in {num_batches} batches...", flush=True)
 
         for batch_idx in range(num_batches):
             start = batch_idx * batch_size
-            end = min(start + batch_size, total_days)
-            batch = all_dfs[start:end]
+            end = min(start + batch_size, total_files)
+            batch_files = files_to_merge[start:end]
 
-            combined_new = pd.concat(batch, ignore_index=True)
+            # Read batch of raw files from disk
+            batch_dfs = []
+            for f in batch_files:
+                try:
+                    df = pd.read_parquet(f, engine='pyarrow')
+                    batch_dfs.append(df)
+                except Exception as e:
+                    print(f"  [{label}] Error reading raw file {f.name}: {e}")
+
+            if not batch_dfs:
+                continue
+
+            combined_new = pd.concat(batch_dfs, ignore_index=True)
+            del batch_dfs  # Free list of DFs
+
             if combined_new.empty:
+                del combined_new
                 continue
 
             for name, group in combined_new.groupby(group_col):
@@ -435,17 +468,18 @@ class NSEMarketDataDownloader:
                 if file_path.exists():
                     existing_df = pd.read_parquet(file_path, engine='pyarrow')
                     merged = pd.concat([existing_df, group]).drop_duplicates(subset=['Date'], keep='last')
+                    del existing_df
                 else:
                     merged = group
                 merged = merged.sort_values('Date')
                 merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
+                del merged
 
-            # Free memory
             del combined_new
 
             now = time.time()
             if now - last_progress_time >= 10 or (batch_idx + 1) == num_batches:
-                print(f"  [{label}] Merged batch {batch_idx + 1}/{num_batches} (days {start + 1}-{end} of {total_days})", flush=True)
+                print(f"  [{label}] Merged batch {batch_idx + 1}/{num_batches} (files {start + 1}-{end} of {total_files})", flush=True)
                 last_progress_time = now
 
     def get_last_date(self, processed_dir: Path) -> datetime.date:
@@ -490,17 +524,34 @@ class NSEMarketDataDownloader:
         return (day, df)
 
     def _concurrent_download(self, days, download_fn, raw_dir, raw_prefix, label):
-        """Downloads data for multiple days concurrently and returns list of DataFrames.
+        """Downloads data for multiple days concurrently, skipping already-downloaded days.
 
         Uses ThreadPoolExecutor for parallel HTTP requests, saves raw files as they
-        arrive, and returns all successful DataFrames for batch processing.
+        arrive. Days that already have a raw parquet file on disk are skipped.
         Failed days are retried once with reduced concurrency.
         """
-        all_dfs = []
         if not days:
-            return all_dfs
+            print(f"  No new {label} days to download.", flush=True)
+            return
 
-        total = len(days)
+        # Skip days that already have raw files on disk
+        days_to_download = []
+        skipped = 0
+        for day in days:
+            raw_file = raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet"
+            if raw_file.exists():
+                skipped += 1
+            else:
+                days_to_download.append(day)
+
+        if skipped > 0:
+            print(f"  [{label}] Skipping {skipped} days (already downloaded), {len(days_to_download)} remaining.", flush=True)
+
+        if not days_to_download:
+            print(f"  [{label}] All days already downloaded.", flush=True)
+            return
+
+        total = len(days_to_download)
         done_count = 0
         success_count = 0
         failed_days = []
@@ -508,8 +559,7 @@ class NSEMarketDataDownloader:
         print(f"  Downloading {total} days of {label} data ({self.MAX_WORKERS} workers)...", flush=True)
 
         with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
-            # Submit all at once — max_workers already limits concurrency
-            futures = {executor.submit(download_fn, day): day for day in days}
+            futures = {executor.submit(download_fn, day): day for day in days_to_download}
 
             for future in as_completed(futures):
                 day = futures[future]
@@ -517,7 +567,6 @@ class NSEMarketDataDownloader:
                 try:
                     _, df = future.result()
                     if df is not None:
-                        # Save raw file
                         try:
                             df.to_parquet(
                                 raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet",
@@ -525,14 +574,12 @@ class NSEMarketDataDownloader:
                             )
                         except (OSError, IOError) as e:
                             print(f"  [{label}] Failed to save raw file for {day}: {e}")
-                        all_dfs.append(df)
                         success_count += 1
                     else:
                         failed_days.append(day)
                     now = time.time()
                     if now - last_progress_time >= 10 or done_count == total:
                         pct = done_count * 100 // total
-                        elapsed = now - last_progress_time
                         print(f"  [{label}] {done_count}/{total} ({pct}%) days processed, {success_count} successful, {len(failed_days)} failed", flush=True)
                         last_progress_time = now
                 except Exception as e:
@@ -557,18 +604,16 @@ class NSEMarketDataDownloader:
                             )
                         except (OSError, IOError) as e:
                             print(f"  [{label}] Failed to save raw file for {day} on retry: {e}")
-                        all_dfs.append(df)
+                        success_count += 1
                     time.sleep(1)  # Slower pace for retries
                 except Exception as e:
                     print(f"  [{label}] Retry also failed for {day}: {type(e).__name__}: {e}")
 
-        success = len(all_dfs)
-        final_failed = total - success
-        msg = f"  [{label}] Download complete: {success}/{total} days successful."
+        final_failed = total - success_count
+        msg = f"  [{label}] Download complete: {success_count}/{total} days successful."
         if final_failed > 0:
             msg += f" ({final_failed} days failed even after retry)"
-        print(msg)
-        return all_dfs
+        print(msg, flush=True)
 
     def run_incremental_update(self):
         """Main loop to download and update data incrementally.
@@ -582,35 +627,29 @@ class NSEMarketDataDownloader:
         print("Starting Incremental Update...")
         t0 = time.time()
 
-        # 1. Equity
+        # 1. Equity — Download then merge from raw files
         last_cm_date = self.get_last_date(EQUITY_PROCESSED)
         print(f"Last Equity Date: {last_cm_date}")
         cm_days = self.get_trading_days(last_cm_date + datetime.timedelta(days=1), datetime.date.today())
+        self._concurrent_download(cm_days, self._download_day_cm, EQUITY_RAW, "cm", "Equity")
+        self.merge_raw_to_processed(EQUITY_RAW, "cm", EQUITY_PROCESSED, "Equity")
+        print(f"  Equity update done.", flush=True)
 
-        cm_dfs = self._concurrent_download(cm_days, self._download_day_cm, EQUITY_RAW, "cm", "Equity")
-        print(f"  Merging {len(cm_dfs)} days into per-symbol Equity files...")
-        self.batch_update_processed_data(cm_dfs, EQUITY_PROCESSED)
-        print(f"  Equity update done.")
-
-        # 2. Derivatives
+        # 2. Derivatives — Download then merge from raw files
         last_fo_date = self.get_last_date(DERIVATIVES_PROCESSED)
         print(f"Last Derivatives Date: {last_fo_date}")
         fo_days = self.get_trading_days(last_fo_date + datetime.timedelta(days=1), datetime.date.today())
+        self._concurrent_download(fo_days, self._download_day_fo, DERIVATIVES_RAW, "fo", "Derivatives")
+        self.merge_raw_to_processed(DERIVATIVES_RAW, "fo", DERIVATIVES_PROCESSED, "Derivatives")
+        print(f"  Derivatives update done.", flush=True)
 
-        fo_dfs = self._concurrent_download(fo_days, self._download_day_fo, DERIVATIVES_RAW, "fo", "Derivatives")
-        print(f"  Merging {len(fo_dfs)} days into per-symbol Derivatives files...")
-        self.batch_update_processed_data(fo_dfs, DERIVATIVES_PROCESSED)
-        print(f"  Derivatives update done.")
-
-        # 3. Indices
+        # 3. Indices — Download then merge from raw files
         last_idx_date = self.get_last_date(INDICES_PROCESSED)
         print(f"Last Indices Date: {last_idx_date}")
         idx_days = self.get_trading_days(last_idx_date + datetime.timedelta(days=1), datetime.date.today())
-
-        idx_dfs = self._concurrent_download(idx_days, self._download_day_idx, INDICES_RAW, "idx", "Indices")
-        print(f"  Merging {len(idx_dfs)} days into per-symbol Indices files...")
-        self.batch_update_processed_data(idx_dfs, INDICES_PROCESSED)
-        print(f"  Indices update done.")
+        self._concurrent_download(idx_days, self._download_day_idx, INDICES_RAW, "idx", "Indices")
+        self.merge_raw_to_processed(INDICES_RAW, "idx", INDICES_PROCESSED, "Indices")
+        print(f"  Indices update done.", flush=True)
 
         elapsed = time.time() - t0
         print(f"Update Complete. Total time: {elapsed:.1f}s")
