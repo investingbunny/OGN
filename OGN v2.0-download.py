@@ -579,11 +579,19 @@ class NSEMarketDataDownloader:
 
     def download_short_selling(self, date: datetime.date) -> Optional[pd.DataFrame]:
         """Downloads Short Selling report for a given date."""
-        # Use Reports API (no reliable direct archive URL exists for this report)
-        archives = [{"name": "CM - Short Selling", "type": "archives", "category": "capital-market", "section": "equities"}]
-        archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
-        url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
-        content = self._download_file(url, referer=ALL_REPORTS_URL)
+        # Try direct archive URL first
+        url = f"{ARCHIVE_URL}/archives/equities/shortSelling/shortselling_{date.strftime('%d%m%Y')}.csv"
+        try:
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
+        except HTTP403Error:
+            content = None
+
+        # Fallback: try Reports API
+        if not content:
+            archives = [{"name": "CM - Short Selling", "type": "archives", "category": "capital-market", "section": "equities"}]
+            archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
+            api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+            content = self._download_file(api_url, referer=ALL_REPORTS_URL)
 
         if not content:
             return None
