@@ -69,6 +69,12 @@ HOLIDAYS = [
 ]
 HOLIDAYS = pd.to_datetime(HOLIDAYS).date
 
+
+class HTTP403Error(Exception):
+    """Raised when the server returns 403 Forbidden (data not available)."""
+    pass
+
+
 class NSEMarketDataDownloader:
     """Class to handle robust downloading and storage of NSE market data."""
 
@@ -156,12 +162,16 @@ class NSEMarketDataDownloader:
                     # Not found — no point retrying
                     return None
 
-                elif r.status_code in (403, 401):
-                    # Forbidden/Unauthorized — likely session expired or IP blocked
-                    print(f"  HTTP {r.status_code} for {url.split('?')[0]}... "
+                elif r.status_code == 403:
+                    # Forbidden — data not available, no retry
+                    raise HTTP403Error(f"HTTP 403 for {url.split('?')[0]}")
+
+                elif r.status_code == 401:
+                    # Unauthorized — likely session expired
+                    print(f"  HTTP 401 for {url.split('?')[0]}... "
                           f"re-initializing session (attempt {attempt+1}/{max_retries}).")
                     self._init_session()
-                    time.sleep(delay + 2)  # Extra pause for auth issues
+                    time.sleep(delay + 2)
 
                 elif r.status_code == 429:
                     # Rate limited — back off significantly
@@ -1058,11 +1068,11 @@ class NSEMarketDataDownloader:
         return (day, df)
 
     def _concurrent_download(self, days, download_fn, raw_dir, raw_prefix, label):
-        """Downloads data for multiple days concurrently, skipping already-downloaded days.
+        """Downloads data for multiple days, newest first, skipping already-downloaded days.
 
-        Uses ThreadPoolExecutor for parallel HTTP requests, saves raw files as they
-        arrive. Days that already have a raw parquet file on disk are skipped.
-        Failed days are retried once with reduced concurrency.
+        Downloads in reverse chronological order (newest first) in batches.
+        If 10 consecutive days return HTTP 403, assumes older data is not available
+        and stops going further back.
         """
         if not days:
             print(f"  No new {label} days to download.", flush=True)
@@ -1085,68 +1095,86 @@ class NSEMarketDataDownloader:
             print(f"  [{label}] All days already downloaded.", flush=True)
             return
 
+        # Reverse: process newest days first
+        days_to_download = list(reversed(days_to_download))
+
         total = len(days_to_download)
         done_count = 0
         success_count = 0
         failed_days = []
+        consecutive_403 = 0
+        MAX_CONSECUTIVE_403 = 10
+        stopped_early = False
         last_progress_time = time.time()
-        print(f"  Downloading {total} days of {label} data ({self.MAX_WORKERS} workers)...", flush=True)
+        print(f"  Downloading {total} days of {label} data (newest first, {self.MAX_WORKERS} workers)...", flush=True)
 
-        with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
-            futures = {executor.submit(download_fn, day): day for day in days_to_download}
+        # Process in batches to allow concurrent downloads while tracking 403 streaks
+        BATCH_SIZE = self.MAX_WORKERS * 3  # e.g. 12 days per batch
+        for batch_start in range(0, total, BATCH_SIZE):
+            if stopped_early:
+                break
 
-            for future in as_completed(futures):
-                day = futures[future]
-                done_count += 1
-                try:
-                    _, df = future.result()
-                    if df is not None:
-                        try:
-                            df.to_parquet(
-                                raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet",
-                                engine='pyarrow', compression='zstd', index=False
-                            )
-                        except (OSError, IOError) as e:
-                            print(f"  [{label}] Failed to save raw file for {day}: {e}")
-                        success_count += 1
-                    else:
+            batch_end = min(batch_start + BATCH_SIZE, total)
+            batch_days = days_to_download[batch_start:batch_end]
+
+            with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
+                futures = {executor.submit(download_fn, day): day for day in batch_days}
+
+                # Collect results keyed by day
+                batch_results = {}  # day -> ('ok', df) | ('403',) | ('fail',)
+                for future in as_completed(futures):
+                    day = futures[future]
+                    done_count += 1
+                    try:
+                        _, df = future.result()
+                        if df is not None:
+                            try:
+                                df.to_parquet(
+                                    raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet",
+                                    engine='pyarrow', compression='zstd', index=False
+                                )
+                            except (OSError, IOError) as e:
+                                print(f"  [{label}] Failed to save raw file for {day}: {e}")
+                            batch_results[day] = ('ok', df)
+                            success_count += 1
+                        else:
+                            batch_results[day] = ('fail',)
+                            failed_days.append(day)
+                    except HTTP403Error:
+                        batch_results[day] = ('403',)
                         failed_days.append(day)
-                    now = time.time()
-                    if now - last_progress_time >= 10 or done_count == total:
-                        pct = done_count * 100 // total
-                        print(f"  [{label}] {done_count}/{total} ({pct}%) days processed, {success_count} successful, {len(failed_days)} failed", flush=True)
-                        last_progress_time = now
-                except Exception as e:
-                    print(f"  [{label}] Error for {day}: {type(e).__name__}: {e}")
-                    failed_days.append(day)
+                    except Exception as e:
+                        print(f"  [{label}] Error for {day}: {type(e).__name__}: {e}")
+                        batch_results[day] = ('fail',)
+                        failed_days.append(day)
 
-        # --- Retry failed days with reduced concurrency ---
-        if failed_days:
-            retry_count = len(failed_days)
-            print(f"  [{label}] Retrying {retry_count} failed days (1 worker, slower pace)...")
-            self._init_session()  # Fresh session before retries
-            time.sleep(2)
+            # Check consecutive 403 streak in date order (newest first = batch_days order)
+            for day in batch_days:
+                result = batch_results.get(day, ('fail',))
+                if result[0] == '403':
+                    consecutive_403 += 1
+                    if consecutive_403 >= MAX_CONSECUTIVE_403:
+                        remaining = total - done_count
+                        print(f"  [{label}] {MAX_CONSECUTIVE_403} consecutive 403 errors — "
+                              f"older data not available. Skipping {remaining} remaining days.", flush=True)
+                        stopped_early = True
+                        break
+                else:
+                    consecutive_403 = 0  # Reset on any non-403 result
 
-            for day in failed_days:
-                try:
-                    _, df = download_fn(day)
-                    if df is not None:
-                        try:
-                            df.to_parquet(
-                                raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet",
-                                engine='pyarrow', compression='zstd', index=False
-                            )
-                        except (OSError, IOError) as e:
-                            print(f"  [{label}] Failed to save raw file for {day} on retry: {e}")
-                        success_count += 1
-                    time.sleep(1)  # Slower pace for retries
-                except Exception as e:
-                    print(f"  [{label}] Retry also failed for {day}: {type(e).__name__}: {e}")
+            now = time.time()
+            if now - last_progress_time >= 10 or done_count == total or stopped_early:
+                pct = done_count * 100 // total
+                print(f"  [{label}] {done_count}/{total} ({pct}%) days processed, "
+                      f"{success_count} successful, {len(failed_days)} failed", flush=True)
+                last_progress_time = now
 
-        final_failed = total - success_count
-        msg = f"  [{label}] Download complete: {success_count}/{total} days successful."
-        if final_failed > 0:
-            msg += f" ({final_failed} days failed even after retry)"
+        final_failed = done_count - success_count
+        msg = f"  [{label}] Download complete: {success_count}/{done_count} days successful."
+        if stopped_early:
+            msg += f" (stopped early — old data unavailable)"
+        elif final_failed > 0:
+            msg += f" ({final_failed} days failed)"
         print(msg, flush=True)
 
     def run_incremental_update(self):
