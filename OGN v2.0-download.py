@@ -1144,8 +1144,8 @@ class NSEMarketDataDownloader:
         """Downloads data for multiple days, newest first, skipping already-downloaded days.
 
         Downloads in reverse chronological order (newest first) in batches.
-        If 10 consecutive days return HTTP 403, assumes older data is not available
-        and stops going further back.
+        If 5 consecutive days return HTTP 403, assumes older data is not available
+        and stops going further back for this category.
         """
         if not days:
             print(f"  No new {label} days to download.", flush=True)
@@ -1176,7 +1176,7 @@ class NSEMarketDataDownloader:
         success_count = 0
         failed_days = []
         consecutive_403 = 0
-        MAX_CONSECUTIVE_403 = 10
+        MAX_CONSECUTIVE_403 = 5
         stopped_early = False
         last_progress_time = time.time()
         print(f"  Downloading {total} days of {label} data (newest first, {self.MAX_WORKERS} workers)...", flush=True)
@@ -1251,96 +1251,40 @@ class NSEMarketDataDownloader:
         print(msg, flush=True)
 
     def run_incremental_update(self):
-        """Main loop to download and update data incrementally.
-        
-        Performance optimizations vs original:
-        - Concurrent downloads with ThreadPoolExecutor (4 workers)
-        - Batch parquet merges: reads/writes each symbol file only ONCE instead
-          of once per trading day, reducing I/O from O(days×symbols) to O(symbols)
-        - Reduced inter-request sleep from 1s to 0.3s stagger
+        """Main loop to download and update all data categories.
+
+        Downloads from today backwards to DEFAULT_START_DATE (2010).
+        Already-downloaded days are automatically skipped (raw file on disk).
+        If 5 consecutive 403 errors are hit going backwards, that category
+        stops and the next category begins.
         """
         print("Starting Incremental Update...")
         t0 = time.time()
 
-        # 1. Equity — Download then merge from raw files
-        last_cm_date = self.get_last_date(EQUITY_PROCESSED)
-        print(f"Last Equity Date: {last_cm_date}")
-        cm_days = self.get_trading_days(last_cm_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(cm_days, self._download_day_cm, EQUITY_RAW, "cm", "Equity")
-        self.merge_raw_to_processed(EQUITY_RAW, "cm", EQUITY_PROCESSED, "Equity")
-        print(f"  Equity update done.", flush=True)
+        # All categories download from DEFAULT_START_DATE to today (newest first).
+        # Already-downloaded days are skipped automatically (raw file exists on disk).
+        # If 5 consecutive 403 errors are hit working backwards, that category stops.
+        today = datetime.date.today()
+        all_days = self.get_trading_days(DEFAULT_START_DATE, today)
 
-        # 2. Derivatives — Download then merge from raw files
-        last_fo_date = self.get_last_date(DERIVATIVES_PROCESSED)
-        print(f"Last Derivatives Date: {last_fo_date}")
-        fo_days = self.get_trading_days(last_fo_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(fo_days, self._download_day_fo, DERIVATIVES_RAW, "fo", "Derivatives")
-        self.merge_raw_to_processed(DERIVATIVES_RAW, "fo", DERIVATIVES_PROCESSED, "Derivatives")
-        print(f"  Derivatives update done.", flush=True)
+        categories = [
+            ("Equity",             self._download_day_cm,  EQUITY_RAW,        "cm",  EQUITY_PROCESSED),
+            ("Derivatives",        self._download_day_fo,  DERIVATIVES_RAW,   "fo",  DERIVATIVES_PROCESSED),
+            ("Indices",            self._download_day_idx, INDICES_RAW,       "idx", INDICES_PROCESSED),
+            ("Short Selling",      self._download_day_ss,  SHORTSELLING_RAW,  "ss",  SHORTSELLING_PROCESSED),
+            ("Volatility",         self._download_day_vol, VOLATILITY_RAW,    "vol", VOLATILITY_PROCESSED),
+            ("Market Activity",    self._download_day_ma,  MARKETACTIVITY_RAW,"ma",  MARKETACTIVITY_PROCESSED),
+            ("Price Band",         self._download_day_pb,  PRICEBAND_RAW,     "pb",  PRICEBAND_PROCESSED),
+            ("PE Ratio",           self._download_day_pe,  PERATIO_RAW,       "pe",  PERATIO_PROCESSED),
+            ("Corporate Bonds",    self._download_day_cb,  CORPBONDS_RAW,     "cb",  CORPBONDS_PROCESSED),
+            ("Delivery Positions", self._download_day_del, DELIVERY_RAW,      "del", DELIVERY_PROCESSED),
+        ]
 
-        # 3. Indices — Download then merge from raw files
-        last_idx_date = self.get_last_date(INDICES_PROCESSED)
-        print(f"Last Indices Date: {last_idx_date}")
-        idx_days = self.get_trading_days(last_idx_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(idx_days, self._download_day_idx, INDICES_RAW, "idx", "Indices")
-        self.merge_raw_to_processed(INDICES_RAW, "idx", INDICES_PROCESSED, "Indices")
-        print(f"  Indices update done.", flush=True)
-
-        # 4. Short Selling
-        last_ss_date = self.get_last_date(SHORTSELLING_PROCESSED)
-        print(f"Last Short Selling Date: {last_ss_date}")
-        ss_days = self.get_trading_days(last_ss_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(ss_days, self._download_day_ss, SHORTSELLING_RAW, "ss", "Short Selling")
-        self.merge_raw_to_processed(SHORTSELLING_RAW, "ss", SHORTSELLING_PROCESSED, "Short Selling")
-        print(f"  Short Selling update done.", flush=True)
-
-        # 5. Daily Volatility
-        last_vol_date = self.get_last_date(VOLATILITY_PROCESSED)
-        print(f"Last Volatility Date: {last_vol_date}")
-        vol_days = self.get_trading_days(last_vol_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(vol_days, self._download_day_vol, VOLATILITY_RAW, "vol", "Volatility")
-        self.merge_raw_to_processed(VOLATILITY_RAW, "vol", VOLATILITY_PROCESSED, "Volatility")
-        print(f"  Volatility update done.", flush=True)
-
-        # 6. Market Activity Report
-        last_ma_date = self.get_last_date(MARKETACTIVITY_PROCESSED)
-        print(f"Last Market Activity Date: {last_ma_date}")
-        ma_days = self.get_trading_days(last_ma_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(ma_days, self._download_day_ma, MARKETACTIVITY_RAW, "ma", "Market Activity")
-        self.merge_raw_to_processed(MARKETACTIVITY_RAW, "ma", MARKETACTIVITY_PROCESSED, "Market Activity")
-        print(f"  Market Activity update done.", flush=True)
-
-        # 7. Price Band Changes
-        last_pb_date = self.get_last_date(PRICEBAND_PROCESSED)
-        print(f"Last Price Band Date: {last_pb_date}")
-        pb_days = self.get_trading_days(last_pb_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(pb_days, self._download_day_pb, PRICEBAND_RAW, "pb", "Price Band")
-        self.merge_raw_to_processed(PRICEBAND_RAW, "pb", PRICEBAND_PROCESSED, "Price Band")
-        print(f"  Price Band update done.", flush=True)
-
-        # 8. PE Ratio
-        last_pe_date = self.get_last_date(PERATIO_PROCESSED)
-        print(f"Last PE Ratio Date: {last_pe_date}")
-        pe_days = self.get_trading_days(last_pe_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(pe_days, self._download_day_pe, PERATIO_RAW, "pe", "PE Ratio")
-        self.merge_raw_to_processed(PERATIO_RAW, "pe", PERATIO_PROCESSED, "PE Ratio")
-        print(f"  PE Ratio update done.", flush=True)
-
-        # 9. Corporate Bonds
-        last_cb_date = self.get_last_date(CORPBONDS_PROCESSED)
-        print(f"Last Corporate Bonds Date: {last_cb_date}")
-        cb_days = self.get_trading_days(last_cb_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(cb_days, self._download_day_cb, CORPBONDS_RAW, "cb", "Corporate Bonds")
-        self.merge_raw_to_processed(CORPBONDS_RAW, "cb", CORPBONDS_PROCESSED, "Corporate Bonds")
-        print(f"  Corporate Bonds update done.", flush=True)
-
-        # 10. Security-wise Delivery Positions
-        last_del_date = self.get_last_date(DELIVERY_PROCESSED)
-        print(f"Last Delivery Positions Date: {last_del_date}")
-        del_days = self.get_trading_days(last_del_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(del_days, self._download_day_del, DELIVERY_RAW, "del", "Delivery Positions")
-        self.merge_raw_to_processed(DELIVERY_RAW, "del", DELIVERY_PROCESSED, "Delivery Positions")
-        print(f"  Delivery Positions update done.", flush=True)
+        for label, download_fn, raw_dir, prefix, processed_dir in categories:
+            print(f"\n--- {label} ---", flush=True)
+            self._concurrent_download(all_days, download_fn, raw_dir, prefix, label)
+            self.merge_raw_to_processed(raw_dir, prefix, processed_dir, label)
+            print(f"  {label} update done.", flush=True)
 
         elapsed = time.time() - t0
         print(f"Update Complete. Total time: {elapsed:.1f}s")
