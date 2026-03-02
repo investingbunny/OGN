@@ -364,10 +364,20 @@ class NSEMarketDataDownloader:
             url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
-            # Legacy Archive Format
-            # https://nsearchives.nseindia.com/content/historical/EQUITIES/2024/FEB/cm20FEB2024bhav.csv.zip
+            # Legacy Archive Format — try archive first, fallback to Reports API on 403
             url = f"{ARCHIVE_URL}/content/historical/EQUITIES/{date.strftime('%Y')}/{date.strftime('%b').upper()}/cm{date.strftime('%d%b%Y').upper()}bhav.csv.zip"
-            content = self._download_file(url, referer=ALL_REPORTS_URL)
+            try:
+                content = self._download_file(url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                # Fallback: try Reports API for older dates
+                report_name = "CM-UDiFF Common Bhavcopy Final (zip)"
+                archives = [{"name": report_name, "type": "archives", "category": "capital-market", "section": "equities"}]
+                archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+                api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+                try:
+                    content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+                except HTTP403Error:
+                    raise  # Both sources failed with 403
 
         if not content:
             return None
@@ -392,10 +402,20 @@ class NSEMarketDataDownloader:
             url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=derivatives&mode=single"
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
-            # Legacy Archive Format
-            # https://nsearchives.nseindia.com/content/historical/DERIVATIVES/2024/FEB/fo20FEB2024bhav.csv.zip
+            # Legacy Archive Format — try archive first, fallback to Reports API on 403
             url = f"{ARCHIVE_URL}/content/historical/DERIVATIVES/{date.strftime('%Y')}/{date.strftime('%b').upper()}/fo{date.strftime('%d%b%Y').upper()}bhav.csv.zip"
-            content = self._download_file(url, referer=ALL_REPORTS_URL)
+            try:
+                content = self._download_file(url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                # Fallback: try Reports API for older dates
+                report_name = "F&O - UDiFF Common Bhavcopy Final (zip)"
+                archives = [{"name": report_name, "type": "archives", "category": "derivatives", "section": "derivatives"}]
+                archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+                api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=derivatives&mode=single"
+                try:
+                    content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+                except HTTP403Error:
+                    raise  # Both sources failed with 403
 
         if not content:
             return None
@@ -414,7 +434,17 @@ class NSEMarketDataDownloader:
         """Downloads Indices PR report for a given date."""
         # https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR200226.zip
         url = f"{ARCHIVE_URL}/archives/equities/bhavcopy/pr/PR{date.strftime('%d%m%y')}.zip"
-        content = self._download_file(url, referer=ALL_REPORTS_URL)
+        try:
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
+        except HTTP403Error:
+            # Fallback: try Reports API
+            archives = [{"name": "PR Report", "type": "archives", "category": "capital-market", "section": "equities"}]
+            archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+            api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+            try:
+                content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                raise  # Both sources failed with 403
 
         if not content:
             return None
@@ -505,7 +535,17 @@ class NSEMarketDataDownloader:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
             url = f"{ARCHIVE_URL}/content/equities/shortselling_{date.strftime('%d%m%Y')}.csv"
-            content = self._download_file(url, referer=ALL_REPORTS_URL)
+            try:
+                content = self._download_file(url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                # Fallback: try Reports API for older dates
+                archives = [{"name": "Short Selling", "type": "archives", "category": "capital-market", "section": "equities"}]
+                archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+                api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+                try:
+                    content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+                except HTTP403Error:
+                    raise
         if not content:
             return None
         return self._parse_report_content(content, date, self._clean_short_selling_data, "Short Selling")
@@ -519,7 +559,17 @@ class NSEMarketDataDownloader:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
             url = f"{ARCHIVE_URL}/archives/nsccl/volt/CMVOLT_{date.strftime('%d%m%Y')}.CSV"
-            content = self._download_file(url, referer=ALL_REPORTS_URL)
+            try:
+                content = self._download_file(url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                # Fallback: try Reports API for older dates
+                archives = [{"name": "Daily Volatility", "type": "archives", "category": "capital-market", "section": "equities"}]
+                archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+                api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+                try:
+                    content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+                except HTTP403Error:
+                    raise
         if not content:
             return None
         return self._parse_report_content(content, date, self._clean_volatility_data, "Daily Volatility")
@@ -576,7 +626,17 @@ class NSEMarketDataDownloader:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
             url = f"{ARCHIVE_URL}/archives/equities/mto/MTO_{date.strftime('%d%m%Y')}.DAT"
-            content = self._download_file(url, referer=ALL_REPORTS_URL)
+            try:
+                content = self._download_file(url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                # Fallback: try Reports API for older dates
+                archives = [{"name": "Security-wise Delivery Positions", "type": "archives", "category": "capital-market", "section": "equities"}]
+                archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+                api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+                try:
+                    content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+                except HTTP403Error:
+                    raise
         if not content:
             return None
         return self._parse_delivery_content(content, date)
