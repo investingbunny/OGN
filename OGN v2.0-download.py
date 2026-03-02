@@ -47,6 +47,20 @@ DERIVATIVES_RAW = DATA_ROOT / "Derivatives" / "Raw"
 DERIVATIVES_PROCESSED = DATA_ROOT / "Derivatives" / "Processed"
 INDICES_RAW = DATA_ROOT / "Indices" / "Raw"
 INDICES_PROCESSED = DATA_ROOT / "Indices" / "Processed"
+SHORTSELLING_RAW = DATA_ROOT / "ShortSelling" / "Raw"
+SHORTSELLING_PROCESSED = DATA_ROOT / "ShortSelling" / "Processed"
+VOLATILITY_RAW = DATA_ROOT / "Volatility" / "Raw"
+VOLATILITY_PROCESSED = DATA_ROOT / "Volatility" / "Processed"
+MARKETACTIVITY_RAW = DATA_ROOT / "MarketActivity" / "Raw"
+MARKETACTIVITY_PROCESSED = DATA_ROOT / "MarketActivity" / "Processed"
+PRICEBAND_RAW = DATA_ROOT / "PriceBand" / "Raw"
+PRICEBAND_PROCESSED = DATA_ROOT / "PriceBand" / "Processed"
+PERATIO_RAW = DATA_ROOT / "PERatio" / "Raw"
+PERATIO_PROCESSED = DATA_ROOT / "PERatio" / "Processed"
+CORPBONDS_RAW = DATA_ROOT / "CorporateBonds" / "Raw"
+CORPBONDS_PROCESSED = DATA_ROOT / "CorporateBonds" / "Processed"
+DELIVERY_RAW = DATA_ROOT / "DeliveryPositions" / "Raw"
+DELIVERY_PROCESSED = DATA_ROOT / "DeliveryPositions" / "Processed"
 
 # Holiday List (Simplified - ideally fetch from NSE)
 HOLIDAYS = [
@@ -86,7 +100,11 @@ class NSEMarketDataDownloader:
 
     def _create_dirs(self):
         """Ensures all necessary directories exist."""
-        for path in [EQUITY_RAW, EQUITY_PROCESSED, DERIVATIVES_RAW, DERIVATIVES_PROCESSED, INDICES_RAW, INDICES_PROCESSED]:
+        for path in [EQUITY_RAW, EQUITY_PROCESSED, DERIVATIVES_RAW, DERIVATIVES_PROCESSED,
+                     INDICES_RAW, INDICES_PROCESSED, SHORTSELLING_RAW, SHORTSELLING_PROCESSED,
+                     VOLATILITY_RAW, VOLATILITY_PROCESSED, MARKETACTIVITY_RAW, MARKETACTIVITY_PROCESSED,
+                     PRICEBAND_RAW, PRICEBAND_PROCESSED, PERATIO_RAW, PERATIO_PROCESSED,
+                     CORPBONDS_RAW, CORPBONDS_PROCESSED, DELIVERY_RAW, DELIVERY_PROCESSED]:
             path.mkdir(parents=True, exist_ok=True)
 
     def get_trading_days(self, start_date: datetime.date, end_date: datetime.date) -> List[datetime.date]:
@@ -208,6 +226,110 @@ class NSEMarketDataDownloader:
 
         print(f"  All {max_retries} attempts exhausted for {url.split('?')[0]}")
         return None
+
+    # --- Generic report parsing helpers ---
+
+    def _read_csv_with_encoding(self, content_bytes: bytes, **kwargs) -> Optional[pd.DataFrame]:
+        """Reads CSV content trying multiple encodings."""
+        for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+            try:
+                return pd.read_csv(io.BytesIO(content_bytes), encoding=encoding,
+                                   on_bad_lines='skip', skipinitialspace=True, **kwargs)
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+            except Exception:
+                return None
+        return None
+
+    def _parse_report_content(self, content: bytes, date: datetime.date,
+                               clean_fn, label: str) -> Optional[pd.DataFrame]:
+        """Parses downloaded report content (handles both ZIP and plain CSV)."""
+        try:
+            if content[:2] == b'PK':
+                with zipfile.ZipFile(io.BytesIO(content)) as z:
+                    data_files = [n for n in z.namelist()
+                                  if n.lower().endswith(('.csv', '.dat', '.txt'))]
+                    if not data_files:
+                        data_files = z.namelist()
+                    if not data_files:
+                        return None
+                    with z.open(data_files[0]) as f:
+                        raw_bytes = f.read()
+            else:
+                raw_bytes = content
+
+            df = self._read_csv_with_encoding(raw_bytes)
+            if df is None or df.empty:
+                return None
+            return clean_fn(df, date)
+        except zipfile.BadZipFile:
+            df = self._read_csv_with_encoding(content)
+            if df is None or df.empty:
+                return None
+            return clean_fn(df, date)
+        except Exception as e:
+            print(f"Error parsing {label} for {date}: {e}")
+            return None
+
+    def _parse_delivery_content(self, content: bytes, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Parses Delivery Positions content (DAT/CSV/ZIP formats).
+
+        DAT files from NSE are comma or pipe delimited with record type markers
+        and may lack column headers.
+        """
+        try:
+            raw_bytes = content
+            if content[:2] == b'PK':
+                try:
+                    with zipfile.ZipFile(io.BytesIO(content)) as z:
+                        data_files = [n for n in z.namelist()
+                                      if n.lower().endswith(('.csv', '.dat', '.txt'))]
+                        if not data_files:
+                            data_files = z.namelist()
+                        if not data_files:
+                            return None
+                        with z.open(data_files[0]) as f:
+                            raw_bytes = f.read()
+                except zipfile.BadZipFile:
+                    pass  # Try raw_bytes as-is
+
+            # Decode to text
+            text = None
+            for enc in ['utf-8', 'latin-1', 'cp1252']:
+                try:
+                    text = raw_bytes.decode(enc)
+                    break
+                except (UnicodeDecodeError, UnicodeError):
+                    continue
+            if text is None:
+                return None
+
+            # Detect delimiter
+            first_line = text.strip().split('\n')[0] if text.strip() else ''
+            sep = '|' if '|' in first_line else ','
+
+            # Read CSV
+            df = pd.read_csv(io.StringIO(text), sep=sep, on_bad_lines='skip',
+                             skipinitialspace=True)
+            if df is None or df.empty:
+                return None
+
+            # If first column name is numeric, it's a headerless DAT file
+            first_col_name = str(df.columns[0]).strip()
+            if first_col_name.isdigit():
+                df = pd.read_csv(io.StringIO(text), sep=sep, header=None,
+                                 on_bad_lines='skip', skipinitialspace=True)
+                std_cols = ['Record Type', 'Symbol', 'Series', 'Qty Traded',
+                            'Deliverable Qty', 'Delivery Pct']
+                if len(df.columns) <= len(std_cols):
+                    df.columns = std_cols[:len(df.columns)]
+                else:
+                    df.columns = std_cols + [f'Extra_{i}' for i in range(len(df.columns) - len(std_cols))]
+
+            return self._clean_delivery_data(df, date)
+        except Exception as e:
+            print(f"Error parsing Delivery Positions for {date}: {e}")
+            return None
 
     def download_cm_bhavcopy(self, date: datetime.date) -> Optional[pd.DataFrame]:
         """Downloads Equity (Capital Market) Bhavcopy for a given date."""
@@ -349,6 +471,93 @@ class NSEMarketDataDownloader:
             print(f"Error parsing Indices PR for {date}: {e}")
             return None
 
+    # --- New Report Downloads ---
+
+    def download_short_selling(self, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads Short Selling report for a given date."""
+        if date >= UDIFF_START_DATE:
+            archives = [{"name": "Short Selling", "type": "archives", "category": "capital-market", "section": "equities"}]
+            archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+            url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
+        else:
+            url = f"{ARCHIVE_URL}/content/equities/shortselling_{date.strftime('%d%m%Y')}.csv"
+            content = self._download_file(url)
+        if not content:
+            return None
+        return self._parse_report_content(content, date, self._clean_short_selling_data, "Short Selling")
+
+    def download_daily_volatility(self, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads Daily Volatility report for a given date."""
+        if date >= UDIFF_START_DATE:
+            archives = [{"name": "Daily Volatility", "type": "archives", "category": "capital-market", "section": "equities"}]
+            archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+            url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
+        else:
+            url = f"{ARCHIVE_URL}/archives/nsccl/volt/CMVOLT_{date.strftime('%d%m%Y')}.CSV"
+            content = self._download_file(url)
+        if not content:
+            return None
+        return self._parse_report_content(content, date, self._clean_volatility_data, "Daily Volatility")
+
+    def download_market_activity(self, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads Market Activity Report for a given date."""
+        archives = [{"name": "Market Activity Report", "type": "archives", "category": "capital-market", "section": "equities"}]
+        archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+        url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+        content = self._download_file(url, referer=ALL_REPORTS_URL)
+        if not content:
+            return None
+        return self._parse_report_content(content, date, self._clean_market_activity_data, "Market Activity")
+
+    def download_price_band(self, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads Price Band changes from next trade date report."""
+        archives = [{"name": "Price Band changes from next trade date", "type": "archives", "category": "capital-market", "section": "equities"}]
+        archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+        url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+        content = self._download_file(url, referer=ALL_REPORTS_URL)
+        if not content:
+            return None
+        return self._parse_report_content(content, date, self._clean_price_band_data, "Price Band")
+
+    def download_pe_ratio(self, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads PE Ratio report for a given date."""
+        archives = [{"name": "PE Ratio", "type": "archives", "category": "capital-market", "section": "equities"}]
+        archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+        url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+        content = self._download_file(url, referer=ALL_REPORTS_URL)
+        if not content:
+            return None
+        return self._parse_report_content(content, date, self._clean_pe_ratio_data, "PE Ratio")
+
+    def download_corp_bonds(self, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads Corporate Bonds Traded Report for a given date."""
+        archives = [{"name": "Corporate Bonds Traded Report", "type": "archives", "category": "debt", "section": "debt"}]
+        archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+        url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=debt&mode=single"
+        content = self._download_file(url, referer=ALL_REPORTS_URL)
+        if not content:
+            return None
+        return self._parse_report_content(content, date, self._clean_corp_bonds_data, "Corporate Bonds")
+
+    def download_delivery_positions(self, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads Security-wise Delivery Positions for a given date.
+
+        Legacy format is a DAT file (comma or pipe delimited with record type markers).
+        """
+        if date >= UDIFF_START_DATE:
+            archives = [{"name": "Security-wise Delivery Positions", "type": "archives", "category": "capital-market", "section": "equities"}]
+            archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+            url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
+        else:
+            url = f"{ARCHIVE_URL}/archives/equities/mto/MTO_{date.strftime('%d%m%Y')}.DAT"
+            content = self._download_file(url)
+        if not content:
+            return None
+        return self._parse_delivery_content(content, date)
+
     def _clean_cm_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
         """Standardizes Equity data."""
         df.columns = [c.strip() for c in df.columns]
@@ -476,6 +685,188 @@ class NSEMarketDataDownloader:
         
         return df
 
+    # --- Clean functions for new report types ---
+
+    def _clean_short_selling_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
+        """Standardizes Short Selling data."""
+        df.columns = [c.strip() for c in df.columns]
+        mapping = {
+            'Name of the Security': 'Symbol', 'SYMBOL': 'Symbol', 'Symbol': 'Symbol',
+            'NAME OF THE SECURITY': 'Symbol', 'Security Name': 'Symbol',
+            'QTY Short Sold': 'Qty Short Sold', 'QTY OF SHORT SELL': 'Qty Short Sold',
+            'Quantity Short Sold': 'Qty Short Sold', 'SHORT_SELL_QTY': 'Qty Short Sold',
+            'QTY Short Bought Back': 'Qty Short Buy', 'QTY OF SHORT BUY BACK': 'Qty Short Buy',
+            'Quantity of Short Buying': 'Qty Short Buy', 'SHORT_BUY_QTY': 'Qty Short Buy',
+            'DATE': 'Date', 'Date': 'Date',
+        }
+        df = df.rename(columns=mapping)
+        if 'Date' not in df.columns:
+            df['Date'] = date
+        else:
+            df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
+        if 'Symbol' in df.columns:
+            df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        for col in ['Qty Short Sold', 'Qty Short Buy']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        return df
+
+    def _clean_volatility_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
+        """Standardizes Daily Volatility data."""
+        df.columns = [c.strip() for c in df.columns]
+        mapping = {
+            'Date': 'Date', 'DATE': 'Date', 'TIMESTAMP': 'Date',
+            'Symbol': 'Symbol', 'SYMBOL': 'Symbol', 'TckrSymb': 'Symbol',
+            'Underlying': 'Symbol', 'UNDERLYING': 'Symbol',
+            '%Change': 'Pct Change', 'Pct Change': 'Pct Change',
+            'Daily Volatility': 'Daily Volatility', 'DAILY_VLTY': 'Daily Volatility',
+            'Annualised Volatility': 'Annl Volatility', 'ANNL_VLTY': 'Annl Volatility',
+            'Close Price': 'Close', 'CLOSE': 'Close', 'ClsPric': 'Close',
+            'Prev Close': 'Prev Close', 'PREV_CL': 'Prev Close',
+        }
+        df = df.rename(columns=mapping)
+        if 'Date' not in df.columns:
+            df['Date'] = date
+        else:
+            df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
+        if 'Symbol' in df.columns:
+            df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        for col in ['Daily Volatility', 'Annl Volatility', 'Pct Change', 'Close', 'Prev Close']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        return df
+
+    def _clean_market_activity_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
+        """Standardizes Market Activity Report data.
+
+        This is market-wide data. If no symbol/category column exists,
+        stored under Symbol='MARKET'.
+        """
+        df.columns = [c.strip() for c in df.columns]
+        mapping = {
+            'Category': 'Symbol', 'CATEGORY': 'Symbol', 'Segment': 'Symbol',
+            'SEGMENT': 'Symbol', 'Market Type': 'Symbol', 'MARKET_TYPE': 'Symbol',
+        }
+        df = df.rename(columns=mapping)
+        if 'Symbol' not in df.columns:
+            df['Symbol'] = 'MARKET'
+        else:
+            df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        df['Date'] = date
+        return df
+
+    def _clean_price_band_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
+        """Standardizes Price Band changes data."""
+        df.columns = [c.strip() for c in df.columns]
+        mapping = {
+            'Symbol': 'Symbol', 'SYMBOL': 'Symbol', 'TckrSymb': 'Symbol',
+            'Date': 'Date', 'DATE': 'Date',
+            'Series': 'Series', 'SERIES': 'Series', 'SctySrs': 'Series',
+            'Old Band': 'Old Band', 'FROM_BAND': 'Old Band',
+            'New Band': 'New Band', 'TO_BAND': 'New Band',
+            'Applicable From': 'Effective Date', 'EFF_DATE': 'Effective Date',
+        }
+        df = df.rename(columns=mapping)
+        if 'Date' not in df.columns:
+            df['Date'] = date
+        else:
+            df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
+        if 'Symbol' in df.columns:
+            df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        return df
+
+    def _clean_pe_ratio_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
+        """Standardizes PE Ratio data."""
+        df.columns = [c.strip() for c in df.columns]
+        mapping = {
+            'Index Name': 'Symbol', 'INDEX_NAME': 'Symbol', 'Symbol': 'Symbol',
+            'INDEX NAME': 'Symbol', 'Index': 'Symbol',
+            'Date': 'Date', 'DATE': 'Date',
+            'P/E': 'PE', 'P/B': 'PB', 'Div Yield': 'DY',
+            'PE': 'PE', 'PB': 'PB', 'DY': 'DY',
+        }
+        df = df.rename(columns=mapping)
+        if 'Date' not in df.columns:
+            df['Date'] = date
+        else:
+            df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
+        if 'Symbol' in df.columns:
+            df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        for col in ['PE', 'PB', 'DY']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        return df
+
+    def _clean_corp_bonds_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
+        """Standardizes Corporate Bonds Traded Report data."""
+        df.columns = [c.strip() for c in df.columns]
+        mapping = {
+            'ISIN': 'Symbol', 'Isin': 'Symbol', 'ISIN No': 'Symbol', 'ISIN No.': 'Symbol',
+            'Security': 'Security Name', 'SECURITY': 'Security Name',
+            'Security Description': 'Security Name',
+            'Date': 'Date', 'DATE': 'Date', 'Trade Date': 'Date', 'TRADE_DATE': 'Date',
+            'TRADED_VALUE': 'Traded Value', 'Traded Value': 'Traded Value',
+            'TRADED_QTY': 'Traded Qty', 'Traded Quantity': 'Traded Qty',
+            'No. of Trades': 'No of Trades', 'NUM_TRADES': 'No of Trades',
+        }
+        df = df.rename(columns=mapping)
+        if 'Date' not in df.columns:
+            df['Date'] = date
+        else:
+            df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
+        if 'Symbol' in df.columns:
+            df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        for col in ['Traded Value', 'Traded Qty', 'No of Trades']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        return df
+
+    def _clean_delivery_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
+        """Standardizes Security-wise Delivery Positions data.
+
+        DAT format has: Record Type, Symbol, Series, Qty Traded,
+        Deliverable Qty, % of Deliverable to Traded.
+        Record type 20 = data rows.
+        """
+        df.columns = [c.strip() for c in df.columns]
+
+        # Filter for data rows if Record Type column exists
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'record' in col_lower or col_lower in ('rec type', 'rec_type', 'rectype'):
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                df = df[df[col] == 20].copy()
+                df = df.drop(columns=[col])
+                break
+
+        mapping = {
+            'SYMBOL': 'Symbol', 'Symbol': 'Symbol', 'NAME OF SECURITY': 'Symbol',
+            'TckrSymb': 'Symbol', 'NAME': 'Symbol',
+            'SERIES': 'Series', 'Series': 'Series', 'SctySrs': 'Series',
+            'QUANTITY TRADED': 'Qty Traded', 'QTY_TRADED': 'Qty Traded',
+            'Qty Traded': 'Qty Traded', 'TtlTradgVol': 'Qty Traded',
+            'DELIVERABLE QTY': 'Deliverable Qty', 'DELIVERABLE_QTY': 'Deliverable Qty',
+            'Deliverable Qty(Demat)': 'Deliverable Qty', 'DlvrblQty': 'Deliverable Qty',
+            'Deliverable Qty': 'Deliverable Qty',
+            '% OF DELIVERABLE QTY TO TRADED QTY': 'Delivery Pct',
+            'DELV_PER': 'Delivery Pct', 'DELV_PERC': 'Delivery Pct',
+            'Delivery Pct': 'Delivery Pct', '% Dly Qt to Traded Qty': 'Delivery Pct',
+            'PctgDlvryQty': 'Delivery Pct',
+            'DATE': 'Date', 'Date': 'Date', 'TIMESTAMP': 'Date',
+        }
+        df = df.rename(columns=mapping)
+
+        if 'Date' not in df.columns:
+            df['Date'] = date
+        else:
+            df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
+        if 'Symbol' in df.columns:
+            df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        for col in ['Qty Traded', 'Deliverable Qty', 'Delivery Pct']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        return df
+
     def update_processed_data(self, df: pd.DataFrame, target_dir: Path, group_col: str = 'Symbol'):
         """Appends new data to per-symbol Parquet files."""
         if df is None or df.empty:
@@ -591,8 +982,9 @@ class NSEMarketDataDownloader:
         if not files:
             return DEFAULT_START_DATE
         
-        # Check a few major files for efficiency
-        major_files = [processed_dir / "NIFTY.parquet", processed_dir / "SBIN.parquet", processed_dir / "RELIANCE.parquet"]
+        # Check a few major/well-known files for efficiency
+        major_files = [processed_dir / "NIFTY.parquet", processed_dir / "SBIN.parquet",
+                       processed_dir / "RELIANCE.parquet", processed_dir / "MARKET.parquet"]
         last_dates = []
         for f in major_files:
             if f.exists():
@@ -602,6 +994,17 @@ class NSEMarketDataDownloader:
                 except:
                     pass
         
+        if last_dates:
+            return max(last_dates)
+
+        # Fallback: sample a few available files
+        for f in files[:5]:
+            try:
+                df = pd.read_parquet(f, engine='pyarrow', columns=['Date'])
+                last_dates.append(df['Date'].max())
+            except:
+                pass
+
         if last_dates:
             return max(last_dates)
 
@@ -624,6 +1027,34 @@ class NSEMarketDataDownloader:
     def _download_day_idx(self, day: datetime.date) -> tuple:
         """Download Indices report for one day. Returns (day, df_or_None)."""
         df = self.download_indices_report(day)
+        return (day, df)
+
+    def _download_day_ss(self, day: datetime.date) -> tuple:
+        df = self.download_short_selling(day)
+        return (day, df)
+
+    def _download_day_vol(self, day: datetime.date) -> tuple:
+        df = self.download_daily_volatility(day)
+        return (day, df)
+
+    def _download_day_ma(self, day: datetime.date) -> tuple:
+        df = self.download_market_activity(day)
+        return (day, df)
+
+    def _download_day_pb(self, day: datetime.date) -> tuple:
+        df = self.download_price_band(day)
+        return (day, df)
+
+    def _download_day_pe(self, day: datetime.date) -> tuple:
+        df = self.download_pe_ratio(day)
+        return (day, df)
+
+    def _download_day_cb(self, day: datetime.date) -> tuple:
+        df = self.download_corp_bonds(day)
+        return (day, df)
+
+    def _download_day_del(self, day: datetime.date) -> tuple:
+        df = self.download_delivery_positions(day)
         return (day, df)
 
     def _concurrent_download(self, days, download_fn, raw_dir, raw_prefix, label):
@@ -753,6 +1184,62 @@ class NSEMarketDataDownloader:
         self._concurrent_download(idx_days, self._download_day_idx, INDICES_RAW, "idx", "Indices")
         self.merge_raw_to_processed(INDICES_RAW, "idx", INDICES_PROCESSED, "Indices")
         print(f"  Indices update done.", flush=True)
+
+        # 4. Short Selling
+        last_ss_date = self.get_last_date(SHORTSELLING_PROCESSED)
+        print(f"Last Short Selling Date: {last_ss_date}")
+        ss_days = self.get_trading_days(last_ss_date + datetime.timedelta(days=1), datetime.date.today())
+        self._concurrent_download(ss_days, self._download_day_ss, SHORTSELLING_RAW, "ss", "Short Selling")
+        self.merge_raw_to_processed(SHORTSELLING_RAW, "ss", SHORTSELLING_PROCESSED, "Short Selling")
+        print(f"  Short Selling update done.", flush=True)
+
+        # 5. Daily Volatility
+        last_vol_date = self.get_last_date(VOLATILITY_PROCESSED)
+        print(f"Last Volatility Date: {last_vol_date}")
+        vol_days = self.get_trading_days(last_vol_date + datetime.timedelta(days=1), datetime.date.today())
+        self._concurrent_download(vol_days, self._download_day_vol, VOLATILITY_RAW, "vol", "Volatility")
+        self.merge_raw_to_processed(VOLATILITY_RAW, "vol", VOLATILITY_PROCESSED, "Volatility")
+        print(f"  Volatility update done.", flush=True)
+
+        # 6. Market Activity Report
+        last_ma_date = self.get_last_date(MARKETACTIVITY_PROCESSED)
+        print(f"Last Market Activity Date: {last_ma_date}")
+        ma_days = self.get_trading_days(last_ma_date + datetime.timedelta(days=1), datetime.date.today())
+        self._concurrent_download(ma_days, self._download_day_ma, MARKETACTIVITY_RAW, "ma", "Market Activity")
+        self.merge_raw_to_processed(MARKETACTIVITY_RAW, "ma", MARKETACTIVITY_PROCESSED, "Market Activity")
+        print(f"  Market Activity update done.", flush=True)
+
+        # 7. Price Band Changes
+        last_pb_date = self.get_last_date(PRICEBAND_PROCESSED)
+        print(f"Last Price Band Date: {last_pb_date}")
+        pb_days = self.get_trading_days(last_pb_date + datetime.timedelta(days=1), datetime.date.today())
+        self._concurrent_download(pb_days, self._download_day_pb, PRICEBAND_RAW, "pb", "Price Band")
+        self.merge_raw_to_processed(PRICEBAND_RAW, "pb", PRICEBAND_PROCESSED, "Price Band")
+        print(f"  Price Band update done.", flush=True)
+
+        # 8. PE Ratio
+        last_pe_date = self.get_last_date(PERATIO_PROCESSED)
+        print(f"Last PE Ratio Date: {last_pe_date}")
+        pe_days = self.get_trading_days(last_pe_date + datetime.timedelta(days=1), datetime.date.today())
+        self._concurrent_download(pe_days, self._download_day_pe, PERATIO_RAW, "pe", "PE Ratio")
+        self.merge_raw_to_processed(PERATIO_RAW, "pe", PERATIO_PROCESSED, "PE Ratio")
+        print(f"  PE Ratio update done.", flush=True)
+
+        # 9. Corporate Bonds
+        last_cb_date = self.get_last_date(CORPBONDS_PROCESSED)
+        print(f"Last Corporate Bonds Date: {last_cb_date}")
+        cb_days = self.get_trading_days(last_cb_date + datetime.timedelta(days=1), datetime.date.today())
+        self._concurrent_download(cb_days, self._download_day_cb, CORPBONDS_RAW, "cb", "Corporate Bonds")
+        self.merge_raw_to_processed(CORPBONDS_RAW, "cb", CORPBONDS_PROCESSED, "Corporate Bonds")
+        print(f"  Corporate Bonds update done.", flush=True)
+
+        # 10. Security-wise Delivery Positions
+        last_del_date = self.get_last_date(DELIVERY_PROCESSED)
+        print(f"Last Delivery Positions Date: {last_del_date}")
+        del_days = self.get_trading_days(last_del_date + datetime.timedelta(days=1), datetime.date.today())
+        self._concurrent_download(del_days, self._download_day_del, DELIVERY_RAW, "del", "Delivery Positions")
+        self.merge_raw_to_processed(DELIVERY_RAW, "del", DELIVERY_PROCESSED, "Delivery Positions")
+        print(f"  Delivery Positions update done.", flush=True)
 
         elapsed = time.time() - t0
         print(f"Update Complete. Total time: {elapsed:.1f}s")
