@@ -12,6 +12,7 @@ Data is stored in Parquet format for optimal space and performance.
 import os
 import io
 import time
+import random
 import zipfile
 import datetime
 import threading
@@ -36,6 +37,16 @@ HEADERS = {
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
 }
+
+# Rotate User-Agent to avoid detection as a bot
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+]
 
 UDIFF_START_DATE = datetime.date(2024, 7, 8)
 DEFAULT_START_DATE = datetime.date(2010, 1, 1)
@@ -135,6 +146,8 @@ class NSEMarketDataDownloader:
         headers = {}
         if referer:
             headers["Referer"] = referer
+        # Rotate User-Agent to reduce chance of bot detection
+        headers["User-Agent"] = random.choice(_USER_AGENTS)
 
         max_retries = 5
         base_delay = 1.0
@@ -351,10 +364,20 @@ class NSEMarketDataDownloader:
             url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
-            # Legacy Archive Format
-            # https://nsearchives.nseindia.com/content/historical/EQUITIES/2024/FEB/cm20FEB2024bhav.csv.zip
+            # Legacy Archive Format — try archive first, fallback to Reports API on 403
             url = f"{ARCHIVE_URL}/content/historical/EQUITIES/{date.strftime('%Y')}/{date.strftime('%b').upper()}/cm{date.strftime('%d%b%Y').upper()}bhav.csv.zip"
-            content = self._download_file(url)
+            try:
+                content = self._download_file(url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                # Fallback: try Reports API for older dates
+                report_name = "CM-UDiFF Common Bhavcopy Final (zip)"
+                archives = [{"name": report_name, "type": "archives", "category": "capital-market", "section": "equities"}]
+                archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+                api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+                try:
+                    content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+                except HTTP403Error:
+                    raise  # Both sources failed with 403
 
         if not content:
             return None
@@ -379,10 +402,20 @@ class NSEMarketDataDownloader:
             url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=derivatives&mode=single"
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
-            # Legacy Archive Format
-            # https://nsearchives.nseindia.com/content/historical/DERIVATIVES/2024/FEB/fo20FEB2024bhav.csv.zip
+            # Legacy Archive Format — try archive first, fallback to Reports API on 403
             url = f"{ARCHIVE_URL}/content/historical/DERIVATIVES/{date.strftime('%Y')}/{date.strftime('%b').upper()}/fo{date.strftime('%d%b%Y').upper()}bhav.csv.zip"
-            content = self._download_file(url)
+            try:
+                content = self._download_file(url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                # Fallback: try Reports API for older dates
+                report_name = "F&O - UDiFF Common Bhavcopy Final (zip)"
+                archives = [{"name": report_name, "type": "archives", "category": "derivatives", "section": "derivatives"}]
+                archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+                api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=derivatives&mode=single"
+                try:
+                    content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+                except HTTP403Error:
+                    raise  # Both sources failed with 403
 
         if not content:
             return None
@@ -401,7 +434,17 @@ class NSEMarketDataDownloader:
         """Downloads Indices PR report for a given date."""
         # https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR200226.zip
         url = f"{ARCHIVE_URL}/archives/equities/bhavcopy/pr/PR{date.strftime('%d%m%y')}.zip"
-        content = self._download_file(url)
+        try:
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
+        except HTTP403Error:
+            # Fallback: try Reports API
+            archives = [{"name": "PR Report", "type": "archives", "category": "capital-market", "section": "equities"}]
+            archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+            api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+            try:
+                content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                raise  # Both sources failed with 403
 
         if not content:
             return None
@@ -492,7 +535,17 @@ class NSEMarketDataDownloader:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
             url = f"{ARCHIVE_URL}/content/equities/shortselling_{date.strftime('%d%m%Y')}.csv"
-            content = self._download_file(url)
+            try:
+                content = self._download_file(url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                # Fallback: try Reports API for older dates
+                archives = [{"name": "Short Selling", "type": "archives", "category": "capital-market", "section": "equities"}]
+                archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+                api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+                try:
+                    content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+                except HTTP403Error:
+                    raise
         if not content:
             return None
         return self._parse_report_content(content, date, self._clean_short_selling_data, "Short Selling")
@@ -506,7 +559,17 @@ class NSEMarketDataDownloader:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
             url = f"{ARCHIVE_URL}/archives/nsccl/volt/CMVOLT_{date.strftime('%d%m%Y')}.CSV"
-            content = self._download_file(url)
+            try:
+                content = self._download_file(url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                # Fallback: try Reports API for older dates
+                archives = [{"name": "Daily Volatility", "type": "archives", "category": "capital-market", "section": "equities"}]
+                archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+                api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+                try:
+                    content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+                except HTTP403Error:
+                    raise
         if not content:
             return None
         return self._parse_report_content(content, date, self._clean_volatility_data, "Daily Volatility")
@@ -563,7 +626,17 @@ class NSEMarketDataDownloader:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
             url = f"{ARCHIVE_URL}/archives/equities/mto/MTO_{date.strftime('%d%m%Y')}.DAT"
-            content = self._download_file(url)
+            try:
+                content = self._download_file(url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                # Fallback: try Reports API for older dates
+                archives = [{"name": "Security-wise Delivery Positions", "type": "archives", "category": "capital-market", "section": "equities"}]
+                archives_str = urllib.parse.quote(str(archives).replace("'", '"'))
+                api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+                try:
+                    content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+                except HTTP403Error:
+                    raise
         if not content:
             return None
         return self._parse_delivery_content(content, date)
@@ -1071,8 +1144,8 @@ class NSEMarketDataDownloader:
         """Downloads data for multiple days, newest first, skipping already-downloaded days.
 
         Downloads in reverse chronological order (newest first) in batches.
-        If 10 consecutive days return HTTP 403, assumes older data is not available
-        and stops going further back.
+        If 5 consecutive days return HTTP 403, assumes older data is not available
+        and stops going further back for this category.
         """
         if not days:
             print(f"  No new {label} days to download.", flush=True)
@@ -1103,7 +1176,7 @@ class NSEMarketDataDownloader:
         success_count = 0
         failed_days = []
         consecutive_403 = 0
-        MAX_CONSECUTIVE_403 = 10
+        MAX_CONSECUTIVE_403 = 5
         stopped_early = False
         last_progress_time = time.time()
         print(f"  Downloading {total} days of {label} data (newest first, {self.MAX_WORKERS} workers)...", flush=True)
@@ -1178,96 +1251,40 @@ class NSEMarketDataDownloader:
         print(msg, flush=True)
 
     def run_incremental_update(self):
-        """Main loop to download and update data incrementally.
-        
-        Performance optimizations vs original:
-        - Concurrent downloads with ThreadPoolExecutor (4 workers)
-        - Batch parquet merges: reads/writes each symbol file only ONCE instead
-          of once per trading day, reducing I/O from O(days×symbols) to O(symbols)
-        - Reduced inter-request sleep from 1s to 0.3s stagger
+        """Main loop to download and update all data categories.
+
+        Downloads from today backwards to DEFAULT_START_DATE (2010).
+        Already-downloaded days are automatically skipped (raw file on disk).
+        If 5 consecutive 403 errors are hit going backwards, that category
+        stops and the next category begins.
         """
         print("Starting Incremental Update...")
         t0 = time.time()
 
-        # 1. Equity — Download then merge from raw files
-        last_cm_date = self.get_last_date(EQUITY_PROCESSED)
-        print(f"Last Equity Date: {last_cm_date}")
-        cm_days = self.get_trading_days(last_cm_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(cm_days, self._download_day_cm, EQUITY_RAW, "cm", "Equity")
-        self.merge_raw_to_processed(EQUITY_RAW, "cm", EQUITY_PROCESSED, "Equity")
-        print(f"  Equity update done.", flush=True)
+        # All categories download from DEFAULT_START_DATE to today (newest first).
+        # Already-downloaded days are skipped automatically (raw file exists on disk).
+        # If 5 consecutive 403 errors are hit working backwards, that category stops.
+        today = datetime.date.today()
+        all_days = self.get_trading_days(DEFAULT_START_DATE, today)
 
-        # 2. Derivatives — Download then merge from raw files
-        last_fo_date = self.get_last_date(DERIVATIVES_PROCESSED)
-        print(f"Last Derivatives Date: {last_fo_date}")
-        fo_days = self.get_trading_days(last_fo_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(fo_days, self._download_day_fo, DERIVATIVES_RAW, "fo", "Derivatives")
-        self.merge_raw_to_processed(DERIVATIVES_RAW, "fo", DERIVATIVES_PROCESSED, "Derivatives")
-        print(f"  Derivatives update done.", flush=True)
+        categories = [
+            ("Equity",             self._download_day_cm,  EQUITY_RAW,        "cm",  EQUITY_PROCESSED),
+            ("Derivatives",        self._download_day_fo,  DERIVATIVES_RAW,   "fo",  DERIVATIVES_PROCESSED),
+            ("Indices",            self._download_day_idx, INDICES_RAW,       "idx", INDICES_PROCESSED),
+            ("Short Selling",      self._download_day_ss,  SHORTSELLING_RAW,  "ss",  SHORTSELLING_PROCESSED),
+            ("Volatility",         self._download_day_vol, VOLATILITY_RAW,    "vol", VOLATILITY_PROCESSED),
+            ("Market Activity",    self._download_day_ma,  MARKETACTIVITY_RAW,"ma",  MARKETACTIVITY_PROCESSED),
+            ("Price Band",         self._download_day_pb,  PRICEBAND_RAW,     "pb",  PRICEBAND_PROCESSED),
+            ("PE Ratio",           self._download_day_pe,  PERATIO_RAW,       "pe",  PERATIO_PROCESSED),
+            ("Corporate Bonds",    self._download_day_cb,  CORPBONDS_RAW,     "cb",  CORPBONDS_PROCESSED),
+            ("Delivery Positions", self._download_day_del, DELIVERY_RAW,      "del", DELIVERY_PROCESSED),
+        ]
 
-        # 3. Indices — Download then merge from raw files
-        last_idx_date = self.get_last_date(INDICES_PROCESSED)
-        print(f"Last Indices Date: {last_idx_date}")
-        idx_days = self.get_trading_days(last_idx_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(idx_days, self._download_day_idx, INDICES_RAW, "idx", "Indices")
-        self.merge_raw_to_processed(INDICES_RAW, "idx", INDICES_PROCESSED, "Indices")
-        print(f"  Indices update done.", flush=True)
-
-        # 4. Short Selling
-        last_ss_date = self.get_last_date(SHORTSELLING_PROCESSED)
-        print(f"Last Short Selling Date: {last_ss_date}")
-        ss_days = self.get_trading_days(last_ss_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(ss_days, self._download_day_ss, SHORTSELLING_RAW, "ss", "Short Selling")
-        self.merge_raw_to_processed(SHORTSELLING_RAW, "ss", SHORTSELLING_PROCESSED, "Short Selling")
-        print(f"  Short Selling update done.", flush=True)
-
-        # 5. Daily Volatility
-        last_vol_date = self.get_last_date(VOLATILITY_PROCESSED)
-        print(f"Last Volatility Date: {last_vol_date}")
-        vol_days = self.get_trading_days(last_vol_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(vol_days, self._download_day_vol, VOLATILITY_RAW, "vol", "Volatility")
-        self.merge_raw_to_processed(VOLATILITY_RAW, "vol", VOLATILITY_PROCESSED, "Volatility")
-        print(f"  Volatility update done.", flush=True)
-
-        # 6. Market Activity Report
-        last_ma_date = self.get_last_date(MARKETACTIVITY_PROCESSED)
-        print(f"Last Market Activity Date: {last_ma_date}")
-        ma_days = self.get_trading_days(last_ma_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(ma_days, self._download_day_ma, MARKETACTIVITY_RAW, "ma", "Market Activity")
-        self.merge_raw_to_processed(MARKETACTIVITY_RAW, "ma", MARKETACTIVITY_PROCESSED, "Market Activity")
-        print(f"  Market Activity update done.", flush=True)
-
-        # 7. Price Band Changes
-        last_pb_date = self.get_last_date(PRICEBAND_PROCESSED)
-        print(f"Last Price Band Date: {last_pb_date}")
-        pb_days = self.get_trading_days(last_pb_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(pb_days, self._download_day_pb, PRICEBAND_RAW, "pb", "Price Band")
-        self.merge_raw_to_processed(PRICEBAND_RAW, "pb", PRICEBAND_PROCESSED, "Price Band")
-        print(f"  Price Band update done.", flush=True)
-
-        # 8. PE Ratio
-        last_pe_date = self.get_last_date(PERATIO_PROCESSED)
-        print(f"Last PE Ratio Date: {last_pe_date}")
-        pe_days = self.get_trading_days(last_pe_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(pe_days, self._download_day_pe, PERATIO_RAW, "pe", "PE Ratio")
-        self.merge_raw_to_processed(PERATIO_RAW, "pe", PERATIO_PROCESSED, "PE Ratio")
-        print(f"  PE Ratio update done.", flush=True)
-
-        # 9. Corporate Bonds
-        last_cb_date = self.get_last_date(CORPBONDS_PROCESSED)
-        print(f"Last Corporate Bonds Date: {last_cb_date}")
-        cb_days = self.get_trading_days(last_cb_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(cb_days, self._download_day_cb, CORPBONDS_RAW, "cb", "Corporate Bonds")
-        self.merge_raw_to_processed(CORPBONDS_RAW, "cb", CORPBONDS_PROCESSED, "Corporate Bonds")
-        print(f"  Corporate Bonds update done.", flush=True)
-
-        # 10. Security-wise Delivery Positions
-        last_del_date = self.get_last_date(DELIVERY_PROCESSED)
-        print(f"Last Delivery Positions Date: {last_del_date}")
-        del_days = self.get_trading_days(last_del_date + datetime.timedelta(days=1), datetime.date.today())
-        self._concurrent_download(del_days, self._download_day_del, DELIVERY_RAW, "del", "Delivery Positions")
-        self.merge_raw_to_processed(DELIVERY_RAW, "del", DELIVERY_PROCESSED, "Delivery Positions")
-        print(f"  Delivery Positions update done.", flush=True)
+        for label, download_fn, raw_dir, prefix, processed_dir in categories:
+            print(f"\n--- {label} ---", flush=True)
+            self._concurrent_download(all_days, download_fn, raw_dir, prefix, label)
+            self.merge_raw_to_processed(raw_dir, prefix, processed_dir, label)
+            print(f"  {label} update done.", flush=True)
 
         elapsed = time.time() - t0
         print(f"Update Complete. Total time: {elapsed:.1f}s")
