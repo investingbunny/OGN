@@ -899,8 +899,8 @@ class NSEMarketDataDownloader:
             'Symbol': 'Symbol', 'SYMBOL': 'Symbol', 'TckrSymb': 'Symbol',
             'Date': 'Date', 'DATE': 'Date',
             'Series': 'Series', 'SERIES': 'Series', 'SctySrs': 'Series',
-            'Old Band': 'Old Band', 'FROM_BAND': 'Old Band',
-            'New Band': 'New Band', 'TO_BAND': 'New Band',
+            'Old Band': 'Old Band', 'FROM_BAND': 'Old Band', 'From': 'Old Band',
+            'New Band': 'New Band', 'TO_BAND': 'New Band', 'To': 'New Band',
             'Applicable From': 'Effective Date', 'EFF_DATE': 'Effective Date',
         }
         df = df.rename(columns=mapping)
@@ -912,6 +912,10 @@ class NSEMarketDataDownloader:
             df['Symbol'] = df['Symbol'].astype(str).str.strip()
         else:
             df['Symbol'] = 'UNKNOWN'
+        # Cast band columns to string to avoid mixed-type issues
+        for col in ['Old Band', 'New Band']:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.strip()
         return df
 
     def _clean_pe_ratio_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
@@ -1109,6 +1113,10 @@ class NSEMarketDataDownloader:
                 else:
                     merged = group
                 merged = merged.sort_values('Date')
+                # Ensure no mixed-type object columns that would break parquet
+                for col in merged.columns:
+                    if merged[col].dtype == object and col != 'Date':
+                        merged[col] = merged[col].astype(str)
                 merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
                 del merged
 
