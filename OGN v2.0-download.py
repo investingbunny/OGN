@@ -393,12 +393,19 @@ class NSEMarketDataDownloader:
     def download_cm_bhavcopy(self, date: datetime.date) -> Optional[pd.DataFrame]:
         """Downloads Equity (Capital Market) Bhavcopy for a given date."""
         if date >= UDIFF_START_DATE:
-            # UDiFF Format
-            report_name = "CM-UDiFF Common Bhavcopy Final (zip)"
-            archives = [{"name": report_name, "type": "archives", "category": "capital-market", "section": "equities"}]
-            archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
-            url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
-            content = self._download_file(url, referer=ALL_REPORTS_URL)
+            # UDiFF Format — try archive first, fallback to Reports API
+            url = f"{ARCHIVE_URL}/content/cm/BhavCopy_NSE_CM_0_0_0_{date.strftime('%Y%m%d')}_F_0000.csv.zip"
+            try:
+                content = self._download_file(url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                content = None
+
+            if not content:
+                report_name = "CM-UDiFF Common Bhavcopy Final (zip)"
+                archives = [{"name": report_name, "type": "archives", "category": "capital-market", "section": "equities"}]
+                archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
+                api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+                content = self._download_file(api_url, referer=ALL_REPORTS_URL)
         else:
             # Legacy Archive Format — try archive first, fallback to Reports API on 403
             url = f"{ARCHIVE_URL}/content/historical/EQUITIES/{date.strftime('%Y')}/{date.strftime('%b').upper()}/cm{date.strftime('%d%b%Y').upper()}bhav.csv.zip"
@@ -431,12 +438,19 @@ class NSEMarketDataDownloader:
     def download_fo_bhavcopy(self, date: datetime.date) -> Optional[pd.DataFrame]:
         """Downloads Derivatives (F&O) Bhavcopy for a given date."""
         if date >= UDIFF_START_DATE:
-            # UDiFF Format
-            report_name = "F&O - UDiFF Common Bhavcopy Final (zip)"
-            archives = [{"name": report_name, "type": "archives", "category": "derivatives", "section": "derivatives"}]
-            archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
-            url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=derivatives&mode=single"
-            content = self._download_file(url, referer=ALL_REPORTS_URL)
+            # UDiFF Format — try archive first, fallback to Reports API
+            url = f"{ARCHIVE_URL}/content/fo/BhavCopy_NSE_FO_0_0_0_{date.strftime('%Y%m%d')}_F_0000.csv.zip"
+            try:
+                content = self._download_file(url, referer=ALL_REPORTS_URL)
+            except HTTP403Error:
+                content = None
+
+            if not content:
+                report_name = "F&O - UDiFF Common Bhavcopy Final (zip)"
+                archives = [{"name": report_name, "type": "archives", "category": "derivatives", "section": "derivatives"}]
+                archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
+                api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=derivatives&mode=single"
+                content = self._download_file(api_url, referer=ALL_REPORTS_URL)
         else:
             # Legacy Archive Format — try archive first, fallback to Reports API on 403
             url = f"{ARCHIVE_URL}/content/historical/DERIVATIVES/{date.strftime('%Y')}/{date.strftime('%b').upper()}/fo{date.strftime('%d%b%Y').upper()}bhav.csv.zip"
