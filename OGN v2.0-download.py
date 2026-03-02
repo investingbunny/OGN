@@ -12,6 +12,7 @@ Data is stored in Parquet format for optimal space and performance.
 import os
 import io
 import time
+import random
 import zipfile
 import datetime
 import threading
@@ -36,6 +37,16 @@ HEADERS = {
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
 }
+
+# Rotate User-Agent to avoid detection as a bot
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+]
 
 UDIFF_START_DATE = datetime.date(2024, 7, 8)
 DEFAULT_START_DATE = datetime.date(2010, 1, 1)
@@ -135,6 +146,8 @@ class NSEMarketDataDownloader:
         headers = {}
         if referer:
             headers["Referer"] = referer
+        # Rotate User-Agent to reduce chance of bot detection
+        headers["User-Agent"] = random.choice(_USER_AGENTS)
 
         max_retries = 5
         base_delay = 1.0
@@ -354,7 +367,7 @@ class NSEMarketDataDownloader:
             # Legacy Archive Format
             # https://nsearchives.nseindia.com/content/historical/EQUITIES/2024/FEB/cm20FEB2024bhav.csv.zip
             url = f"{ARCHIVE_URL}/content/historical/EQUITIES/{date.strftime('%Y')}/{date.strftime('%b').upper()}/cm{date.strftime('%d%b%Y').upper()}bhav.csv.zip"
-            content = self._download_file(url)
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
 
         if not content:
             return None
@@ -382,7 +395,7 @@ class NSEMarketDataDownloader:
             # Legacy Archive Format
             # https://nsearchives.nseindia.com/content/historical/DERIVATIVES/2024/FEB/fo20FEB2024bhav.csv.zip
             url = f"{ARCHIVE_URL}/content/historical/DERIVATIVES/{date.strftime('%Y')}/{date.strftime('%b').upper()}/fo{date.strftime('%d%b%Y').upper()}bhav.csv.zip"
-            content = self._download_file(url)
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
 
         if not content:
             return None
@@ -401,7 +414,7 @@ class NSEMarketDataDownloader:
         """Downloads Indices PR report for a given date."""
         # https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR200226.zip
         url = f"{ARCHIVE_URL}/archives/equities/bhavcopy/pr/PR{date.strftime('%d%m%y')}.zip"
-        content = self._download_file(url)
+        content = self._download_file(url, referer=ALL_REPORTS_URL)
 
         if not content:
             return None
@@ -492,7 +505,7 @@ class NSEMarketDataDownloader:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
             url = f"{ARCHIVE_URL}/content/equities/shortselling_{date.strftime('%d%m%Y')}.csv"
-            content = self._download_file(url)
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
         if not content:
             return None
         return self._parse_report_content(content, date, self._clean_short_selling_data, "Short Selling")
@@ -506,7 +519,7 @@ class NSEMarketDataDownloader:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
             url = f"{ARCHIVE_URL}/archives/nsccl/volt/CMVOLT_{date.strftime('%d%m%Y')}.CSV"
-            content = self._download_file(url)
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
         if not content:
             return None
         return self._parse_report_content(content, date, self._clean_volatility_data, "Daily Volatility")
@@ -563,7 +576,7 @@ class NSEMarketDataDownloader:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         else:
             url = f"{ARCHIVE_URL}/archives/equities/mto/MTO_{date.strftime('%d%m%Y')}.DAT"
-            content = self._download_file(url)
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
         if not content:
             return None
         return self._parse_delivery_content(content, date)
