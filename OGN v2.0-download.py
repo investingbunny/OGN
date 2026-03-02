@@ -910,6 +910,8 @@ class NSEMarketDataDownloader:
             df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
         if 'Symbol' in df.columns:
             df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        else:
+            df['Symbol'] = 'UNKNOWN'
         return df
 
     def _clean_pe_ratio_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
@@ -929,6 +931,8 @@ class NSEMarketDataDownloader:
             df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
         if 'Symbol' in df.columns:
             df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        else:
+            df['Symbol'] = 'UNKNOWN'
         for col in ['PE', 'PB', 'DY']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -953,6 +957,8 @@ class NSEMarketDataDownloader:
             df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
         if 'Symbol' in df.columns:
             df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        else:
+            df['Symbol'] = 'UNKNOWN'
         for col in ['Traded Value', 'Traded Qty', 'No of Trades']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
