@@ -470,13 +470,13 @@ class NSEMarketDataDownloader:
         """Downloads Indices PR report for a given date."""
         # https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR200226.zip
         url = f"{ARCHIVE_URL}/archives/equities/bhavcopy/pr/PR{date.strftime('%d%m%y')}.zip"
+        is_zip = True
         try:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         except HTTP403Error:
-            # Fallback: try Reports API
-            archives = [{"name": "PR Report", "type": "archives", "category": "capital-market", "section": "equities"}]
-            archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
-            api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+            # Fallback: try ind_close_all CSV (no Reports API name available for PR)
+            api_url = f"{ARCHIVE_URL}/content/indices/ind_close_all_{date.strftime('%d%m%Y')}.csv"
+            is_zip = False
             try:
                 content = self._download_file(api_url, referer=ALL_REPORTS_URL)
             except HTTP403Error:
@@ -484,6 +484,21 @@ class NSEMarketDataDownloader:
 
         if not content:
             return None
+
+        # If fallback CSV was used, parse directly
+        if not is_zip:
+            try:
+                df = pd.read_csv(
+                    io.BytesIO(content),
+                    skipinitialspace=True,
+                    on_bad_lines='skip',
+                )
+                if df is None or df.empty:
+                    return None
+                return self._clean_indices_data(df, date)
+            except Exception as e:
+                print(f"Error parsing Indices ind_close_all for {date}: {e}")
+                return None
 
         try:
             with zipfile.ZipFile(io.BytesIO(content)) as z:
@@ -564,19 +579,11 @@ class NSEMarketDataDownloader:
 
     def download_short_selling(self, date: datetime.date) -> Optional[pd.DataFrame]:
         """Downloads Short Selling report for a given date."""
-        # Try direct archive URL first (works for all dates)
-        url = f"{ARCHIVE_URL}/content/equities/shortselling_{date.strftime('%d%m%Y')}.csv"
-        try:
-            content = self._download_file(url, referer=ALL_REPORTS_URL)
-        except HTTP403Error:
-            content = None
-
-        # Fallback: try Reports API
-        if not content:
-            archives = [{"name": "Short Selling", "type": "archives", "category": "capital-market", "section": "equities"}]
-            archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
-            api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
-            content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+        # Use Reports API (no reliable direct archive URL exists for this report)
+        archives = [{"name": "CM - Short Selling", "type": "archives", "category": "capital-market", "section": "equities"}]
+        archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
+        url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+        content = self._download_file(url, referer=ALL_REPORTS_URL)
 
         if not content:
             return None
@@ -584,7 +591,7 @@ class NSEMarketDataDownloader:
 
     def download_daily_volatility(self, date: datetime.date) -> Optional[pd.DataFrame]:
         """Downloads Daily Volatility report for a given date."""
-        # Try direct archive URL first (works for all dates)
+        # Try direct archive URL first
         url = f"{ARCHIVE_URL}/archives/nsccl/volt/CMVOLT_{date.strftime('%d%m%Y')}.CSV"
         try:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
@@ -593,7 +600,7 @@ class NSEMarketDataDownloader:
 
         # Fallback: try Reports API
         if not content:
-            archives = [{"name": "Daily Volatility", "type": "archives", "category": "capital-market", "section": "equities"}]
+            archives = [{"name": "CM - Daily Volatility", "type": "archives", "category": "capital-market", "section": "equities"}]
             archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
             api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
             content = self._download_file(api_url, referer=ALL_REPORTS_URL)
@@ -604,19 +611,19 @@ class NSEMarketDataDownloader:
 
     def download_market_activity(self, date: datetime.date) -> Optional[pd.DataFrame]:
         """Downloads Market Activity Report for a given date."""
-        # Try Reports API
-        archives = [{"name": "Market Activity Report", "type": "archives", "category": "capital-market", "section": "equities"}]
-        archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
-        url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+        # Try direct archive URL first (format: MADDMMYY.csv)
+        url = f"{ARCHIVE_URL}/archives/equities/mkt/MA{date.strftime('%d%m%y')}.csv"
         try:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         except HTTP403Error:
             content = None
 
-        # Fallback: try direct archive URL
+        # Fallback: try Reports API
         if not content:
-            url2 = f"{ARCHIVE_URL}/archives/equities/mkt/MAR{date.strftime('%d%m%Y')}.csv"
-            content = self._download_file(url2, referer=ALL_REPORTS_URL)
+            archives = [{"name": "CM - Market Activity Report", "type": "archives", "category": "capital-market", "section": "equities"}]
+            archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
+            api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
+            content = self._download_file(api_url, referer=ALL_REPORTS_URL)
 
         if not content:
             return None
@@ -633,7 +640,7 @@ class NSEMarketDataDownloader:
 
         # Fallback: try Reports API
         if not content:
-            archives = [{"name": "Price Band changes from next trade date", "type": "archives", "category": "capital-market", "section": "equities"}]
+            archives = [{"name": "CM - Price Band changes (for Next day)", "type": "archives", "category": "capital-market", "section": "equities"}]
             archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
             api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
             content = self._download_file(api_url, referer=ALL_REPORTS_URL)
@@ -664,10 +671,20 @@ class NSEMarketDataDownloader:
 
     def download_corp_bonds(self, date: datetime.date) -> Optional[pd.DataFrame]:
         """Downloads Corporate Bonds Traded Report for a given date."""
-        archives = [{"name": "Corporate Bonds Traded Report", "type": "archives", "category": "debt", "section": "debt"}]
-        archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
-        url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=debt&mode=single"
-        content = self._download_file(url, referer=ALL_REPORTS_URL)
+        # Try direct archive URL first
+        url = f"{ARCHIVE_URL}/archives/debt/cbm/cbm_trd{date.strftime('%Y%m%d')}.csv"
+        try:
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
+        except HTTP403Error:
+            content = None
+
+        # Fallback: try Reports API
+        if not content:
+            archives = [{"name": "CBM - Bhavcopy for the day", "type": "archives", "category": "debt", "section": "debt"}]
+            archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
+            api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=debt&mode=single"
+            content = self._download_file(api_url, referer=ALL_REPORTS_URL)
+
         if not content:
             return None
         return self._parse_report_content(content, date, self._clean_corp_bonds_data, "Corporate Bonds")
@@ -686,7 +703,7 @@ class NSEMarketDataDownloader:
 
         # Fallback: try Reports API
         if not content:
-            archives = [{"name": "Security-wise Delivery Positions", "type": "archives", "category": "capital-market", "section": "equities"}]
+            archives = [{"name": "CM - Security-wise Delivery Positions", "type": "archives", "category": "capital-market", "section": "equities"}]
             archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
             api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
             content = self._download_file(api_url, referer=ALL_REPORTS_URL)
