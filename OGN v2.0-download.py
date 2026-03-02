@@ -242,6 +242,10 @@ class NSEMarketDataDownloader:
                 print(f"  Request error (attempt {attempt+1}/{max_retries}): {type(e).__name__}: {e}")
                 time.sleep(delay)
 
+            except HTTP403Error:
+                # 403 must not be retried — propagate immediately
+                raise
+
             except Exception as e:
                 # Truly unexpected errors (shouldn't happen, but don't crash)
                 print(f"  Unexpected error (attempt {attempt+1}/{max_retries}): {type(e).__name__}: {e}")
