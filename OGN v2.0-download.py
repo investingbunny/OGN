@@ -77,6 +77,8 @@ CORPBONDS_RAW = DATA_ROOT / "CorporateBonds" / "Raw"
 CORPBONDS_PROCESSED = DATA_ROOT / "CorporateBonds" / "Processed"
 DELIVERY_RAW = DATA_ROOT / "DeliveryPositions" / "Raw"
 DELIVERY_PROCESSED = DATA_ROOT / "DeliveryPositions" / "Processed"
+WDM_RAW = DATA_ROOT / "WDM" / "Raw"
+WDM_PROCESSED = DATA_ROOT / "WDM" / "Processed"
 
 # Budget day (Feb 1) is always attempted even if it falls on a weekend.
 # Actual market holidays (Republic Day, Holi, etc.) vary each year and are
@@ -155,7 +157,8 @@ class NSEMarketDataDownloader:
                      INDICES_RAW, INDICES_PROCESSED, SHORTSELLING_RAW, SHORTSELLING_PROCESSED,
                      VOLATILITY_RAW, VOLATILITY_PROCESSED, MARKETACTIVITY_RAW, MARKETACTIVITY_PROCESSED,
                      PRICEBAND_RAW, PRICEBAND_PROCESSED, PERATIO_RAW, PERATIO_PROCESSED,
-                     CORPBONDS_RAW, CORPBONDS_PROCESSED, DELIVERY_RAW, DELIVERY_PROCESSED]:
+                     CORPBONDS_RAW, CORPBONDS_PROCESSED, DELIVERY_RAW, DELIVERY_PROCESSED,
+                     WDM_RAW, WDM_PROCESSED]:
             path.mkdir(parents=True, exist_ok=True)
 
     def get_trading_days(self, start_date: datetime.date, end_date: datetime.date) -> List[datetime.date]:
@@ -840,6 +843,101 @@ class NSEMarketDataDownloader:
             return None
         return self._parse_delivery_content(content, date)
 
+    def download_wdm_daily(self, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads WDM Daily Report (ZIP containing multiple files) for a given date.
+
+        The ZIP contains multiple CSV/DAT files.  Each sub-file is read,
+        cleaned, and tagged with Symbol = 'Debt_{filename_stem}'.  All
+        sub-files are concatenated into a single DataFrame so the normal
+        merge pipeline can split them back into per-symbol processed files.
+
+        Archive URL format: dlyDDMMYYYY.zip
+        """
+        ALL_REPORTS_DEBT_URL = f"{BASE_URL}/all-reports-debt"
+
+        # Try direct archive URL first
+        url = f"{ARCHIVE_URL}/archives/debt/wdm/dly{date.strftime('%d%m%Y')}.zip"
+        try:
+            content = self._download_file(url, referer=ALL_REPORTS_DEBT_URL)
+        except (HTTP403Error, DownloadFailedError):
+            content = None
+
+        # Fallback: try Reports API
+        if not content:
+            archives = [{"name": "WDM - Daily Reports", "type": "archives",
+                         "category": "debt", "section": "debt"}]
+            archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
+            api_url = (f"{BASE_URL}/api/reports?archives={archives_str}"
+                       f"&date={date.strftime('%d-%b-%Y')}&type=debt&mode=single")
+            content = self._download_file(api_url, referer=ALL_REPORTS_DEBT_URL)
+
+        if not content:
+            return None
+
+        return self._parse_wdm_zip(content, date)
+
+    def _parse_wdm_zip(self, content: bytes, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Extracts all CSV/DAT files from a WDM Daily ZIP and returns them
+        as a single DataFrame with Symbol = 'Debt_{filename_stem}'.
+
+        Raises DownloadFailedError if the ZIP cannot be read.
+        Returns None if the ZIP is empty or contains no data.
+        """
+        try:
+            if content[:2] != b'PK':
+                # Not a ZIP — try to read as plain CSV
+                df = self._read_csv_with_encoding(content)
+                if df is None or df.empty:
+                    return None
+                df = self._clean_wdm_subfile(df, date, 'Debt_daily')
+                return df
+
+            all_dfs = []
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                data_files = [n for n in z.namelist()
+                              if n.lower().endswith(('.csv', '.dat', '.txt'))
+                              and not n.startswith('__')]
+                if not data_files:
+                    # Try all files
+                    data_files = [n for n in z.namelist() if not n.startswith('__')]
+
+                for fname in data_files:
+                    try:
+                        with z.open(fname) as f:
+                            raw_bytes = f.read()
+                        if not raw_bytes.strip():
+                            continue
+
+                        df = self._read_csv_with_encoding(raw_bytes)
+                        if df is None or df.empty:
+                            continue
+
+                        # Derive symbol name from filename: Debt_{stem}
+                        stem = Path(fname).stem
+                        # Sanitize: remove date digits from stem for a clean name
+                        symbol_name = f"Debt_{stem}"
+                        df = self._clean_wdm_subfile(df, date, symbol_name)
+                        all_dfs.append(df)
+                    except Exception as e:
+                        print(f"  [WDM] Error parsing {fname} for {date}: {e}")
+                        continue
+
+            if not all_dfs:
+                return None
+
+            # Concatenate all sub-files — they may have different schemas;
+            # pandas concat fills missing columns with NaN.
+            combined = pd.concat(all_dfs, ignore_index=True)
+            return combined if not combined.empty else None
+
+        except zipfile.BadZipFile:
+            raise DownloadFailedError(f"Corrupt ZIP for WDM Daily {date}")
+        except DownloadFailedError:
+            raise
+        except Exception as e:
+            print(f"Error parsing WDM Daily for {date}: {e}")
+            raise DownloadFailedError(f"Parse error for WDM Daily {date}: {e}") from e
+
     def _clean_cm_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
         """Standardizes Equity data."""
         df.columns = [c.strip() for c in df.columns]
@@ -1187,6 +1285,48 @@ class NSEMarketDataDownloader:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
         return df
 
+    def _clean_wdm_subfile(self, df: pd.DataFrame, date: datetime.date, symbol_name: str) -> pd.DataFrame:
+        """Standardizes a single sub-file from a WDM Daily ZIP.
+
+        Sets Symbol = symbol_name (e.g. 'Debt_mktwatch') so the merge
+        pipeline writes each sub-file to its own processed parquet.
+        Attempts to parse any Date column found; falls back to the
+        download date if none exists.
+        """
+        df.columns = [c.strip() for c in df.columns]
+
+        # Try to identify and parse a date column
+        date_col_found = False
+        for col in df.columns:
+            col_lower = col.lower()
+            if col_lower in ('date', 'trade date', 'trade_date', 'timestamp',
+                             'trading date', 'trd_dt', 'trddt', 'traddttm'):
+                df = df.rename(columns={col: 'Date'})
+                df['Date'] = pd.to_datetime(df['Date'], format='mixed',
+                                            dayfirst=True, errors='coerce').dt.date
+                date_col_found = True
+                break
+
+        if not date_col_found:
+            df['Date'] = date
+
+        df['Symbol'] = symbol_name
+
+        # Convert numeric-looking columns
+        for col in df.columns:
+            if col in ('Date', 'Symbol'):
+                continue
+            # Try numeric conversion — leave as string if it fails
+            try:
+                converted = pd.to_numeric(df[col], errors='coerce')
+                # Only apply if >50% of non-null values converted successfully
+                if converted.notna().sum() > 0.5 * df[col].notna().sum():
+                    df[col] = converted
+            except Exception:
+                pass
+
+        return df
+
     def update_processed_data(self, df: pd.DataFrame, target_dir: Path, group_col: str = 'Symbol'):
         """Appends new data to per-symbol Parquet files."""
         if df is None or df.empty:
@@ -1441,6 +1581,11 @@ class NSEMarketDataDownloader:
 
     def _download_day_del(self, day: datetime.date) -> tuple:
         df = self.download_delivery_positions(day)
+        return (day, df)
+
+    def _download_day_wdm(self, day: datetime.date) -> tuple:
+        """Download WDM Daily Report for one day. Returns (day, df_or_None)."""
+        df = self.download_wdm_daily(day)
         return (day, df)
 
     NODATA_RETRY_SAMPLE = 10  # Number of random .nodata days to retry per category
@@ -1705,6 +1850,7 @@ class NSEMarketDataDownloader:
             ("PE Ratio",           self._download_day_pe,  PERATIO_RAW,       "pe",  PERATIO_PROCESSED),
             ("Corporate Bonds",    self._download_day_cb,  CORPBONDS_RAW,     "cb",  CORPBONDS_PROCESSED),
             ("Delivery Positions", self._download_day_del, DELIVERY_RAW,      "del", DELIVERY_PROCESSED),
+            ("WDM Daily",          self._download_day_wdm, WDM_RAW,           "wdm", WDM_PROCESSED),
         ]
 
         for label, download_fn, raw_dir, prefix, processed_dir in categories:
