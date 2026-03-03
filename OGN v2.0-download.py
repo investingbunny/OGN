@@ -1226,17 +1226,17 @@ class NSEMarketDataDownloader:
             print(f"  [{label}] No raw files to merge.", flush=True)
             return
 
-        # Determine which raw files are newer than the last processed date
-        last_processed = self.get_last_date(target_dir)
-        files_to_merge = []
-        for f in raw_files:
+        # Track which raw files have already been merged via a stamp file.
+        # The stamp records the set of raw filenames that have been processed.
+        stamp_file = raw_dir / f".merged_{raw_prefix}.txt"
+        already_merged = set()
+        if stamp_file.exists():
             try:
-                date_str = f.stem.split('_', 1)[1]
-                file_date = datetime.datetime.strptime(date_str, '%Y%m%d').date()
-                if file_date > last_processed:
-                    files_to_merge.append(f)
-            except (IndexError, ValueError):
-                files_to_merge.append(f)
+                already_merged = set(stamp_file.read_text().strip().splitlines())
+            except Exception:
+                pass
+
+        files_to_merge = [f for f in raw_files if f.name not in already_merged]
 
         if not files_to_merge:
             print(f"  [{label}] All raw files already merged.", flush=True)
@@ -1333,45 +1333,18 @@ class NSEMarketDataDownloader:
 
         del symbol_new_data
 
+        # Record merged filenames so they aren't re-processed next run
+        all_merged = already_merged | {f.name for f in files_to_merge}
+        try:
+            stamp_file.write_text('\n'.join(sorted(all_merged)))
+        except Exception as e:
+            print(f"  [{label}] Warning: could not update merge stamp: {e}")
+
         elapsed = time.time() - t0
         if write_errors:
             for err in write_errors[:5]:
                 print(f"  [{label}] Write error: {err}")
         print(f"  [{label}] Merge complete: {total_files} files → {num_symbols} symbols in {elapsed:.1f}s", flush=True)
-
-    def get_last_date(self, processed_dir: Path) -> datetime.date:
-        """Finds the latest date across all processed files."""
-        files = list(processed_dir.glob("*.parquet"))
-        if not files:
-            return DEFAULT_START_DATE
-        
-        # Check a few major/well-known files for efficiency
-        major_files = [processed_dir / "NIFTY.parquet", processed_dir / "SBIN.parquet",
-                       processed_dir / "RELIANCE.parquet", processed_dir / "MARKET.parquet"]
-        last_dates = []
-        for f in major_files:
-            if f.exists():
-                try:
-                    df = pd.read_parquet(f, engine='pyarrow', columns=['Date'])
-                    last_dates.append(df['Date'].max())
-                except:
-                    pass
-        
-        if last_dates:
-            return max(last_dates)
-
-        # Fallback: sample a few available files
-        for f in files[:5]:
-            try:
-                df = pd.read_parquet(f, engine='pyarrow', columns=['Date'])
-                last_dates.append(df['Date'].max())
-            except:
-                pass
-
-        if last_dates:
-            return max(last_dates)
-
-        return DEFAULT_START_DATE
 
     # --- Concurrent download helpers ---
     DOWNLOAD_DELAY = 0.3  # Delay between scheduling downloads (seconds)
