@@ -1323,18 +1323,18 @@ class NSEMarketDataDownloader:
 
         df['Symbol'] = symbol_name
 
-        # Convert numeric-looking columns
+        # Convert numeric-looking columns; ensure no mixed-type object columns
+        # remain (pyarrow cannot serialise them to parquet).
         for col in df.columns:
             if col in ('Date', 'Symbol'):
                 continue
-            # Try numeric conversion — leave as string if it fails
-            try:
+            if df[col].dtype == object:
                 converted = pd.to_numeric(df[col], errors='coerce')
                 # Only apply if >50% of non-null values converted successfully
                 if converted.notna().sum() > 0.5 * df[col].notna().sum():
                     df[col] = converted
-            except Exception:
-                pass
+                else:
+                    df[col] = df[col].astype(str)
 
         return df
 
@@ -1775,6 +1775,13 @@ class NSEMarketDataDownloader:
                 # Success — save raw file and remove the .nodata marker
                 raw_file = raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet"
                 try:
+                    for _c in df.columns:
+                        if df[_c].dtype == object and _c != 'Date':
+                            _conv = pd.to_numeric(df[_c], errors='coerce')
+                            if _conv.notna().sum() >= df[_c].notna().sum() * 0.5:
+                                df[_c] = _conv
+                            else:
+                                df[_c] = df[_c].astype(str)
                     df.to_parquet(raw_file, engine='pyarrow', compression='zstd', index=False)
                     nodata_path.unlink(missing_ok=True)
                     recovered += 1
@@ -1891,6 +1898,15 @@ class NSEMarketDataDownloader:
                         _, df = future.result()
                         if df is not None:
                             try:
+                                # Safety net: coerce any remaining mixed-type
+                                # object columns so pyarrow can serialise them.
+                                for _c in df.columns:
+                                    if df[_c].dtype == object and _c != 'Date':
+                                        _conv = pd.to_numeric(df[_c], errors='coerce')
+                                        if _conv.notna().sum() >= df[_c].notna().sum() * 0.5:
+                                            df[_c] = _conv
+                                        else:
+                                            df[_c] = df[_c].astype(str)
                                 df.to_parquet(
                                     raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet",
                                     engine='pyarrow', compression='zstd', index=False
