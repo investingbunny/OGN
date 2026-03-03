@@ -35,7 +35,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate",
     "Connection": "keep-alive",
     "sec-ch-ua": '"Chromium";v="120", "Google Chrome";v="120", "Not=A?Brand";v="99"',
     "sec-ch-ua-mobile": "?0",
@@ -94,10 +94,10 @@ class HTTP403Error(Exception):
 class NSEMarketDataDownloader:
     """Class to handle robust downloading and storage of NSE market data."""
 
-    MAX_WORKERS = 2  # Concurrent download threads (keep low to avoid rate limits)
-    REQUEST_DELAY = 0.5  # Minimum seconds between requests (per-thread)
-    BATCH_COOLDOWN = 3.0  # Seconds to pause between download batches
-    SESSION_REFRESH_AFTER = 120  # Re-init session after this many requests
+    MAX_WORKERS = 4  # Concurrent download threads
+    REQUEST_DELAY = 0.15  # Minimum seconds between requests (per-thread)
+    BATCH_COOLDOWN = 0.5  # Seconds to pause between download batches
+    SESSION_REFRESH_AFTER = 150  # Re-init session after this many requests
 
     def __init__(self):
         self.session = requests.Session()
@@ -201,8 +201,8 @@ class NSEMarketDataDownloader:
             headers["sec-fetch-site"] = "none"
             headers["sec-fetch-user"] = "?1"
 
-        max_retries = 5
-        base_delay = 1.0
+        max_retries = 3
+        base_delay = 0.5
 
         for attempt in range(max_retries):
             delay = base_delay * (2 ** attempt)  # Exponential backoff: 1, 2, 4, 8, 16s
@@ -544,43 +544,42 @@ class NSEMarketDataDownloader:
             return None
 
     def download_indices_report(self, date: datetime.date) -> Optional[pd.DataFrame]:
-        """Downloads Indices PR report for a given date."""
-        # https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR200226.zip
-        url = f"{ARCHIVE_URL}/archives/equities/bhavcopy/pr/PR{date.strftime('%d%m%y')}.zip"
-        is_zip = True
+        """Downloads Indices data for a given date.
+
+        Primary: ind_close_all CSV (has index OHLC, PE, PB, DY).
+        Fallback: PR zip (contains stock-level data, less useful for indices).
+        """
+        # Try ind_close_all first — has the exact index data we need
+        url = f"{ARCHIVE_URL}/content/indices/ind_close_all_{date.strftime('%d%m%Y')}.csv"
         try:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
         except HTTP403Error:
-            # Fallback: try ind_close_all CSV (no Reports API name available for PR)
-            api_url = f"{ARCHIVE_URL}/content/indices/ind_close_all_{date.strftime('%d%m%Y')}.csv"
-            is_zip = False
-            try:
-                content = self._download_file(api_url, referer=ALL_REPORTS_URL)
-            except HTTP403Error:
-                raise  # Both sources failed with 403
+            content = None
 
-        if not content:
-            return None
-
-        # If fallback CSV was used, parse directly
-        if not is_zip:
+        if content:
             try:
                 df = pd.read_csv(
                     io.BytesIO(content),
                     skipinitialspace=True,
                     on_bad_lines='skip',
                 )
-                if df is None or df.empty:
-                    return None
-                return self._clean_indices_data(df, date)
+                if df is not None and not df.empty:
+                    return self._clean_indices_data(df, date)
             except Exception as e:
                 print(f"Error parsing Indices ind_close_all for {date}: {e}")
-                return None
+
+        # Fallback: PR zip
+        url = f"{ARCHIVE_URL}/archives/equities/bhavcopy/pr/PR{date.strftime('%d%m%y')}.zip"
+        try:
+            content = self._download_file(url, referer=ALL_REPORTS_URL)
+        except HTTP403Error:
+            raise
+
+        if not content:
+            return None
 
         try:
             with zipfile.ZipFile(io.BytesIO(content)) as z:
-                # PR zip contains many CSVs, we want the one like PrDDMMYY.csv
-                # The naming pattern varies: Pr280226.csv, PR280226.csv, pd280226.csv, etc.
                 all_files = z.namelist()
                 target_csv = None
 
@@ -601,7 +600,7 @@ class NSEMarketDataDownloader:
                     if matches:
                         target_csv = matches[0]
 
-                # Broader search: any CSV with "pr" or "Pr" prefix and the date digits
+                # Broader search: any CSV with "pr" prefix and the date digits
                 if target_csv is None:
                     date_str = date.strftime('%d%m%y')
                     matches = [n for n in all_files if date_str in n and n.lower().endswith('.csv')
@@ -609,21 +608,18 @@ class NSEMarketDataDownloader:
                     if matches:
                         target_csv = matches[0]
 
-                # Last resort: any CSV containing index-like data (pick the first/largest CSV)
+                # Last resort: pick the largest CSV
                 if target_csv is None:
                     csv_files = [n for n in all_files if n.lower().endswith('.csv')]
                     if csv_files:
-                        # Pick the largest CSV (most likely the index data)
                         target_csv = max(csv_files, key=lambda n: z.getinfo(n).file_size)
 
                 if target_csv is None:
-                    print(f"No suitable CSV found in PR zip for {date}. Files: {all_files[:5]}")
                     return None
 
                 with z.open(target_csv) as f:
                     raw_bytes = f.read()
 
-                # Try multiple encodings
                 df = None
                 for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
                     try:
@@ -642,11 +638,9 @@ class NSEMarketDataDownloader:
                 if df is None or df.empty:
                     return None
 
-                # The first ~57 lines are usually the indices
-                df = df.head(100)  # Safety margin
+                df = df.head(100)
                 return self._clean_indices_data(df, date)
         except zipfile.BadZipFile:
-            # Not a valid zip (might be HTML error page)
             return None
         except Exception as e:
             print(f"Error parsing Indices PR for {date}: {e}")
@@ -735,20 +729,19 @@ class NSEMarketDataDownloader:
         return self._parse_report_content(content, date, self._clean_price_band_data, "Price Band")
 
     def download_pe_ratio(self, date: datetime.date) -> Optional[pd.DataFrame]:
-        """Downloads PE Ratio report for a given date."""
-        # Try direct archive URL first (PE_DDMMYY.csv)
-        url = f"{ARCHIVE_URL}/content/indices/PE_{date.strftime('%d%m%y')}.csv"
+        """Downloads PE Ratio report for a given date.
+
+        The archive URL (PE_DDMMYY.csv) no longer exists on NSE.
+        Uses the Reports API directly, which works for recent dates.
+        """
+        # Reports API is the only working source for PE data
+        archives = [{"name": "PE Ratio", "type": "archives", "category": "capital-market", "section": "equities"}]
+        archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
+        api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
         try:
-            content = self._download_file(url, referer=ALL_REPORTS_URL)
+            content = self._download_file(api_url, referer=ALL_REPORTS_URL)
         except HTTP403Error:
             content = None
-
-        # Fallback: try Reports API
-        if not content:
-            archives = [{"name": "PE Ratio", "type": "archives", "category": "capital-market", "section": "equities"}]
-            archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
-            api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
-            content = self._download_file(api_url, referer=ALL_REPORTS_URL)
 
         if not content:
             return None
@@ -1041,10 +1034,11 @@ class NSEMarketDataDownloader:
         df.columns = [c.strip() for c in df.columns]
         mapping = {
             'Index Name': 'Symbol', 'INDEX_NAME': 'Symbol', 'Symbol': 'Symbol',
-            'INDEX NAME': 'Symbol', 'Index': 'Symbol',
+            'SYMBOL': 'Symbol', 'INDEX NAME': 'Symbol', 'Index': 'Symbol',
             'Date': 'Date', 'DATE': 'Date',
             'P/E': 'PE', 'P/B': 'PB', 'Div Yield': 'DY',
             'PE': 'PE', 'PB': 'PB', 'DY': 'DY',
+            'SYMBOL P/E': 'PE', 'ADJUSTED P/E': 'Adjusted PE',
         }
         df = df.rename(columns=mapping)
         if 'Date' not in df.columns:
@@ -1352,18 +1346,23 @@ class NSEMarketDataDownloader:
             print(f"  No new {label} days to download.", flush=True)
             return
 
-        # Skip days that already have raw files on disk
+        # Skip days that already have raw files or .nodata markers on disk
         days_to_download = []
         skipped = 0
+        nodata_skipped = 0
         for day in days:
-            raw_file = raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet"
+            ds = day.strftime('%Y%m%d')
+            raw_file = raw_dir / f"{raw_prefix}_{ds}.parquet"
+            nodata_file = raw_dir / f"{raw_prefix}_{ds}.nodata"
             if raw_file.exists():
                 skipped += 1
+            elif nodata_file.exists():
+                nodata_skipped += 1
             else:
                 days_to_download.append(day)
 
-        if skipped > 0:
-            print(f"  [{label}] Skipping {skipped} days (already downloaded), {len(days_to_download)} remaining.", flush=True)
+        if skipped > 0 or nodata_skipped > 0:
+            print(f"  [{label}] Skipping {skipped} downloaded + {nodata_skipped} no-data days, {len(days_to_download)} remaining.", flush=True)
 
         if not days_to_download:
             print(f"  [{label}] All days already downloaded.", flush=True)
@@ -1383,7 +1382,7 @@ class NSEMarketDataDownloader:
         print(f"  Downloading {total} days of {label} data (newest first, {self.MAX_WORKERS} workers)...", flush=True)
 
         # Process in batches to allow concurrent downloads while tracking 403 streaks
-        BATCH_SIZE = self.MAX_WORKERS * 3  # e.g. 6 days per batch
+        BATCH_SIZE = self.MAX_WORKERS * 5  # e.g. 20 days per batch
         for batch_start in range(0, total, BATCH_SIZE):
             if stopped_early:
                 break
@@ -1416,6 +1415,12 @@ class NSEMarketDataDownloader:
                             batch_results[day] = ('ok', df)
                             success_count += 1
                         else:
+                            # No data for this day — save marker to avoid retrying
+                            nodata = raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.nodata"
+                            try:
+                                nodata.touch(exist_ok=True)
+                            except OSError:
+                                pass
                             batch_results[day] = ('fail',)
                             failed_days.append(day)
                     except HTTP403Error:
