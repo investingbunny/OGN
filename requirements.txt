@@ -1,22 +1,36 @@
-pandas==3.0.1
+# ── Core data & computation ─────────────────────────────────────
+pandas>=2.0
 numpy
-yfinance
-plotly
-pyarrow
-statsmodels
+pyarrow                  # parquet read/write engine
+statsmodels              # OLS regression for slope indicator
 scipy
+
+# ── HTTP / download ────────────────────────────────────────────
 requests
-matplotlib
-seaborn
-adjustText
-alpha-vantage
-nsepy
-nsepython
-stocktrends
-selenium
-python-dateutil
-trendln
-TA-Lib
-mpl-finance
 beautifulsoup4
 lxml
+selenium                 # only needed for OGN v2.0-download.py headless browser fallback
+
+# ── Visualisation ──────────────────────────────────────────────
+matplotlib
+seaborn
+mplfinance               # modern candlestick charts (replaces mpl-finance)
+plotly                   # optional interactive charts
+adjustText
+
+# ── Technical analysis (optional) ──────────────────────────────
+stocktrends              # Renko charts
+# TA-Lib                 # uncomment if you have TA-Lib C library installed
+#                        #   Windows: download .whl from https://github.com/cgohlke/talib-build
+#                        #   Linux/Mac: brew install ta-lib / apt install libta-lib-dev
+# trendln                # support/resistance trendlines (unmaintained, optional)
+
+# ── Date utilities ─────────────────────────────────────────────
+python-dateutil
+
+# ── Legacy (no longer required by OGN.py / Option-OGN.py) ─────
+# nsepy                  # replaced by OGN v2.0-download.py
+# nsepython              # replaced by OGN v2.0-download.py
+# yfinance               # replaced by OGN v2.0-download.py
+# mpl-finance            # replaced by mplfinance
+# alpha-vantage          # only for alphavantage-forex.py
