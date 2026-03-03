@@ -159,23 +159,15 @@ class NSEMarketDataDownloader:
             path.mkdir(parents=True, exist_ok=True)
 
     def get_trading_days(self, start_date: datetime.date, end_date: datetime.date) -> List[datetime.date]:
-        """Returns candidate trading days: all weekdays plus Feb 1 if on a weekend.
+        """Returns all calendar days in the range.
 
-        Actual market holidays are handled via .nodata markers — a failed
-        download creates a marker so the day is never retried.
+        Weekend days are included so that _concurrent_download can create
+        .nodata_weekend markers for them (skipping HTTP requests).
+        Actual market holidays are handled via .nodata markers — a genuine
+        404 response creates a marker so the day is never retried.
         """
-        # All weekdays in range
-        bdays = pd.bdate_range(start=start_date, end=end_date)
-        days = [d.date() for d in bdays]
-
-        # Add Feb 1 (Budget day) for each year even if it falls on Sat/Sun
-        for year in range(start_date.year, end_date.year + 1):
-            feb1 = datetime.date(year, *BUDGET_DAY)
-            if start_date <= feb1 <= end_date and feb1 not in days:
-                days.append(feb1)
-
-        days.sort()
-        return days
+        all_days = pd.date_range(start=start_date, end=end_date, freq='D')
+        return [d.date() for d in all_days]
 
     def _download_file(self, url: str, referer: Optional[str] = None) -> Optional[bytes]:
         """Downloads a file with comprehensive error handling, retry logic, and backoff.
