@@ -78,12 +78,11 @@ CORPBONDS_PROCESSED = DATA_ROOT / "CorporateBonds" / "Processed"
 DELIVERY_RAW = DATA_ROOT / "DeliveryPositions" / "Raw"
 DELIVERY_PROCESSED = DATA_ROOT / "DeliveryPositions" / "Processed"
 
-# Holiday List (Simplified - ideally fetch from NSE)
-HOLIDAYS = [
-    '2026-01-26', '2026-03-06', '2026-03-30', '2026-04-10', '2026-04-14',
-    '2026-05-01', '2026-10-02', '2026-10-21', '2026-11-05', '2026-12-25'
-]
-HOLIDAYS = pd.to_datetime(HOLIDAYS).date
+# Budget day (Feb 1) is always attempted even if it falls on a weekend.
+# Actual market holidays (Republic Day, Holi, etc.) vary each year and are
+# handled dynamically: a failed download creates a .nodata marker so the
+# day is never retried.
+BUDGET_DAY = (2, 1)  # (month, day) — always try this date
 
 
 class HTTP403Error(Exception):
@@ -147,9 +146,22 @@ class NSEMarketDataDownloader:
             path.mkdir(parents=True, exist_ok=True)
 
     def get_trading_days(self, start_date: datetime.date, end_date: datetime.date) -> List[datetime.date]:
-        """Returns a list of business days excluding holidays."""
+        """Returns candidate trading days: all weekdays plus Feb 1 if on a weekend.
+
+        Actual market holidays are handled via .nodata markers — a failed
+        download creates a marker so the day is never retried.
+        """
+        # All weekdays in range
         bdays = pd.bdate_range(start=start_date, end=end_date)
-        days = [d.date() for d in bdays if d.date() not in HOLIDAYS]
+        days = [d.date() for d in bdays]
+
+        # Add Feb 1 (Budget day) for each year even if it falls on Sat/Sun
+        for year in range(start_date.year, end_date.year + 1):
+            feb1 = datetime.date(year, *BUDGET_DAY)
+            if start_date <= feb1 <= end_date and feb1 not in days:
+                days.append(feb1)
+
+        days.sort()
         return days
 
     def _download_file(self, url: str, referer: Optional[str] = None) -> Optional[bytes]:
