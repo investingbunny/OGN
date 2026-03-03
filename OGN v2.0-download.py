@@ -1209,17 +1209,21 @@ class NSEMarketDataDownloader:
                 group = group.sort_values('Date')
                 group.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
 
-    MERGE_WORKERS = 8  # Parallel threads for writing per-symbol parquet files
+    MERGE_WORKERS = 12  # Parallel threads for writing per-symbol parquet files
 
     def merge_raw_to_processed(self, raw_dir: Path, raw_prefix: str, target_dir: Path, label: str, group_col: str = 'Symbol'):
         """Merges raw day-parquet files from disk into per-symbol processed files.
 
         Strategy for speed:
-        1. Read ALL raw files in one pass, streaming into a per-symbol dict
-           to avoid re-reading/re-writing the same processed file across batches.
-        2. Memory control: raw files are read in chunks of READ_CHUNK and
-           immediately grouped into per-symbol lists, then the chunk is freed.
-        3. Write per-symbol files in parallel threads (I/O bound, releases GIL).
+        1. Read ALL raw files in one pass using parallel I/O threads,
+           streaming into a per-symbol dict to avoid re-reading/re-writing
+           the same processed file across batches.
+        2. Memory control: raw files are read in chunks of READ_CHUNK,
+           immediately grouped into per-symbol lists, then freed.
+        3. Pre-consolidate per-symbol data and cast dtypes once (not per-write).
+        4. Smart dedup: if new dates don't overlap existing processed file,
+           skip drop_duplicates + sort (just append).
+        5. Write per-symbol files in parallel threads (I/O bound, releases GIL).
         """
         raw_files = sorted(raw_dir.glob(f"{raw_prefix}_*.parquet"))
         if not raw_files:
@@ -1246,23 +1250,36 @@ class NSEMarketDataDownloader:
         t0 = time.time()
         print(f"  [{label}] Merging {total_files} raw files...", flush=True)
 
-        # --- Phase 1: Read raw files in chunks, accumulate per-symbol ---
-        # Instead of grouping per batch (which re-reads processed files N times),
-        # accumulate ALL new data per symbol, then write each processed file ONCE.
-        READ_CHUNK = 200  # Files per read chunk (memory control)
+        # --- Phase 1: Read raw files in chunks with parallel I/O ---
+        READ_CHUNK = 200      # Files per read chunk (memory control)
+        READER_THREADS = 8    # Parallel readers within each chunk
         symbol_new_data: Dict[str, List[pd.DataFrame]] = {}
         dedup_cols = None  # Determined from first chunk
+        read_errors = 0
+
+        def _read_one(f: Path):
+            try:
+                return pd.read_parquet(f, engine='pyarrow')
+            except Exception as e:
+                return e  # Return exception to count errors
 
         for chunk_start in range(0, total_files, READ_CHUNK):
             chunk_end = min(chunk_start + READ_CHUNK, total_files)
             chunk_files = files_to_merge[chunk_start:chunk_end]
 
+            # Parallel reads — pyarrow releases GIL during I/O
+            with ThreadPoolExecutor(max_workers=READER_THREADS) as reader_pool:
+                results = list(reader_pool.map(_read_one, chunk_files))
+
             chunk_dfs = []
-            for f in chunk_files:
-                try:
-                    chunk_dfs.append(pd.read_parquet(f, engine='pyarrow'))
-                except Exception as e:
-                    print(f"  [{label}] Error reading {f.name}: {e}")
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    read_errors += 1
+                    if read_errors <= 3:
+                        print(f"  [{label}] Error reading {chunk_files[i].name}: {result}")
+                elif result is not None:
+                    chunk_dfs.append(result)
+            del results
 
             if not chunk_dfs:
                 continue
@@ -1299,34 +1316,68 @@ class NSEMarketDataDownloader:
             print(f"  [{label}] No data to merge.", flush=True)
             return
 
+        # --- Phase 1.5: Pre-consolidate per-symbol DataFrames ---
+        # Concat all chunks per symbol into one DF and cast dtypes once here,
+        # avoiding redundant work in each parallel writer.
+        for name in symbol_new_data:
+            dfs = symbol_new_data[name]
+            merged = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
+            for col in merged.columns:
+                if merged[col].dtype == object and col != 'Date':
+                    merged[col] = merged[col].astype(str)
+            symbol_new_data[name] = merged
+            del dfs
+
         num_symbols = len(symbol_new_data)
-        print(f"  [{label}] Read complete ({total_files} files, {num_symbols} symbols). Writing processed files...", flush=True)
+        read_elapsed = time.time() - t0
+        if read_errors > 3:
+            print(f"  [{label}] ({read_errors - 3} more read errors suppressed)")
+        print(f"  [{label}] Read complete ({total_files} files, {num_symbols} symbols, "
+              f"{read_elapsed:.1f}s). Writing processed files...", flush=True)
 
         # --- Phase 2: Write each processed file ONCE, in parallel ---
+        # Smart dedup: if all new dates are strictly after the existing file's
+        # max date, skip drop_duplicates + sort (just concat).  This is the
+        # common case for incremental updates and saves significant time.
         final_dedup_cols = dedup_cols or ['Date']
         write_errors = []
+        write_count = 0
+        write_lock = threading.Lock()
 
         def _merge_and_write(item):
-            name, new_dfs = item
+            nonlocal write_count
+            name, new_data = item
             file_path = target_dir / f"{name}.parquet"
             try:
-                new_data = pd.concat(new_dfs, ignore_index=True) if len(new_dfs) > 1 else new_dfs[0]
                 if file_path.exists():
                     existing = pd.read_parquet(file_path, engine='pyarrow')
-                    merged = pd.concat([existing, new_data], ignore_index=True)
-                    merged = merged.drop_duplicates(subset=final_dedup_cols, keep='last')
+                    # Smart shortcut: check date overlap
+                    new_min_date = new_data['Date'].min()
+                    existing_max_date = existing['Date'].max()
+                    if new_min_date > existing_max_date:
+                        # No overlap — new data is strictly newer.
+                        # Sort only the new chunk (existing is already sorted),
+                        # then append.  Skip dedup entirely.
+                        new_sorted = new_data.sort_values('Date')
+                        merged = pd.concat([existing, new_sorted], ignore_index=True)
+                        del new_sorted
+                    else:
+                        # Date ranges overlap — full dedup + sort required
+                        merged = pd.concat([existing, new_data], ignore_index=True)
+                        merged = merged.drop_duplicates(subset=final_dedup_cols, keep='last')
+                        merged = merged.sort_values('Date')
                     del existing
                 else:
-                    merged = new_data
+                    # New symbol — just sort
+                    merged = new_data.sort_values('Date')
                 del new_data
-                merged = merged.sort_values('Date')
-                for col in merged.columns:
-                    if merged[col].dtype == object and col != 'Date':
-                        merged[col] = merged[col].astype(str)
                 merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
                 del merged
             except Exception as e:
                 write_errors.append(f"{name}: {e}")
+
+            with write_lock:
+                write_count += 1
 
         with ThreadPoolExecutor(max_workers=self.MERGE_WORKERS) as pool:
             list(pool.map(_merge_and_write, symbol_new_data.items()))
@@ -1409,6 +1460,16 @@ class NSEMarketDataDownloader:
         sample_size = min(self.NODATA_RETRY_SAMPLE, len(nodata_files))
         sample = random.sample(nodata_files, sample_size)
 
+        # Always include today's .nodata if it exists (requirement: always
+        # retry today's date on every run — unless today is a weekend
+        # and not Budget day, in which case .nodata_weekend applies)
+        today = datetime.date.today()
+        today_is_trading = today.weekday() < 5 or (today.month, today.day) == BUDGET_DAY
+        if today_is_trading:
+            today_nodata = raw_dir / f"{raw_prefix}_{today.strftime('%Y%m%d')}.nodata"
+            if today_nodata.exists() and today_nodata not in sample:
+                sample.append(today_nodata)
+
         # Extract dates from filenames
         retry_items = []
         for nf in sample:
@@ -1460,6 +1521,16 @@ class NSEMarketDataDownloader:
         if not days:
             print(f"  No new {label} days to download.", flush=True)
             return
+
+        # Today's date should always be re-attempted on trading days —
+        # delete any stale .nodata marker so it is not skipped below.
+        # On weekends (except Budget day Feb 1), normal .nodata_weekend applies.
+        today = datetime.date.today()
+        today_is_trading = today.weekday() < 5 or (today.month, today.day) == BUDGET_DAY
+        if today_is_trading:
+            today_nodata = raw_dir / f"{raw_prefix}_{today.strftime('%Y%m%d')}.nodata"
+            if today_nodata.exists():
+                today_nodata.unlink(missing_ok=True)
 
         # Skip days that already have raw files, .nodata, or .nodata_weekend markers
         days_to_download = []
@@ -1553,11 +1624,14 @@ class NSEMarketDataDownloader:
                             success_count += 1
                         else:
                             # Genuine 404 / empty data — save marker to avoid retrying
-                            nodata = raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.nodata"
-                            try:
-                                nodata.touch(exist_ok=True)
-                            except OSError:
-                                pass
+                            # Exception: never create .nodata for today (trading days
+                            # only) — data may appear later in the day; retry next run.
+                            if not (day == today and today_is_trading):
+                                nodata = raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.nodata"
+                                try:
+                                    nodata.touch(exist_ok=True)
+                                except OSError:
+                                    pass
                             batch_results[day] = ('nodata',)
                             failed_days.append(day)
                     except HTTP403Error:
