@@ -77,6 +77,8 @@ CORPBONDS_RAW = DATA_ROOT / "CorporateBonds" / "Raw"
 CORPBONDS_PROCESSED = DATA_ROOT / "CorporateBonds" / "Processed"
 DELIVERY_RAW = DATA_ROOT / "DeliveryPositions" / "Raw"
 DELIVERY_PROCESSED = DATA_ROOT / "DeliveryPositions" / "Processed"
+WDM_RAW = DATA_ROOT / "WDM" / "Raw"
+WDM_PROCESSED = DATA_ROOT / "WDM" / "Processed"
 
 # Budget day (Feb 1) is always attempted even if it falls on a weekend.
 # Actual market holidays (Republic Day, Holi, etc.) vary each year and are
@@ -155,7 +157,8 @@ class NSEMarketDataDownloader:
                      INDICES_RAW, INDICES_PROCESSED, SHORTSELLING_RAW, SHORTSELLING_PROCESSED,
                      VOLATILITY_RAW, VOLATILITY_PROCESSED, MARKETACTIVITY_RAW, MARKETACTIVITY_PROCESSED,
                      PRICEBAND_RAW, PRICEBAND_PROCESSED, PERATIO_RAW, PERATIO_PROCESSED,
-                     CORPBONDS_RAW, CORPBONDS_PROCESSED, DELIVERY_RAW, DELIVERY_PROCESSED]:
+                     CORPBONDS_RAW, CORPBONDS_PROCESSED, DELIVERY_RAW, DELIVERY_PROCESSED,
+                     WDM_RAW, WDM_PROCESSED]:
             path.mkdir(parents=True, exist_ok=True)
 
     def get_trading_days(self, start_date: datetime.date, end_date: datetime.date) -> List[datetime.date]:
@@ -840,6 +843,101 @@ class NSEMarketDataDownloader:
             return None
         return self._parse_delivery_content(content, date)
 
+    def download_wdm_daily(self, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads WDM Daily Report (ZIP containing multiple files) for a given date.
+
+        The ZIP contains multiple CSV/DAT files.  Each sub-file is read,
+        cleaned, and tagged with Symbol = 'Debt_{filename_stem}'.  All
+        sub-files are concatenated into a single DataFrame so the normal
+        merge pipeline can split them back into per-symbol processed files.
+
+        Archive URL format: dlyDDMMYYYY.zip
+        """
+        ALL_REPORTS_DEBT_URL = f"{BASE_URL}/all-reports-debt"
+
+        # Try direct archive URL first
+        url = f"{ARCHIVE_URL}/archives/debt/wdm/dly{date.strftime('%d%m%Y')}.zip"
+        try:
+            content = self._download_file(url, referer=ALL_REPORTS_DEBT_URL)
+        except (HTTP403Error, DownloadFailedError):
+            content = None
+
+        # Fallback: try Reports API
+        if not content:
+            archives = [{"name": "WDM - Daily Reports", "type": "archives",
+                         "category": "debt", "section": "debt"}]
+            archives_str = urllib.parse.quote(json.dumps(archives, separators=(',', ':')))
+            api_url = (f"{BASE_URL}/api/reports?archives={archives_str}"
+                       f"&date={date.strftime('%d-%b-%Y')}&type=debt&mode=single")
+            content = self._download_file(api_url, referer=ALL_REPORTS_DEBT_URL)
+
+        if not content:
+            return None
+
+        return self._parse_wdm_zip(content, date)
+
+    def _parse_wdm_zip(self, content: bytes, date: datetime.date) -> Optional[pd.DataFrame]:
+        """Extracts all CSV/DAT files from a WDM Daily ZIP and returns them
+        as a single DataFrame with Symbol = 'Debt_{filename_stem}'.
+
+        Raises DownloadFailedError if the ZIP cannot be read.
+        Returns None if the ZIP is empty or contains no data.
+        """
+        try:
+            if content[:2] != b'PK':
+                # Not a ZIP — try to read as plain CSV
+                df = self._read_csv_with_encoding(content)
+                if df is None or df.empty:
+                    return None
+                df = self._clean_wdm_subfile(df, date, 'Debt_daily')
+                return df
+
+            all_dfs = []
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                data_files = [n for n in z.namelist()
+                              if n.lower().endswith(('.csv', '.dat', '.txt'))
+                              and not n.startswith('__')]
+                if not data_files:
+                    # Try all files
+                    data_files = [n for n in z.namelist() if not n.startswith('__')]
+
+                for fname in data_files:
+                    try:
+                        with z.open(fname) as f:
+                            raw_bytes = f.read()
+                        if not raw_bytes.strip():
+                            continue
+
+                        df = self._read_csv_with_encoding(raw_bytes)
+                        if df is None or df.empty:
+                            continue
+
+                        # Derive symbol name from filename: Debt_{stem}
+                        stem = Path(fname).stem
+                        # Sanitize: remove date digits from stem for a clean name
+                        symbol_name = f"Debt_{stem}"
+                        df = self._clean_wdm_subfile(df, date, symbol_name)
+                        all_dfs.append(df)
+                    except Exception as e:
+                        print(f"  [WDM] Error parsing {fname} for {date}: {e}")
+                        continue
+
+            if not all_dfs:
+                return None
+
+            # Concatenate all sub-files — they may have different schemas;
+            # pandas concat fills missing columns with NaN.
+            combined = pd.concat(all_dfs, ignore_index=True)
+            return combined if not combined.empty else None
+
+        except zipfile.BadZipFile:
+            raise DownloadFailedError(f"Corrupt ZIP for WDM Daily {date}")
+        except DownloadFailedError:
+            raise
+        except Exception as e:
+            print(f"Error parsing WDM Daily for {date}: {e}")
+            raise DownloadFailedError(f"Parse error for WDM Daily {date}: {e}") from e
+
     def _clean_cm_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
         """Standardizes Equity data."""
         df.columns = [c.strip() for c in df.columns]
@@ -1187,6 +1285,48 @@ class NSEMarketDataDownloader:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
         return df
 
+    def _clean_wdm_subfile(self, df: pd.DataFrame, date: datetime.date, symbol_name: str) -> pd.DataFrame:
+        """Standardizes a single sub-file from a WDM Daily ZIP.
+
+        Sets Symbol = symbol_name (e.g. 'Debt_mktwatch') so the merge
+        pipeline writes each sub-file to its own processed parquet.
+        Attempts to parse any Date column found; falls back to the
+        download date if none exists.
+        """
+        df.columns = [c.strip() for c in df.columns]
+
+        # Try to identify and parse a date column
+        date_col_found = False
+        for col in df.columns:
+            col_lower = col.lower()
+            if col_lower in ('date', 'trade date', 'trade_date', 'timestamp',
+                             'trading date', 'trd_dt', 'trddt', 'traddttm'):
+                df = df.rename(columns={col: 'Date'})
+                df['Date'] = pd.to_datetime(df['Date'], format='mixed',
+                                            dayfirst=True, errors='coerce').dt.date
+                date_col_found = True
+                break
+
+        if not date_col_found:
+            df['Date'] = date
+
+        df['Symbol'] = symbol_name
+
+        # Convert numeric-looking columns
+        for col in df.columns:
+            if col in ('Date', 'Symbol'):
+                continue
+            # Try numeric conversion — leave as string if it fails
+            try:
+                converted = pd.to_numeric(df[col], errors='coerce')
+                # Only apply if >50% of non-null values converted successfully
+                if converted.notna().sum() > 0.5 * df[col].notna().sum():
+                    df[col] = converted
+            except Exception:
+                pass
+
+        return df
+
     def update_processed_data(self, df: pd.DataFrame, target_dir: Path, group_col: str = 'Symbol'):
         """Appends new data to per-symbol Parquet files."""
         if df is None or df.empty:
@@ -1214,16 +1354,18 @@ class NSEMarketDataDownloader:
     def merge_raw_to_processed(self, raw_dir: Path, raw_prefix: str, target_dir: Path, label: str, group_col: str = 'Symbol'):
         """Merges raw day-parquet files from disk into per-symbol processed files.
 
-        Strategy for speed:
-        1. Read ALL raw files in one pass using parallel I/O threads,
-           streaming into a per-symbol dict to avoid re-reading/re-writing
-           the same processed file across batches.
-        2. Memory control: raw files are read in chunks of READ_CHUNK,
-           immediately grouped into per-symbol lists, then freed.
+        Strategy for speed and memory safety:
+        1. Process files in mega-batches (MERGE_MEGA_BATCH files each) to
+           bound memory usage.  Each mega-batch does the full read → consolidate
+           → write cycle.  Stamp file is updated after each mega-batch so
+           progress is preserved if a crash occurs.
+        2. Within each mega-batch, read raw files in parallel (READER_THREADS).
         3. Pre-consolidate per-symbol data and cast dtypes once (not per-write).
         4. Smart dedup: if new dates don't overlap existing processed file,
            skip drop_duplicates + sort (just append).
         5. Write per-symbol files in parallel threads (I/O bound, releases GIL).
+        6. Per-mega-batch timeout (MERGE_TIMEOUT_S): if exceeded, the batch is
+           skipped and an error is printed, but the script continues.
         """
         raw_files = sorted(raw_dir.glob(f"{raw_prefix}_*.parquet"))
         if not raw_files:
@@ -1250,152 +1392,188 @@ class NSEMarketDataDownloader:
         t0 = time.time()
         print(f"  [{label}] Merging {total_files} raw files...", flush=True)
 
-        # --- Phase 1: Read raw files in chunks with parallel I/O ---
-        READ_CHUNK = 200      # Files per read chunk (memory control)
-        READER_THREADS = 8    # Parallel readers within each chunk
-        symbol_new_data: Dict[str, List[pd.DataFrame]] = {}
-        dedup_cols = None  # Determined from first chunk
-        read_errors = 0
+        MERGE_MEGA_BATCH = 500    # Files per mega-batch (memory control)
+        MERGE_TIMEOUT_S = 120     # Max seconds per mega-batch before giving up
+        READ_CHUNK = 200          # Files per read chunk within a mega-batch
+        READER_THREADS = 8        # Parallel readers within each chunk
+        total_symbols_written = 0
 
-        def _read_one(f: Path):
+        for mega_start in range(0, total_files, MERGE_MEGA_BATCH):
+            mega_end = min(mega_start + MERGE_MEGA_BATCH, total_files)
+            mega_files = files_to_merge[mega_start:mega_end]
+            mega_t0 = time.time()
+
             try:
-                return pd.read_parquet(f, engine='pyarrow')
+                # --- Phase 1: Read raw files in chunks with parallel I/O ---
+                symbol_new_data: Dict[str, List[pd.DataFrame]] = {}
+                dedup_cols = None
+                read_errors = 0
+
+                def _read_one(f: Path):
+                    try:
+                        return pd.read_parquet(f, engine='pyarrow')
+                    except Exception as e:
+                        return e
+
+                for chunk_start in range(0, len(mega_files), READ_CHUNK):
+                    # Timeout check
+                    if time.time() - mega_t0 > MERGE_TIMEOUT_S:
+                        print(f"  [{label}] Merge timeout ({MERGE_TIMEOUT_S}s) exceeded "
+                              f"during read phase at file {mega_start + chunk_start}/{total_files}. "
+                              f"Remaining files will be retried next run.", flush=True)
+                        raise TimeoutError("merge read timeout")
+
+                    chunk_end = min(chunk_start + READ_CHUNK, len(mega_files))
+                    chunk_files = mega_files[chunk_start:chunk_end]
+
+                    with ThreadPoolExecutor(max_workers=READER_THREADS) as reader_pool:
+                        results = list(reader_pool.map(_read_one, chunk_files))
+
+                    chunk_dfs = []
+                    for i, result in enumerate(results):
+                        if isinstance(result, Exception):
+                            read_errors += 1
+                            if read_errors <= 3:
+                                print(f"  [{label}] Error reading {chunk_files[i].name}: {result}")
+                        elif result is not None:
+                            chunk_dfs.append(result)
+                    del results
+
+                    if not chunk_dfs:
+                        continue
+
+                    combined = pd.concat(chunk_dfs, ignore_index=True)
+                    del chunk_dfs
+
+                    if combined.empty:
+                        del combined
+                        continue
+
+                    if group_col not in combined.columns:
+                        print(f"  [{label}] Warning: '{group_col}' missing — setting to 'UNKNOWN'.")
+                        combined[group_col] = 'UNKNOWN'
+
+                    if dedup_cols is None:
+                        dedup_cols = ['Date']
+                        for extra_key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
+                            if extra_key in combined.columns:
+                                dedup_cols.append(extra_key)
+
+                    for name, group in combined.groupby(group_col):
+                        symbol_new_data.setdefault(name, []).append(group)
+
+                    del combined
+
+                    progress_file = mega_start + chunk_end
+                    if progress_file < total_files:
+                        elapsed = time.time() - t0
+                        print(f"  [{label}] Read {progress_file}/{total_files} raw files ({elapsed:.1f}s)...", flush=True)
+
+                if not symbol_new_data:
+                    # No data in this mega-batch — still mark as merged
+                    already_merged |= {f.name for f in mega_files}
+                    try:
+                        stamp_file.write_text('\n'.join(sorted(already_merged)))
+                    except Exception:
+                        pass
+                    continue
+
+                # Timeout check before consolidation
+                if time.time() - mega_t0 > MERGE_TIMEOUT_S:
+                    print(f"  [{label}] Merge timeout ({MERGE_TIMEOUT_S}s) before consolidation. "
+                          f"Skipping batch {mega_start}-{mega_end}, retry next run.", flush=True)
+                    del symbol_new_data
+                    continue
+
+                # --- Phase 1.5: Pre-consolidate per-symbol DataFrames ---
+                for name in list(symbol_new_data.keys()):
+                    dfs = symbol_new_data[name]
+                    merged = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
+                    for col in merged.columns:
+                        if merged[col].dtype == object and col != 'Date':
+                            merged[col] = merged[col].astype(str)
+                    symbol_new_data[name] = merged
+                    del dfs
+
+                num_symbols = len(symbol_new_data)
+                read_elapsed = time.time() - t0
+                if read_errors > 3:
+                    print(f"  [{label}] ({read_errors - 3} more read errors suppressed)")
+                print(f"  [{label}] Batch {mega_start}-{mega_end}: {len(mega_files)} files, "
+                      f"{num_symbols} symbols, read in {time.time() - mega_t0:.1f}s. Writing...", flush=True)
+
+                # --- Phase 2: Write each processed file ONCE, in parallel ---
+                final_dedup_cols = dedup_cols or ['Date']
+                write_errors = []
+
+                def _merge_and_write(item):
+                    name, new_data = item
+                    file_path = target_dir / f"{name}.parquet"
+                    try:
+                        if file_path.exists():
+                            existing = pd.read_parquet(file_path, engine='pyarrow')
+                            new_min_date = new_data['Date'].min()
+                            existing_max_date = existing['Date'].max()
+                            if new_min_date > existing_max_date:
+                                new_sorted = new_data.sort_values('Date')
+                                merged = pd.concat([existing, new_sorted], ignore_index=True)
+                                del new_sorted
+                            else:
+                                merged = pd.concat([existing, new_data], ignore_index=True)
+                                merged = merged.drop_duplicates(subset=final_dedup_cols, keep='last')
+                                merged = merged.sort_values('Date')
+                            del existing
+                        else:
+                            merged = new_data.sort_values('Date')
+                        del new_data
+                        merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
+                        del merged
+                    except Exception as e:
+                        write_errors.append(f"{name}: {e}")
+
+                with ThreadPoolExecutor(max_workers=self.MERGE_WORKERS) as pool:
+                    list(pool.map(_merge_and_write, symbol_new_data.items()))
+
+                total_symbols_written += num_symbols
+                del symbol_new_data
+
+                if write_errors:
+                    for err in write_errors[:5]:
+                        print(f"  [{label}] Write error: {err}")
+
+                # Update stamp after each mega-batch (crash-safe)
+                already_merged |= {f.name for f in mega_files}
+                try:
+                    stamp_file.write_text('\n'.join(sorted(already_merged)))
+                except Exception as e:
+                    print(f"  [{label}] Warning: could not update merge stamp: {e}")
+
+                batch_elapsed = time.time() - mega_t0
+                print(f"  [{label}] Batch {mega_start}-{mega_end} complete in {batch_elapsed:.1f}s "
+                      f"({num_symbols} symbols written).", flush=True)
+
+            except TimeoutError:
+                # Already printed message above — just skip this batch
+                pass
+            except MemoryError:
+                print(f"  [{label}] Out of memory during merge batch {mega_start}-{mega_end}. "
+                      f"Skipping — will retry next run with smaller data.", flush=True)
+                try:
+                    del symbol_new_data
+                except NameError:
+                    pass
+                import gc; gc.collect()
             except Exception as e:
-                return e  # Return exception to count errors
-
-        for chunk_start in range(0, total_files, READ_CHUNK):
-            chunk_end = min(chunk_start + READ_CHUNK, total_files)
-            chunk_files = files_to_merge[chunk_start:chunk_end]
-
-            # Parallel reads — pyarrow releases GIL during I/O
-            with ThreadPoolExecutor(max_workers=READER_THREADS) as reader_pool:
-                results = list(reader_pool.map(_read_one, chunk_files))
-
-            chunk_dfs = []
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    read_errors += 1
-                    if read_errors <= 3:
-                        print(f"  [{label}] Error reading {chunk_files[i].name}: {result}")
-                elif result is not None:
-                    chunk_dfs.append(result)
-            del results
-
-            if not chunk_dfs:
-                continue
-
-            combined = pd.concat(chunk_dfs, ignore_index=True)
-            del chunk_dfs
-
-            if combined.empty:
-                del combined
-                continue
-
-            if group_col not in combined.columns:
-                print(f"  [{label}] Warning: '{group_col}' missing — setting to 'UNKNOWN'.")
-                combined[group_col] = 'UNKNOWN'
-
-            # Determine dedup key columns once
-            if dedup_cols is None:
-                dedup_cols = ['Date']
-                for extra_key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
-                    if extra_key in combined.columns:
-                        dedup_cols.append(extra_key)
-
-            # Distribute rows into per-symbol buckets
-            for name, group in combined.groupby(group_col):
-                symbol_new_data.setdefault(name, []).append(group)
-
-            del combined
-
-            if chunk_end < total_files:
-                elapsed = time.time() - t0
-                print(f"  [{label}] Read {chunk_end}/{total_files} raw files ({elapsed:.1f}s)...", flush=True)
-
-        if not symbol_new_data:
-            print(f"  [{label}] No data to merge.", flush=True)
-            return
-
-        # --- Phase 1.5: Pre-consolidate per-symbol DataFrames ---
-        # Concat all chunks per symbol into one DF and cast dtypes once here,
-        # avoiding redundant work in each parallel writer.
-        for name in symbol_new_data:
-            dfs = symbol_new_data[name]
-            merged = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
-            for col in merged.columns:
-                if merged[col].dtype == object and col != 'Date':
-                    merged[col] = merged[col].astype(str)
-            symbol_new_data[name] = merged
-            del dfs
-
-        num_symbols = len(symbol_new_data)
-        read_elapsed = time.time() - t0
-        if read_errors > 3:
-            print(f"  [{label}] ({read_errors - 3} more read errors suppressed)")
-        print(f"  [{label}] Read complete ({total_files} files, {num_symbols} symbols, "
-              f"{read_elapsed:.1f}s). Writing processed files...", flush=True)
-
-        # --- Phase 2: Write each processed file ONCE, in parallel ---
-        # Smart dedup: if all new dates are strictly after the existing file's
-        # max date, skip drop_duplicates + sort (just concat).  This is the
-        # common case for incremental updates and saves significant time.
-        final_dedup_cols = dedup_cols or ['Date']
-        write_errors = []
-        write_count = 0
-        write_lock = threading.Lock()
-
-        def _merge_and_write(item):
-            nonlocal write_count
-            name, new_data = item
-            file_path = target_dir / f"{name}.parquet"
-            try:
-                if file_path.exists():
-                    existing = pd.read_parquet(file_path, engine='pyarrow')
-                    # Smart shortcut: check date overlap
-                    new_min_date = new_data['Date'].min()
-                    existing_max_date = existing['Date'].max()
-                    if new_min_date > existing_max_date:
-                        # No overlap — new data is strictly newer.
-                        # Sort only the new chunk (existing is already sorted),
-                        # then append.  Skip dedup entirely.
-                        new_sorted = new_data.sort_values('Date')
-                        merged = pd.concat([existing, new_sorted], ignore_index=True)
-                        del new_sorted
-                    else:
-                        # Date ranges overlap — full dedup + sort required
-                        merged = pd.concat([existing, new_data], ignore_index=True)
-                        merged = merged.drop_duplicates(subset=final_dedup_cols, keep='last')
-                        merged = merged.sort_values('Date')
-                    del existing
-                else:
-                    # New symbol — just sort
-                    merged = new_data.sort_values('Date')
-                del new_data
-                merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
-                del merged
-            except Exception as e:
-                write_errors.append(f"{name}: {e}")
-
-            with write_lock:
-                write_count += 1
-
-        with ThreadPoolExecutor(max_workers=self.MERGE_WORKERS) as pool:
-            list(pool.map(_merge_and_write, symbol_new_data.items()))
-
-        del symbol_new_data
-
-        # Record merged filenames so they aren't re-processed next run
-        all_merged = already_merged | {f.name for f in files_to_merge}
-        try:
-            stamp_file.write_text('\n'.join(sorted(all_merged)))
-        except Exception as e:
-            print(f"  [{label}] Warning: could not update merge stamp: {e}")
+                print(f"  [{label}] Merge error in batch {mega_start}-{mega_end}: "
+                      f"{type(e).__name__}: {e}", flush=True)
+                try:
+                    del symbol_new_data
+                except NameError:
+                    pass
 
         elapsed = time.time() - t0
-        if write_errors:
-            for err in write_errors[:5]:
-                print(f"  [{label}] Write error: {err}")
-        print(f"  [{label}] Merge complete: {total_files} files → {num_symbols} symbols in {elapsed:.1f}s", flush=True)
+        print(f"  [{label}] Merge complete: {total_files} files → {total_symbols_written} symbol-writes "
+              f"in {elapsed:.1f}s", flush=True)
 
     # --- Concurrent download helpers ---
     DOWNLOAD_DELAY = 0.3  # Delay between scheduling downloads (seconds)
@@ -1441,6 +1619,11 @@ class NSEMarketDataDownloader:
 
     def _download_day_del(self, day: datetime.date) -> tuple:
         df = self.download_delivery_positions(day)
+        return (day, df)
+
+    def _download_day_wdm(self, day: datetime.date) -> tuple:
+        """Download WDM Daily Report for one day. Returns (day, df_or_None)."""
+        df = self.download_wdm_daily(day)
         return (day, df)
 
     NODATA_RETRY_SAMPLE = 10  # Number of random .nodata days to retry per category
@@ -1705,6 +1888,7 @@ class NSEMarketDataDownloader:
             ("PE Ratio",           self._download_day_pe,  PERATIO_RAW,       "pe",  PERATIO_PROCESSED),
             ("Corporate Bonds",    self._download_day_cb,  CORPBONDS_RAW,     "cb",  CORPBONDS_PROCESSED),
             ("Delivery Positions", self._download_day_del, DELIVERY_RAW,      "del", DELIVERY_PROCESSED),
+            ("WDM Daily",          self._download_day_wdm, WDM_RAW,           "wdm", WDM_PROCESSED),
         ]
 
         for label, download_fn, raw_dir, prefix, processed_dir in categories:
