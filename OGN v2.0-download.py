@@ -1410,11 +1410,14 @@ class NSEMarketDataDownloader:
         sample = random.sample(nodata_files, sample_size)
 
         # Always include today's .nodata if it exists (requirement: always
-        # retry today's date on every run)
-        today_str = datetime.date.today().strftime('%Y%m%d')
-        today_nodata = raw_dir / f"{raw_prefix}_{today_str}.nodata"
-        if today_nodata.exists() and today_nodata not in sample:
-            sample.append(today_nodata)
+        # retry today's date on every run — unless today is a weekend
+        # and not Budget day, in which case .nodata_weekend applies)
+        today = datetime.date.today()
+        today_is_trading = today.weekday() < 5 or (today.month, today.day) == BUDGET_DAY
+        if today_is_trading:
+            today_nodata = raw_dir / f"{raw_prefix}_{today.strftime('%Y%m%d')}.nodata"
+            if today_nodata.exists() and today_nodata not in sample:
+                sample.append(today_nodata)
 
         # Extract dates from filenames
         retry_items = []
@@ -1468,12 +1471,15 @@ class NSEMarketDataDownloader:
             print(f"  No new {label} days to download.", flush=True)
             return
 
-        # Today's date should always be re-attempted — delete any stale
-        # .nodata marker so it is not skipped in the filter below.
+        # Today's date should always be re-attempted on trading days —
+        # delete any stale .nodata marker so it is not skipped below.
+        # On weekends (except Budget day Feb 1), normal .nodata_weekend applies.
         today = datetime.date.today()
-        today_nodata = raw_dir / f"{raw_prefix}_{today.strftime('%Y%m%d')}.nodata"
-        if today_nodata.exists():
-            today_nodata.unlink(missing_ok=True)
+        today_is_trading = today.weekday() < 5 or (today.month, today.day) == BUDGET_DAY
+        if today_is_trading:
+            today_nodata = raw_dir / f"{raw_prefix}_{today.strftime('%Y%m%d')}.nodata"
+            if today_nodata.exists():
+                today_nodata.unlink(missing_ok=True)
 
         # Skip days that already have raw files, .nodata, or .nodata_weekend markers
         days_to_download = []
@@ -1567,9 +1573,9 @@ class NSEMarketDataDownloader:
                             success_count += 1
                         else:
                             # Genuine 404 / empty data — save marker to avoid retrying
-                            # Exception: never create .nodata for today — data may
-                            # appear later in the day; always retry on next run.
-                            if day != today:
+                            # Exception: never create .nodata for today (trading days
+                            # only) — data may appear later in the day; retry next run.
+                            if not (day == today and today_is_trading):
                                 nodata = raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.nodata"
                                 try:
                                     nodata.touch(exist_ok=True)
