@@ -1226,6 +1226,17 @@ class NSEMarketDataDownloader:
         for col in ['Traded Value', 'Traded Qty', 'No of Trades']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # Blanket fix: coerce ALL remaining object columns to numeric or string.
+        # Corporate Bonds CSVs have many columns (e.g. Last Trade Yield (YTM))
+        # that arrive as mixed float/str, causing pyarrow serialisation errors.
+        for col in df.columns:
+            if df[col].dtype == object and col not in ('Date', 'Symbol', 'Security Name'):
+                converted = pd.to_numeric(df[col], errors='coerce')
+                if converted.notna().sum() >= df[col].notna().sum() * 0.5:
+                    df[col] = converted
+                else:
+                    df[col] = df[col].astype(str)
         return df
 
     def _clean_delivery_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
@@ -1312,18 +1323,18 @@ class NSEMarketDataDownloader:
 
         df['Symbol'] = symbol_name
 
-        # Convert numeric-looking columns
+        # Convert numeric-looking columns; ensure no mixed-type object columns
+        # remain (pyarrow cannot serialise them to parquet).
         for col in df.columns:
             if col in ('Date', 'Symbol'):
                 continue
-            # Try numeric conversion — leave as string if it fails
-            try:
+            if df[col].dtype == object:
                 converted = pd.to_numeric(df[col], errors='coerce')
                 # Only apply if >50% of non-null values converted successfully
                 if converted.notna().sum() > 0.5 * df[col].notna().sum():
                     df[col] = converted
-            except Exception:
-                pass
+                else:
+                    df[col] = df[col].astype(str)
 
         return df
 
@@ -1367,6 +1378,62 @@ class NSEMarketDataDownloader:
         6. Per-mega-batch timeout (MERGE_TIMEOUT_S): if exceeded, the batch is
            skipped and an error is printed, but the script continues.
         """
+        # --- Phase 0: Retry previously failed symbol writes ---
+        retry_dir = raw_dir / ".retry"
+        if retry_dir.exists():
+            retry_files = sorted(retry_dir.glob("*.parquet"))
+            if retry_files:
+                print(f"  [{label}] Retrying {len(retry_files)} previously failed symbols...", flush=True)
+                retry_ok = 0
+                retry_fail = 0
+                for rf in retry_files:
+                    symbol = rf.stem
+                    try:
+                        new_data = pd.read_parquet(rf, engine='pyarrow')
+                        # Coerce object columns to clean types
+                        for col in new_data.columns:
+                            if new_data[col].dtype == object and col != 'Date':
+                                conv = pd.to_numeric(new_data[col], errors='coerce')
+                                if conv.notna().sum() >= new_data[col].notna().sum() * 0.5:
+                                    new_data[col] = conv
+                                else:
+                                    new_data[col] = new_data[col].astype(str)
+                        file_path = target_dir / f"{symbol}.parquet"
+                        if file_path.exists():
+                            existing = pd.read_parquet(file_path, engine='pyarrow')
+                            combined = pd.concat([existing, new_data], ignore_index=True)
+                            combined = combined.drop_duplicates(subset=['Date'], keep='last')
+                            combined = combined.sort_values('Date')
+                            del existing
+                        else:
+                            combined = new_data.sort_values('Date')
+                        # Coerce again after concat with existing (may re-introduce mixed types)
+                        for col in combined.columns:
+                            if combined[col].dtype == object and col != 'Date':
+                                conv = pd.to_numeric(combined[col], errors='coerce')
+                                if conv.notna().sum() >= combined[col].notna().sum() * 0.5:
+                                    combined[col] = conv
+                                else:
+                                    combined[col] = combined[col].astype(str)
+                        combined.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
+                        rf.unlink()
+                        retry_ok += 1
+                    except Exception as e:
+                        retry_fail += 1
+                        if retry_fail <= 3:
+                            print(f"    Retry failed for {symbol}: {e}")
+                if retry_ok:
+                    print(f"  [{label}] Retried {retry_ok} symbols successfully.", flush=True)
+                if retry_fail:
+                    print(f"  [{label}] {retry_fail} retries still failing.", flush=True)
+                # Clean up empty retry dir
+                remaining = list(retry_dir.glob("*.parquet"))
+                if not remaining:
+                    try:
+                        retry_dir.rmdir()
+                    except Exception:
+                        pass
+
         raw_files = sorted(raw_dir.glob(f"{raw_prefix}_*.parquet"))
         if not raw_files:
             print(f"  [{label}] No raw files to merge.", flush=True)
@@ -1491,7 +1558,12 @@ class NSEMarketDataDownloader:
                     merged = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
                     for col in merged.columns:
                         if merged[col].dtype == object and col != 'Date':
-                            merged[col] = merged[col].astype(str)
+                            # Try numeric first (handles mixed float/str columns)
+                            converted = pd.to_numeric(merged[col], errors='coerce')
+                            if converted.notna().sum() >= merged[col].notna().sum() * 0.5:
+                                merged[col] = converted
+                            else:
+                                merged[col] = merged[col].astype(str)
                     symbol_new_data[name] = merged
                     del dfs
 
@@ -1509,6 +1581,7 @@ class NSEMarketDataDownloader:
                 def _merge_and_write(item):
                     name, new_data = item
                     file_path = target_dir / f"{name}.parquet"
+                    merged = None
                     try:
                         if file_path.exists():
                             existing = pd.read_parquet(file_path, engine='pyarrow')
@@ -1526,10 +1599,31 @@ class NSEMarketDataDownloader:
                         else:
                             merged = new_data.sort_values('Date')
                         del new_data
+                        # Safety net: coerce any remaining mixed-type object columns
+                        # so pyarrow can serialise without "Expected bytes / got float"
+                        for col in merged.columns:
+                            if merged[col].dtype == object and col != 'Date':
+                                conv = pd.to_numeric(merged[col], errors='coerce')
+                                if conv.notna().sum() >= merged[col].notna().sum() * 0.5:
+                                    merged[col] = conv
+                                else:
+                                    merged[col] = merged[col].astype(str)
                         merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
                         del merged
                     except Exception as e:
                         write_errors.append(f"{name}: {e}")
+                        # Save failed data so it can be retried on next run
+                        try:
+                            retry_dir = raw_dir / ".retry"
+                            retry_dir.mkdir(exist_ok=True)
+                            save_df = merged if merged is not None else new_data
+                            for c in save_df.columns:
+                                if save_df[c].dtype == object:
+                                    save_df[c] = save_df[c].astype(str)
+                            save_df.to_parquet(retry_dir / f"{name}.parquet",
+                                               engine='pyarrow', compression='zstd', index=False)
+                        except Exception:
+                            pass  # best-effort retry save
 
                 with ThreadPoolExecutor(max_workers=self.MERGE_WORKERS) as pool:
                     list(pool.map(_merge_and_write, symbol_new_data.items()))
@@ -1681,6 +1775,13 @@ class NSEMarketDataDownloader:
                 # Success — save raw file and remove the .nodata marker
                 raw_file = raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet"
                 try:
+                    for _c in df.columns:
+                        if df[_c].dtype == object and _c != 'Date':
+                            _conv = pd.to_numeric(df[_c], errors='coerce')
+                            if _conv.notna().sum() >= df[_c].notna().sum() * 0.5:
+                                df[_c] = _conv
+                            else:
+                                df[_c] = df[_c].astype(str)
                     df.to_parquet(raw_file, engine='pyarrow', compression='zstd', index=False)
                     nodata_path.unlink(missing_ok=True)
                     recovered += 1
@@ -1797,6 +1898,15 @@ class NSEMarketDataDownloader:
                         _, df = future.result()
                         if df is not None:
                             try:
+                                # Safety net: coerce any remaining mixed-type
+                                # object columns so pyarrow can serialise them.
+                                for _c in df.columns:
+                                    if df[_c].dtype == object and _c != 'Date':
+                                        _conv = pd.to_numeric(df[_c], errors='coerce')
+                                        if _conv.notna().sum() >= df[_c].notna().sum() * 0.5:
+                                            df[_c] = _conv
+                                        else:
+                                            df[_c] = df[_c].astype(str)
                                 df.to_parquet(
                                     raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet",
                                     engine='pyarrow', compression='zstd', index=False
@@ -1877,6 +1987,8 @@ class NSEMarketDataDownloader:
         today = datetime.date.today()
         all_days = self.get_trading_days(DEFAULT_START_DATE, today)
 
+        # ── Category list ──────────────────────────────────────────────
+        # Comment out any line below to skip that category entirely.
         categories = [
             ("Equity",             self._download_day_cm,  EQUITY_RAW,        "cm",  EQUITY_PROCESSED),
             ("Derivatives",        self._download_day_fo,  DERIVATIVES_RAW,   "fo",  DERIVATIVES_PROCESSED),
