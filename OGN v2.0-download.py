@@ -794,6 +794,11 @@ class NSEMarketDataDownloader:
         }
         df = df.rename(columns=mapping)
         
+        if 'Symbol' not in df.columns:
+            df['Symbol'] = 'UNKNOWN'
+        else:
+            df['Symbol'] = df['Symbol'].astype(str).str.strip()
+
         # Select important columns
         cols = ['Date', 'Symbol', 'Series', 'Open', 'High', 'Low', 'Close', 'Last', 'Prev Close', 'Volume', 'Turnover']
         available_cols = [c for c in cols if c in df.columns]
@@ -824,6 +829,11 @@ class NSEMarketDataDownloader:
             'STRIKE_PR': 'Strike Price', 'OPTION_TYP': 'Option type'
         }
         df = df.rename(columns=mapping)
+
+        if 'Symbol' not in df.columns:
+            df['Symbol'] = 'UNKNOWN'
+        else:
+            df['Symbol'] = df['Symbol'].astype(str).str.strip()
         
         df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True).dt.date
         df['Expiry'] = pd.to_datetime(df['Expiry'], format='mixed', dayfirst=True).dt.date
@@ -910,13 +920,15 @@ class NSEMarketDataDownloader:
         """Standardizes Short Selling data."""
         df.columns = [c.strip() for c in df.columns]
         mapping = {
-            'Name of the Security': 'Symbol', 'SYMBOL': 'Symbol', 'Symbol': 'Symbol',
-            'NAME OF THE SECURITY': 'Symbol', 'Security Name': 'Symbol',
+            'Symbol Name': 'Symbol', 'Name of the Security': 'Symbol',
+            'SYMBOL': 'Symbol', 'Symbol': 'Symbol',
+            'NAME OF THE SECURITY': 'Symbol', 'Security Name': 'Security Name',
             'QTY Short Sold': 'Qty Short Sold', 'QTY OF SHORT SELL': 'Qty Short Sold',
             'Quantity Short Sold': 'Qty Short Sold', 'SHORT_SELL_QTY': 'Qty Short Sold',
+            'Quantity': 'Qty Short Sold',
             'QTY Short Bought Back': 'Qty Short Buy', 'QTY OF SHORT BUY BACK': 'Qty Short Buy',
             'Quantity of Short Buying': 'Qty Short Buy', 'SHORT_BUY_QTY': 'Qty Short Buy',
-            'DATE': 'Date', 'Date': 'Date',
+            'DATE': 'Date', 'Date': 'Date', 'Trade Date': 'Date',
         }
         df = df.rename(columns=mapping)
         if 'Date' not in df.columns:
@@ -925,6 +937,8 @@ class NSEMarketDataDownloader:
             df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
         if 'Symbol' in df.columns:
             df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        else:
+            df['Symbol'] = 'UNKNOWN'
         for col in ['Qty Short Sold', 'Qty Short Buy']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -950,6 +964,8 @@ class NSEMarketDataDownloader:
             df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
         if 'Symbol' in df.columns:
             df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        else:
+            df['Symbol'] = 'UNKNOWN'
         for col in ['Daily Volatility', 'Annl Volatility', 'Pct Change', 'Close', 'Prev Close']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
