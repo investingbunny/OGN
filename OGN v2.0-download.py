@@ -1217,15 +1217,16 @@ class NSEMarketDataDownloader:
                 group = group.sort_values('Date')
                 group.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
 
-    MERGE_WORKERS = 4  # Parallel threads for writing per-symbol parquet files
-    MERGE_READ_BATCH = 200  # Raw files to read per batch (memory control)
+    MERGE_WORKERS = 8  # Parallel threads for writing per-symbol parquet files
 
     def merge_raw_to_processed(self, raw_dir: Path, raw_prefix: str, target_dir: Path, label: str, group_col: str = 'Symbol'):
         """Merges raw day-parquet files from disk into per-symbol processed files.
 
         Strategy for speed:
-        1. Read raw files in large batches (MERGE_READ_BATCH at a time).
-        2. Concat + group by symbol ONCE per batch (single pass).
+        1. Read ALL raw files in one pass, streaming into a per-symbol dict
+           to avoid re-reading/re-writing the same processed file across batches.
+        2. Memory control: raw files are read in chunks of READ_CHUNK and
+           immediately grouped into per-symbol lists, then the chunk is freed.
         3. Write per-symbol files in parallel threads (I/O bound, releases GIL).
         """
         raw_files = sorted(raw_dir.glob(f"{raw_prefix}_*.parquet"))
@@ -1250,80 +1251,101 @@ class NSEMarketDataDownloader:
             return
 
         total_files = len(files_to_merge)
-        batch_size = self.MERGE_READ_BATCH
-        num_batches = (total_files + batch_size - 1) // batch_size
         t0 = time.time()
-        print(f"  [{label}] Merging {total_files} raw files in {num_batches} batch(es)...", flush=True)
+        print(f"  [{label}] Merging {total_files} raw files...", flush=True)
 
-        for batch_idx in range(num_batches):
-            start = batch_idx * batch_size
-            end = min(start + batch_size, total_files)
-            batch_files = files_to_merge[start:end]
+        # --- Phase 1: Read raw files in chunks, accumulate per-symbol ---
+        # Instead of grouping per batch (which re-reads processed files N times),
+        # accumulate ALL new data per symbol, then write each processed file ONCE.
+        READ_CHUNK = 200  # Files per read chunk (memory control)
+        symbol_new_data: Dict[str, List[pd.DataFrame]] = {}
+        dedup_cols = None  # Determined from first chunk
 
-            # --- Phase 1: Read raw files ---
-            batch_dfs = []
-            for f in batch_files:
+        for chunk_start in range(0, total_files, READ_CHUNK):
+            chunk_end = min(chunk_start + READ_CHUNK, total_files)
+            chunk_files = files_to_merge[chunk_start:chunk_end]
+
+            chunk_dfs = []
+            for f in chunk_files:
                 try:
-                    batch_dfs.append(pd.read_parquet(f, engine='pyarrow'))
+                    chunk_dfs.append(pd.read_parquet(f, engine='pyarrow'))
                 except Exception as e:
                     print(f"  [{label}] Error reading {f.name}: {e}")
 
-            if not batch_dfs:
+            if not chunk_dfs:
                 continue
 
-            combined_new = pd.concat(batch_dfs, ignore_index=True)
-            del batch_dfs
+            combined = pd.concat(chunk_dfs, ignore_index=True)
+            del chunk_dfs
 
-            if combined_new.empty:
-                del combined_new
+            if combined.empty:
+                del combined
                 continue
 
-            if group_col not in combined_new.columns:
+            if group_col not in combined.columns:
                 print(f"  [{label}] Warning: '{group_col}' missing — setting to 'UNKNOWN'.")
-                combined_new[group_col] = 'UNKNOWN'
+                combined[group_col] = 'UNKNOWN'
 
-            # --- Phase 2: Group once, build per-symbol DataFrames ---
-            grouped = combined_new.groupby(group_col)
-            symbol_names = list(grouped.groups.keys())
-            symbol_groups = {name: group for name, group in grouped}
-            del combined_new
+            # Determine dedup key columns once
+            if dedup_cols is None:
+                dedup_cols = ['Date']
+                for extra_key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
+                    if extra_key in combined.columns:
+                        dedup_cols.append(extra_key)
 
-            # Determine dedup key columns (same for all symbols in this category)
-            sample_df = next(iter(symbol_groups.values()))
-            dedup_cols = ['Date']
-            for extra_key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
-                if extra_key in sample_df.columns:
-                    dedup_cols.append(extra_key)
+            # Distribute rows into per-symbol buckets
+            for name, group in combined.groupby(group_col):
+                symbol_new_data.setdefault(name, []).append(group)
 
-            # --- Phase 3: Write in parallel ---
-            def _merge_and_write(name_group):
-                name, new_data = name_group
-                file_path = target_dir / f"{name}.parquet"
-                try:
-                    if file_path.exists():
-                        existing = pd.read_parquet(file_path, engine='pyarrow')
-                        merged = pd.concat([existing, new_data], ignore_index=True)
-                        merged = merged.drop_duplicates(subset=dedup_cols, keep='last')
-                        del existing
-                    else:
-                        merged = new_data
-                    merged = merged.sort_values('Date')
-                    for col in merged.columns:
-                        if merged[col].dtype == object and col != 'Date':
-                            merged[col] = merged[col].astype(str)
-                    merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
-                    del merged
-                except Exception as e:
-                    print(f"  [{label}] Error writing {name}.parquet: {e}")
+            del combined
 
-            with ThreadPoolExecutor(max_workers=self.MERGE_WORKERS) as pool:
-                list(pool.map(_merge_and_write, symbol_groups.items()))
+            if chunk_end < total_files:
+                elapsed = time.time() - t0
+                print(f"  [{label}] Read {chunk_end}/{total_files} raw files ({elapsed:.1f}s)...", flush=True)
 
-            del symbol_groups
+        if not symbol_new_data:
+            print(f"  [{label}] No data to merge.", flush=True)
+            return
 
-            elapsed = time.time() - t0
-            print(f"  [{label}] Merged batch {batch_idx + 1}/{num_batches} "
-                  f"({end - start} files, {len(symbol_names)} symbols, {elapsed:.1f}s elapsed)", flush=True)
+        num_symbols = len(symbol_new_data)
+        print(f"  [{label}] Read complete ({total_files} files, {num_symbols} symbols). Writing processed files...", flush=True)
+
+        # --- Phase 2: Write each processed file ONCE, in parallel ---
+        final_dedup_cols = dedup_cols or ['Date']
+        write_errors = []
+
+        def _merge_and_write(item):
+            name, new_dfs = item
+            file_path = target_dir / f"{name}.parquet"
+            try:
+                new_data = pd.concat(new_dfs, ignore_index=True) if len(new_dfs) > 1 else new_dfs[0]
+                if file_path.exists():
+                    existing = pd.read_parquet(file_path, engine='pyarrow')
+                    merged = pd.concat([existing, new_data], ignore_index=True)
+                    merged = merged.drop_duplicates(subset=final_dedup_cols, keep='last')
+                    del existing
+                else:
+                    merged = new_data
+                del new_data
+                merged = merged.sort_values('Date')
+                for col in merged.columns:
+                    if merged[col].dtype == object and col != 'Date':
+                        merged[col] = merged[col].astype(str)
+                merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
+                del merged
+            except Exception as e:
+                write_errors.append(f"{name}: {e}")
+
+        with ThreadPoolExecutor(max_workers=self.MERGE_WORKERS) as pool:
+            list(pool.map(_merge_and_write, symbol_new_data.items()))
+
+        del symbol_new_data
+
+        elapsed = time.time() - t0
+        if write_errors:
+            for err in write_errors[:5]:
+                print(f"  [{label}] Write error: {err}")
+        print(f"  [{label}] Merge complete: {total_files} files → {num_symbols} symbols in {elapsed:.1f}s", flush=True)
 
     def get_last_date(self, processed_dir: Path) -> datetime.date:
         """Finds the latest date across all processed files."""
