@@ -1504,12 +1504,25 @@ class NSEMarketDataDownloader:
 
         for label, download_fn, raw_dir, prefix, processed_dir in categories:
             print(f"\n--- {label} ---", flush=True)
+            cat_t0 = time.time()
             self._concurrent_download(all_days, download_fn, raw_dir, prefix, label)
             self.merge_raw_to_processed(raw_dir, prefix, processed_dir, label)
+            cat_elapsed = time.time() - cat_t0
+
+            # Diagnostics: file counts and sizes
+            raw_files = list(raw_dir.glob(f"{prefix}_*.parquet"))
+            nodata_files = list(raw_dir.glob(f"{prefix}_*.nodata"))
+            proc_files = list(processed_dir.glob("*.parquet"))
+            raw_size = sum(f.stat().st_size for f in raw_files) / (1024 * 1024)
+            proc_size = sum(f.stat().st_size for f in proc_files) / (1024 * 1024)
+            print(f"  [{label}] {len(raw_files)} raw files ({raw_size:.1f} MB), "
+                  f"{len(nodata_files)} no-data markers, "
+                  f"{len(proc_files)} processed files ({proc_size:.1f} MB), "
+                  f"took {cat_elapsed:.1f}s", flush=True)
             print(f"  {label} update done.", flush=True)
 
         elapsed = time.time() - t0
-        print(f"Update Complete. Total time: {elapsed:.1f}s")
+        print(f"\nUpdate Complete. Total time: {elapsed:.1f}s")
 
 def main():
     downloader = NSEMarketDataDownloader()
