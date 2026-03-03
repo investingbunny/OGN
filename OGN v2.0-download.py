@@ -159,23 +159,15 @@ class NSEMarketDataDownloader:
             path.mkdir(parents=True, exist_ok=True)
 
     def get_trading_days(self, start_date: datetime.date, end_date: datetime.date) -> List[datetime.date]:
-        """Returns candidate trading days: all weekdays plus Feb 1 if on a weekend.
+        """Returns all calendar days in the range.
 
-        Actual market holidays are handled via .nodata markers — a failed
-        download creates a marker so the day is never retried.
+        Weekend days are included so that _concurrent_download can create
+        .nodata_weekend markers for them (skipping HTTP requests).
+        Actual market holidays are handled via .nodata markers — a genuine
+        404 response creates a marker so the day is never retried.
         """
-        # All weekdays in range
-        bdays = pd.bdate_range(start=start_date, end=end_date)
-        days = [d.date() for d in bdays]
-
-        # Add Feb 1 (Budget day) for each year even if it falls on Sat/Sun
-        for year in range(start_date.year, end_date.year + 1):
-            feb1 = datetime.date(year, *BUDGET_DAY)
-            if start_date <= feb1 <= end_date and feb1 not in days:
-                days.append(feb1)
-
-        days.sort()
-        return days
+        all_days = pd.date_range(start=start_date, end=end_date, freq='D')
+        return [d.date() for d in all_days]
 
     def _download_file(self, url: str, referer: Optional[str] = None) -> Optional[bytes]:
         """Downloads a file with comprehensive error handling, retry logic, and backoff.
@@ -1427,6 +1419,64 @@ class NSEMarketDataDownloader:
         df = self.download_delivery_positions(day)
         return (day, df)
 
+    NODATA_RETRY_SAMPLE = 10  # Number of random .nodata days to retry per category
+
+    def _retry_nodata_sample(self, download_fn, raw_dir, raw_prefix, processed_dir, label):
+        """Retries a random sample of .nodata days to recover falsely-marked dates.
+
+        Picks up to NODATA_RETRY_SAMPLE random .nodata files, attempts to
+        download them again.  On success the .nodata marker is replaced with
+        the actual parquet file and the data is merged into processed output.
+        On failure the .nodata marker stays (day remains skipped).
+        """
+        nodata_files = list(raw_dir.glob(f"{raw_prefix}_*.nodata"))
+        if not nodata_files:
+            return
+
+        sample_size = min(self.NODATA_RETRY_SAMPLE, len(nodata_files))
+        sample = random.sample(nodata_files, sample_size)
+
+        # Extract dates from filenames
+        retry_items = []
+        for nf in sample:
+            try:
+                date_str = nf.stem.split('_', 1)[1]  # e.g. "20240115"
+                day = datetime.datetime.strptime(date_str, '%Y%m%d').date()
+                retry_items.append((day, nf))
+            except (IndexError, ValueError):
+                continue
+
+        if not retry_items:
+            return
+
+        print(f"  [{label}] Retrying {len(retry_items)} random no-data days...", flush=True)
+        recovered = 0
+
+        for day, nodata_path in retry_items:
+            try:
+                _, df = download_fn(day)
+            except (HTTP403Error, DownloadFailedError):
+                df = None
+            except Exception:
+                df = None
+
+            if df is not None:
+                # Success — save raw file and remove the .nodata marker
+                raw_file = raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet"
+                try:
+                    df.to_parquet(raw_file, engine='pyarrow', compression='zstd', index=False)
+                    nodata_path.unlink(missing_ok=True)
+                    recovered += 1
+                    print(f"    Recovered {day}", flush=True)
+                except Exception as e:
+                    print(f"    Failed to save recovered data for {day}: {e}")
+
+        if recovered > 0:
+            print(f"  [{label}] Recovered {recovered}/{len(retry_items)} days. Merging...", flush=True)
+            self.merge_raw_to_processed(raw_dir, raw_prefix, processed_dir, label)
+        else:
+            print(f"  [{label}] No data recovered from {len(retry_items)} retries.", flush=True)
+
     def _concurrent_download(self, days, download_fn, raw_dir, raw_prefix, label):
         """Downloads data for multiple days, newest first, skipping already-downloaded days.
 
@@ -1613,6 +1663,11 @@ class NSEMarketDataDownloader:
         for label, download_fn, raw_dir, prefix, processed_dir in categories:
             print(f"\n--- {label} ---", flush=True)
             cat_t0 = time.time()
+
+            # Spot-check: retry a random sample of .nodata days to recover any
+            # dates that were falsely marked due to transient failures
+            self._retry_nodata_sample(download_fn, raw_dir, prefix, processed_dir, label)
+
             self._concurrent_download(all_days, download_fn, raw_dir, prefix, label)
             self.merge_raw_to_processed(raw_dir, prefix, processed_dir, label)
             cat_elapsed = time.time() - cat_t0
