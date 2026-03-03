@@ -333,8 +333,12 @@ class NSEMarketDataDownloader:
     def _parse_delivery_content(self, content: bytes, date: datetime.date) -> Optional[pd.DataFrame]:
         """Parses Delivery Positions content (DAT/CSV/ZIP formats).
 
-        DAT files from NSE are comma or pipe delimited with record type markers
-        and may lack column headers.
+        MTO DAT files from NSE have a multi-line preamble:
+          Line 1: Title ("Security Wise Delivery Position ...")
+          Line 2: "10,MTO,..." metadata
+          Line 3: "Trade Date <...>,Settlement Type <...>"
+          Line 4: Column header ("Record Type,Sr No,Name of Security,...")
+          Line 5+: Data rows ("20,1,SYMBOL,...")
         """
         try:
             raw_bytes = content
@@ -363,23 +367,62 @@ class NSEMarketDataDownloader:
             if text is None:
                 return None
 
-            # Detect delimiter
-            first_line = text.strip().split('\n')[0] if text.strip() else ''
-            sep = '|' if '|' in first_line else ','
+            lines = text.strip().split('\n')
 
-            # Read CSV
-            df = pd.read_csv(io.StringIO(text), sep=sep, on_bad_lines='skip',
-                             skipinitialspace=True)
+            # Find the actual header line — look for a line containing
+            # "Record Type" or "Name of Security" or "Quantity Traded"
+            header_idx = None
+            for i, line in enumerate(lines):
+                line_lower = line.lower()
+                if ('record type' in line_lower and 'name of security' in line_lower) or \
+                   ('record type' in line_lower and 'quantity traded' in line_lower):
+                    header_idx = i
+                    break
+
+            if header_idx is not None:
+                # Read data lines only (skip header — it's often missing the Series column)
+                data_text = '\n'.join(lines[header_idx + 1:])
+                sep = '|' if '|' in lines[header_idx] else ','
+
+                # Count fields in header vs first data line to detect mismatch
+                header_fields = len(lines[header_idx].split(sep))
+                first_data = lines[header_idx + 1].strip() if header_idx + 1 < len(lines) else ''
+                data_fields = len(first_data.split(sep)) if first_data else header_fields
+
+                if data_fields > header_fields:
+                    # Header is missing columns (common: Series column missing)
+                    # Use known 7-column layout: Record Type, Sr No, Symbol, Series, Qty, Deliv Qty, Pct
+                    std_cols = ['Record Type', 'Sr No', 'Symbol', 'Series',
+                                'Qty Traded', 'Deliverable Qty', 'Delivery Pct']
+                    df = pd.read_csv(io.StringIO(data_text), sep=sep, header=None,
+                                     on_bad_lines='skip', skipinitialspace=True)
+                    if len(df.columns) <= len(std_cols):
+                        df.columns = std_cols[:len(df.columns)]
+                    else:
+                        df.columns = std_cols + [f'Extra_{i}' for i in range(len(df.columns) - len(std_cols))]
+                else:
+                    # Header matches data — use it
+                    full_text = '\n'.join(lines[header_idx:])
+                    df = pd.read_csv(io.StringIO(full_text), sep=sep, on_bad_lines='skip',
+                                     skipinitialspace=True)
+            else:
+                # Fallback: detect delimiter and try reading as-is
+                first_line = lines[0] if lines else ''
+                sep = '|' if '|' in first_line else ','
+                df = pd.read_csv(io.StringIO(text), sep=sep, on_bad_lines='skip',
+                                 skipinitialspace=True)
+
             if df is None or df.empty:
                 return None
 
             # If first column name is numeric, it's a headerless DAT file
             first_col_name = str(df.columns[0]).strip()
             if first_col_name.isdigit():
-                df = pd.read_csv(io.StringIO(text), sep=sep, header=None,
+                df = pd.read_csv(io.StringIO(data_text if header_idx is not None else text),
+                                 sep=sep, header=None,
                                  on_bad_lines='skip', skipinitialspace=True)
-                std_cols = ['Record Type', 'Symbol', 'Series', 'Qty Traded',
-                            'Deliverable Qty', 'Delivery Pct']
+                std_cols = ['Record Type', 'Sr No', 'Symbol', 'Series',
+                            'Qty Traded', 'Deliverable Qty', 'Delivery Pct']
                 if len(df.columns) <= len(std_cols):
                     df.columns = std_cols[:len(df.columns)]
                 else:
@@ -1027,20 +1070,29 @@ class NSEMarketDataDownloader:
 
         mapping = {
             'SYMBOL': 'Symbol', 'Symbol': 'Symbol', 'NAME OF SECURITY': 'Symbol',
+            'Name of Security': 'Symbol',
             'TckrSymb': 'Symbol', 'NAME': 'Symbol',
             'SERIES': 'Series', 'Series': 'Series', 'SctySrs': 'Series',
             'QUANTITY TRADED': 'Qty Traded', 'QTY_TRADED': 'Qty Traded',
             'Qty Traded': 'Qty Traded', 'TtlTradgVol': 'Qty Traded',
+            'Quantity Traded': 'Qty Traded',
             'DELIVERABLE QTY': 'Deliverable Qty', 'DELIVERABLE_QTY': 'Deliverable Qty',
             'Deliverable Qty(Demat)': 'Deliverable Qty', 'DlvrblQty': 'Deliverable Qty',
             'Deliverable Qty': 'Deliverable Qty',
+            'Deliverable Quantity(gross across client level)': 'Deliverable Qty',
             '% OF DELIVERABLE QTY TO TRADED QTY': 'Delivery Pct',
             'DELV_PER': 'Delivery Pct', 'DELV_PERC': 'Delivery Pct',
             'Delivery Pct': 'Delivery Pct', '% Dly Qt to Traded Qty': 'Delivery Pct',
             'PctgDlvryQty': 'Delivery Pct',
+            '% of Deliverable Quantity to Traded Quantity': 'Delivery Pct',
             'DATE': 'Date', 'Date': 'Date', 'TIMESTAMP': 'Date',
         }
         df = df.rename(columns=mapping)
+
+        # Drop helper columns
+        for drop_col in ['Sr No']:
+            if drop_col in df.columns:
+                df = df.drop(columns=[drop_col])
 
         if 'Date' not in df.columns:
             df['Date'] = date
@@ -1048,6 +1100,8 @@ class NSEMarketDataDownloader:
             df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
         if 'Symbol' in df.columns:
             df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        else:
+            df['Symbol'] = 'UNKNOWN'
         for col in ['Qty Traded', 'Deliverable Qty', 'Delivery Pct']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
