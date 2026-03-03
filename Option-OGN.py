@@ -12,8 +12,11 @@ multi-panel technical analysis charts including:
   - Support / resistance trendlines (optional, requires trendln)
 
 Usage:
-    python Option-OGN.py              # analyse all FnO symbols
-    python Option-OGN.py RELIANCE     # analyse a single symbol
+    python Option-OGN.py                    # analyse all FnO symbols (interactive)
+    python Option-OGN.py RELIANCE             # analyse a single symbol (interactive)
+    python Option-OGN.py --pdf                # all FnO symbols → charts/FnO_Analysis.pdf
+    python Option-OGN.py --pdf RELIANCE       # single symbol → charts/RELIANCE_Analysis.pdf
+    python Option-OGN.py --pdf output.pdf     # custom output file
 
 @author: HRTR
 """
@@ -26,6 +29,7 @@ from functools import reduce
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.patches
+from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.dates import date2num
 import mplfinance as mpf
 import pandas as pd
@@ -347,28 +351,35 @@ def PlotRenko(DF, num_bars=100):
     plt.xlabel('Bar Number')
     plt.ylabel('Price')
     plt.grid(True)
-    plt.show()
+    return fig
 
 
 # ---------------------------------------------------------------------------
 # Main chart builder
 # ---------------------------------------------------------------------------
 
-def plot_chart(DF, n, ticker, Dividend=0):
+def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     """Generate the multi-panel technical analysis chart.
 
     Args:
-        DF:       DataFrame with indicators already computed
-        n:        Number of trailing bars to display
-        ticker:   Symbol name
-        Dividend: Expected dividend (for futures fair-value calc)
+        DF:        DataFrame with indicators already computed
+        n:         Number of trailing bars to display
+        ticker:    Symbol name
+        Dividend:  Expected dividend (for futures fair-value calc)
+        pdf_pages: Optional PdfPages object — if set, saves to PDF instead of plt.show()
     """
     data = DF.copy()
 
     # Renko chart
     if HAS_RENKO:
         renkodata = Renko_DF(data, ticker)
-        PlotRenko(renkodata, 100)
+        renko_fig = PlotRenko(renkodata, 100)
+        if renko_fig:
+            if pdf_pages:
+                pdf_pages.savefig(renko_fig)
+                plt.close(renko_fig)
+            else:
+                plt.show()
 
     data = data.iloc[-n:]
 
@@ -572,7 +583,11 @@ def plot_chart(DF, n, ticker, Dividend=0):
         ax_maxpain.legend()
         ax_maxpain.plot(data.index, data['Close'], color='black', linewidth=0.8)
 
-    plt.show()
+    if pdf_pages:
+        pdf_pages.savefig(fig2)
+        plt.close(fig2)
+    else:
+        plt.show()
 
     # ── Trendlines (optional) ─────────────────────────────────────────
     if HAS_TRENDLN:
@@ -583,7 +598,11 @@ def plot_chart(DF, n, ticker, Dividend=0):
             fig3 = trendln.plot_sup_res_date(
                 (tl_data['Low'], tl_data['High']), tl_data.index)
             fig3.set_size_inches((16, 9))
-            plt.show()
+            if pdf_pages:
+                pdf_pages.savefig(fig3)
+                plt.close(fig3)
+            else:
+                plt.show()
             plt.clf()
         except Exception as e:
             print(f"  [warn] trendln failed: {e}")
@@ -593,12 +612,13 @@ def plot_chart(DF, n, ticker, Dividend=0):
 # Main analysis orchestrator
 # ---------------------------------------------------------------------------
 
-def FnOAnalysis(scrip_list=None, single_scrip=None):
+def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None):
     """Run technical analysis for each symbol in the list.
 
     Args:
-        scrip_list: List of symbols to analyse (default: NSEFnOList)
+        scrip_list:   List of symbols to analyse (default: NSEFnOList)
         single_scrip: If set, analyse only this one symbol
+        pdf_path:     If set, save all charts to this PDF file
     """
     if single_scrip:
         symbols = [single_scrip]
@@ -606,6 +626,15 @@ def FnOAnalysis(scrip_list=None, single_scrip=None):
         symbols = scrip_list
     else:
         symbols = NSEFnOList
+
+    # Set non-interactive backend for PDF output
+    pdf_pages = None
+    if pdf_path:
+        matplotlib.use('Agg')
+        from pathlib import Path
+        Path(pdf_path).parent.mkdir(parents=True, exist_ok=True)
+        pdf_pages = PdfPages(pdf_path)
+        print(f"  Saving charts to: {pdf_path}")
 
     for Scrip in symbols:
         print(f"\n{'='*60}")
@@ -683,7 +712,11 @@ def FnOAnalysis(scrip_list=None, single_scrip=None):
         Indicatordf.reset_index(inplace=True)
 
         # ── Plot ──────────────────────────────────────────────────────
-        plot_chart(Indicatordf, 60, Scrip, 0)
+        plot_chart(Indicatordf, 60, Scrip, 0, pdf_pages=pdf_pages)
+
+    if pdf_pages:
+        pdf_pages.close()
+        print(f"\n  PDF saved: {pdf_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -691,12 +724,36 @@ def FnOAnalysis(scrip_list=None, single_scrip=None):
 # ---------------------------------------------------------------------------
 
 def main():
-    """CLI entry point. Pass a symbol name as argument, or run all FnO."""
-    if len(sys.argv) > 1:
-        symbol = sys.argv[1].upper()
-        FnOAnalysis(single_scrip=symbol)
-    else:
-        FnOAnalysis()
+    """CLI entry point.
+
+    Usage:
+        python Option-OGN.py                    # interactive, all FnO
+        python Option-OGN.py RELIANCE             # interactive, single symbol
+        python Option-OGN.py --pdf                # PDF, all FnO → charts/FnO_Analysis.pdf
+        python Option-OGN.py --pdf RELIANCE       # PDF, single → charts/RELIANCE_Analysis.pdf
+        python Option-OGN.py --pdf output.pdf     # PDF, all FnO → output.pdf
+    """
+    args = sys.argv[1:]
+    use_pdf = '--pdf' in args
+    if use_pdf:
+        args.remove('--pdf')
+
+    symbol = None
+    pdf_path = None
+
+    for arg in args:
+        if arg.lower().endswith('.pdf'):
+            pdf_path = arg
+        else:
+            symbol = arg.upper()
+
+    if use_pdf and not pdf_path:
+        if symbol:
+            pdf_path = f"charts/{symbol}_Analysis.pdf"
+        else:
+            pdf_path = "charts/FnO_Analysis.pdf"
+
+    FnOAnalysis(single_scrip=symbol, pdf_path=pdf_path if use_pdf else None)
 
 
 if __name__ == "__main__":
