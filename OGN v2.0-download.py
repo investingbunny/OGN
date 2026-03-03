@@ -1409,6 +1409,13 @@ class NSEMarketDataDownloader:
         sample_size = min(self.NODATA_RETRY_SAMPLE, len(nodata_files))
         sample = random.sample(nodata_files, sample_size)
 
+        # Always include today's .nodata if it exists (requirement: always
+        # retry today's date on every run)
+        today_str = datetime.date.today().strftime('%Y%m%d')
+        today_nodata = raw_dir / f"{raw_prefix}_{today_str}.nodata"
+        if today_nodata.exists() and today_nodata not in sample:
+            sample.append(today_nodata)
+
         # Extract dates from filenames
         retry_items = []
         for nf in sample:
@@ -1460,6 +1467,13 @@ class NSEMarketDataDownloader:
         if not days:
             print(f"  No new {label} days to download.", flush=True)
             return
+
+        # Today's date should always be re-attempted — delete any stale
+        # .nodata marker so it is not skipped in the filter below.
+        today = datetime.date.today()
+        today_nodata = raw_dir / f"{raw_prefix}_{today.strftime('%Y%m%d')}.nodata"
+        if today_nodata.exists():
+            today_nodata.unlink(missing_ok=True)
 
         # Skip days that already have raw files, .nodata, or .nodata_weekend markers
         days_to_download = []
@@ -1553,11 +1567,14 @@ class NSEMarketDataDownloader:
                             success_count += 1
                         else:
                             # Genuine 404 / empty data — save marker to avoid retrying
-                            nodata = raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.nodata"
-                            try:
-                                nodata.touch(exist_ok=True)
-                            except OSError:
-                                pass
+                            # Exception: never create .nodata for today — data may
+                            # appear later in the day; always retry on next run.
+                            if day != today:
+                                nodata = raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.nodata"
+                                try:
+                                    nodata.touch(exist_ok=True)
+                                except OSError:
+                                    pass
                             batch_results[day] = ('nodata',)
                             failed_days.append(day)
                     except HTTP403Error:
