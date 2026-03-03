@@ -80,13 +80,26 @@ DELIVERY_PROCESSED = DATA_ROOT / "DeliveryPositions" / "Processed"
 
 # Budget day (Feb 1) is always attempted even if it falls on a weekend.
 # Actual market holidays (Republic Day, Holi, etc.) vary each year and are
-# handled dynamically: a failed download creates a .nodata marker so the
-# day is never retried.
+# handled dynamically: a genuine 404 creates a .nodata marker so the day
+# is never retried.  Weekend dates (Feb 1 on Sat/Sun) get a .nodata_weekend
+# marker without making any HTTP request.  Transient failures (403, timeouts,
+# etc.) do NOT create markers so they are retried on the next run.
 BUDGET_DAY = (2, 1)  # (month, day) — always try this date
 
 
 class HTTP403Error(Exception):
     """Raised when the server returns 403 Forbidden (data not available)."""
+    pass
+
+
+class DownloadFailedError(Exception):
+    """Raised when download fails due to transient/non-404 errors.
+
+    Unlike HTTP403Error (access denied) or a None return (genuine 404),
+    this indicates the download could not be completed but the data may
+    still exist.  Days that fail with this error should NOT be marked
+    with .nodata so they can be retried on the next run.
+    """
     pass
 
 
@@ -173,9 +186,17 @@ class NSEMarketDataDownloader:
         - HTTP 404: Not found — returns None immediately (no retry)
         - ConnectionError: Network issues, resets — retries with backoff
         - Timeout: Slow server — retries with increasing timeout
-        - SSLError: Certificate issues — retries once then skips
+        - SSLError: Certificate issues — retries once then raises DownloadFailedError
         - ChunkedEncodingError: Incomplete response — retries
         - HTML error pages disguised as 200 — detected and treated as failure
+
+        Returns:
+            bytes on success, None on HTTP 404 (genuine not-found).
+
+        Raises:
+            HTTP403Error: On HTTP 403 (access denied, never retried).
+            DownloadFailedError: On all other failures after retries exhausted
+                (transient errors, HTML block pages, SSL errors, etc.).
         """
         # Throttle: ensure minimum gap between requests across all threads
         with self._throttle_lock:
@@ -231,7 +252,7 @@ class NSEMarketDataDownloader:
                             self._init_session()
                             time.sleep(delay)
                             continue
-                        return None
+                        raise DownloadFailedError(f"HTML error page for {url.split('?')[0]}")
                     self._consecutive_failures = 0
                     return r.content
 
@@ -288,7 +309,7 @@ class NSEMarketDataDownloader:
                 print(f"  SSL error (attempt {attempt+1}/{max_retries}): {e}")
                 if attempt >= 1:
                     # SSL errors are usually not transient — don't keep retrying
-                    return None
+                    raise DownloadFailedError(f"Persistent SSL error for {url.split('?')[0]}")
                 time.sleep(delay)
 
             except requests.exceptions.ChunkedEncodingError as e:
@@ -315,8 +336,8 @@ class NSEMarketDataDownloader:
                 print(f"  Unexpected error (attempt {attempt+1}/{max_retries}): {type(e).__name__}: {e}")
                 time.sleep(delay)
 
-        print(f"  All {max_retries} attempts exhausted for {url.split('?')[0]}")
-        return None
+        raise DownloadFailedError(
+            f"All {max_retries} attempts exhausted for {url.split('?')[0]}")
 
     # --- Generic report parsing helpers ---
 
@@ -334,7 +355,11 @@ class NSEMarketDataDownloader:
 
     def _parse_report_content(self, content: bytes, date: datetime.date,
                                clean_fn, label: str) -> Optional[pd.DataFrame]:
-        """Parses downloaded report content (handles both ZIP and plain CSV)."""
+        """Parses downloaded report content (handles both ZIP and plain CSV).
+
+        Returns None if data is genuinely empty (no rows).
+        Raises DownloadFailedError if content could not be decoded/parsed.
+        """
         try:
             if content[:2] == b'PK':
                 with zipfile.ZipFile(io.BytesIO(content)) as z:
@@ -350,20 +375,29 @@ class NSEMarketDataDownloader:
                 raw_bytes = content
 
             df = self._read_csv_with_encoding(raw_bytes)
-            if df is None or df.empty:
+            if df is None:
+                raise DownloadFailedError(f"Could not decode {label} CSV for {date}")
+            if df.empty:
                 return None
             return clean_fn(df, date)
         except zipfile.BadZipFile:
             df = self._read_csv_with_encoding(content)
-            if df is None or df.empty:
+            if df is None:
+                raise DownloadFailedError(f"Could not decode {label} (bad zip fallback) for {date}")
+            if df.empty:
                 return None
             return clean_fn(df, date)
+        except DownloadFailedError:
+            raise
         except Exception as e:
             print(f"Error parsing {label} for {date}: {e}")
-            return None
+            raise DownloadFailedError(f"Parse error for {label} {date}: {e}") from e
 
     def _parse_delivery_content(self, content: bytes, date: datetime.date) -> Optional[pd.DataFrame]:
         """Parses Delivery Positions content (DAT/CSV/ZIP formats).
+
+        Returns None if data is genuinely empty.
+        Raises DownloadFailedError if content could not be decoded/parsed.
 
         MTO DAT files from NSE have a multi-line preamble:
           Line 1: Title ("Security Wise Delivery Position ...")
@@ -397,7 +431,7 @@ class NSEMarketDataDownloader:
                 except (UnicodeDecodeError, UnicodeError):
                     continue
             if text is None:
-                return None
+                raise DownloadFailedError(f"Could not decode Delivery Positions for {date}")
 
             lines = text.strip().split('\n')
 
@@ -444,7 +478,9 @@ class NSEMarketDataDownloader:
                 df = pd.read_csv(io.StringIO(text), sep=sep, on_bad_lines='skip',
                                  skipinitialspace=True)
 
-            if df is None or df.empty:
+            if df is None:
+                raise DownloadFailedError(f"Could not parse Delivery Positions CSV for {date}")
+            if df.empty:
                 return None
 
             # If first column name is numeric, it's a headerless DAT file
@@ -461,9 +497,11 @@ class NSEMarketDataDownloader:
                     df.columns = std_cols + [f'Extra_{i}' for i in range(len(df.columns) - len(std_cols))]
 
             return self._clean_delivery_data(df, date)
+        except DownloadFailedError:
+            raise
         except Exception as e:
             print(f"Error parsing Delivery Positions for {date}: {e}")
-            return None
+            raise DownloadFailedError(f"Parse error for Delivery Positions {date}: {e}") from e
 
     def download_cm_bhavcopy(self, date: datetime.date) -> Optional[pd.DataFrame]:
         """Downloads Equity (Capital Market) Bhavcopy for a given date."""
@@ -472,7 +510,7 @@ class NSEMarketDataDownloader:
             url = f"{ARCHIVE_URL}/content/cm/BhavCopy_NSE_CM_0_0_0_{date.strftime('%Y%m%d')}_F_0000.csv.zip"
             try:
                 content = self._download_file(url, referer=ALL_REPORTS_URL)
-            except HTTP403Error:
+            except (HTTP403Error, DownloadFailedError):
                 content = None
 
             if not content:
@@ -486,7 +524,7 @@ class NSEMarketDataDownloader:
             url = f"{ARCHIVE_URL}/content/historical/EQUITIES/{date.strftime('%Y')}/{date.strftime('%b').upper()}/cm{date.strftime('%d%b%Y').upper()}bhav.csv.zip"
             try:
                 content = self._download_file(url, referer=ALL_REPORTS_URL)
-            except HTTP403Error:
+            except (HTTP403Error, DownloadFailedError):
                 # Fallback: try Reports API for older dates
                 report_name = "CM-UDiFF Common Bhavcopy Final (zip)"
                 archives = [{"name": report_name, "type": "archives", "category": "capital-market", "section": "equities"}]
@@ -494,8 +532,8 @@ class NSEMarketDataDownloader:
                 api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
                 try:
                     content = self._download_file(api_url, referer=ALL_REPORTS_URL)
-                except HTTP403Error:
-                    raise  # Both sources failed with 403
+                except (HTTP403Error, DownloadFailedError):
+                    raise  # Both sources failed
 
         if not content:
             return None
@@ -506,9 +544,11 @@ class NSEMarketDataDownloader:
                 with z.open(csv_filename) as f:
                     df = pd.read_csv(f)
                     return self._clean_cm_data(df, date)
+        except DownloadFailedError:
+            raise
         except Exception as e:
             print(f"Error parsing CM Bhavcopy for {date}: {e}")
-            return None
+            raise DownloadFailedError(f"Parse error for CM Bhavcopy {date}: {e}") from e
 
     def download_fo_bhavcopy(self, date: datetime.date) -> Optional[pd.DataFrame]:
         """Downloads Derivatives (F&O) Bhavcopy for a given date."""
@@ -517,7 +557,7 @@ class NSEMarketDataDownloader:
             url = f"{ARCHIVE_URL}/content/fo/BhavCopy_NSE_FO_0_0_0_{date.strftime('%Y%m%d')}_F_0000.csv.zip"
             try:
                 content = self._download_file(url, referer=ALL_REPORTS_URL)
-            except HTTP403Error:
+            except (HTTP403Error, DownloadFailedError):
                 content = None
 
             if not content:
@@ -531,7 +571,7 @@ class NSEMarketDataDownloader:
             url = f"{ARCHIVE_URL}/content/historical/DERIVATIVES/{date.strftime('%Y')}/{date.strftime('%b').upper()}/fo{date.strftime('%d%b%Y').upper()}bhav.csv.zip"
             try:
                 content = self._download_file(url, referer=ALL_REPORTS_URL)
-            except HTTP403Error:
+            except (HTTP403Error, DownloadFailedError):
                 # Fallback: try Reports API for older dates
                 report_name = "F&O - UDiFF Common Bhavcopy Final (zip)"
                 archives = [{"name": report_name, "type": "archives", "category": "derivatives", "section": "derivatives"}]
@@ -539,8 +579,8 @@ class NSEMarketDataDownloader:
                 api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=derivatives&mode=single"
                 try:
                     content = self._download_file(api_url, referer=ALL_REPORTS_URL)
-                except HTTP403Error:
-                    raise  # Both sources failed with 403
+                except (HTTP403Error, DownloadFailedError):
+                    raise  # Both sources failed
 
         if not content:
             return None
@@ -551,9 +591,11 @@ class NSEMarketDataDownloader:
                 with z.open(csv_filename) as f:
                     df = pd.read_csv(f)
                     return self._clean_fo_data(df, date)
+        except DownloadFailedError:
+            raise
         except Exception as e:
             print(f"Error parsing FO Bhavcopy for {date}: {e}")
-            return None
+            raise DownloadFailedError(f"Parse error for FO Bhavcopy {date}: {e}") from e
 
     def download_indices_report(self, date: datetime.date) -> Optional[pd.DataFrame]:
         """Downloads Indices data for a given date.
@@ -565,7 +607,7 @@ class NSEMarketDataDownloader:
         url = f"{ARCHIVE_URL}/content/indices/ind_close_all_{date.strftime('%d%m%Y')}.csv"
         try:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
-        except HTTP403Error:
+        except (HTTP403Error, DownloadFailedError):
             content = None
 
         if content:
@@ -584,7 +626,7 @@ class NSEMarketDataDownloader:
         url = f"{ARCHIVE_URL}/archives/equities/bhavcopy/pr/PR{date.strftime('%d%m%y')}.zip"
         try:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
-        except HTTP403Error:
+        except (HTTP403Error, DownloadFailedError):
             raise
 
         if not content:
@@ -647,16 +689,20 @@ class NSEMarketDataDownloader:
                     except Exception:
                         break
 
-                if df is None or df.empty:
+                if df is None:
+                    raise DownloadFailedError(f"Could not decode Indices PR CSV for {date}")
+                if df.empty:
                     return None
 
                 df = df.head(100)
                 return self._clean_indices_data(df, date)
         except zipfile.BadZipFile:
-            return None
+            raise DownloadFailedError(f"Corrupt ZIP for Indices PR {date}")
+        except DownloadFailedError:
+            raise
         except Exception as e:
             print(f"Error parsing Indices PR for {date}: {e}")
-            return None
+            raise DownloadFailedError(f"Parse error for Indices PR {date}: {e}") from e
 
     # --- New Report Downloads ---
 
@@ -666,7 +712,7 @@ class NSEMarketDataDownloader:
         url = f"{ARCHIVE_URL}/archives/equities/shortSelling/shortselling_{date.strftime('%d%m%Y')}.csv"
         try:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
-        except HTTP403Error:
+        except (HTTP403Error, DownloadFailedError):
             content = None
 
         # Fallback: try Reports API
@@ -686,7 +732,7 @@ class NSEMarketDataDownloader:
         url = f"{ARCHIVE_URL}/archives/nsccl/volt/CMVOLT_{date.strftime('%d%m%Y')}.CSV"
         try:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
-        except HTTP403Error:
+        except (HTTP403Error, DownloadFailedError):
             content = None
 
         # Fallback: try Reports API
@@ -706,7 +752,7 @@ class NSEMarketDataDownloader:
         url = f"{ARCHIVE_URL}/archives/equities/mkt/MA{date.strftime('%d%m%y')}.csv"
         try:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
-        except HTTP403Error:
+        except (HTTP403Error, DownloadFailedError):
             content = None
 
         # Fallback: try Reports API
@@ -726,7 +772,7 @@ class NSEMarketDataDownloader:
         url = f"{ARCHIVE_URL}/content/equities/eq_band_changes_{date.strftime('%d%m%Y')}.csv"
         try:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
-        except HTTP403Error:
+        except (HTTP403Error, DownloadFailedError):
             content = None
 
         # Fallback: try Reports API
@@ -752,7 +798,7 @@ class NSEMarketDataDownloader:
         api_url = f"{BASE_URL}/api/reports?archives={archives_str}&date={date.strftime('%d-%b-%Y')}&type=equities&mode=single"
         try:
             content = self._download_file(api_url, referer=ALL_REPORTS_URL)
-        except HTTP403Error:
+        except (HTTP403Error, DownloadFailedError):
             content = None
 
         if not content:
@@ -765,7 +811,7 @@ class NSEMarketDataDownloader:
         url = f"{ARCHIVE_URL}/archives/debt/cbm/cbm_trd{date.strftime('%Y%m%d')}.csv"
         try:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
-        except HTTP403Error:
+        except (HTTP403Error, DownloadFailedError):
             content = None
 
         # Fallback: try Reports API
@@ -788,7 +834,7 @@ class NSEMarketDataDownloader:
         url = f"{ARCHIVE_URL}/archives/equities/mto/MTO_{date.strftime('%d%m%Y')}.DAT"
         try:
             content = self._download_file(url, referer=ALL_REPORTS_URL)
-        except HTTP403Error:
+        except (HTTP403Error, DownloadFailedError):
             content = None
 
         # Fallback: try Reports API
@@ -1358,23 +1404,44 @@ class NSEMarketDataDownloader:
             print(f"  No new {label} days to download.", flush=True)
             return
 
-        # Skip days that already have raw files or .nodata markers on disk
+        # Skip days that already have raw files, .nodata, or .nodata_weekend markers
         days_to_download = []
         skipped = 0
         nodata_skipped = 0
+        weekend_skipped = 0
+        weekend_marked = 0
         for day in days:
             ds = day.strftime('%Y%m%d')
             raw_file = raw_dir / f"{raw_prefix}_{ds}.parquet"
             nodata_file = raw_dir / f"{raw_prefix}_{ds}.nodata"
+            nodata_wknd = raw_dir / f"{raw_prefix}_{ds}.nodata_weekend"
             if raw_file.exists():
                 skipped += 1
+            elif nodata_wknd.exists():
+                weekend_skipped += 1
             elif nodata_file.exists():
                 nodata_skipped += 1
+            elif day.weekday() >= 5:
+                # Weekend (Sat=5, Sun=6) — no trading, skip without requesting
+                try:
+                    nodata_wknd.touch(exist_ok=True)
+                except OSError:
+                    pass
+                weekend_marked += 1
             else:
                 days_to_download.append(day)
 
-        if skipped > 0 or nodata_skipped > 0:
-            print(f"  [{label}] Skipping {skipped} downloaded + {nodata_skipped} no-data days, {len(days_to_download)} remaining.", flush=True)
+        skip_parts = []
+        if skipped > 0:
+            skip_parts.append(f"{skipped} downloaded")
+        if nodata_skipped > 0:
+            skip_parts.append(f"{nodata_skipped} no-data")
+        if weekend_skipped > 0:
+            skip_parts.append(f"{weekend_skipped} weekend(cached)")
+        if weekend_marked > 0:
+            skip_parts.append(f"{weekend_marked} weekend(new)")
+        if skip_parts:
+            print(f"  [{label}] Skipping {' + '.join(skip_parts)}, {len(days_to_download)} remaining.", flush=True)
 
         if not days_to_download:
             print(f"  [{label}] All days already downloaded.", flush=True)
@@ -1427,18 +1494,24 @@ class NSEMarketDataDownloader:
                             batch_results[day] = ('ok', df)
                             success_count += 1
                         else:
-                            # No data for this day — save marker to avoid retrying
+                            # Genuine 404 / empty data — save marker to avoid retrying
                             nodata = raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.nodata"
                             try:
                                 nodata.touch(exist_ok=True)
                             except OSError:
                                 pass
-                            batch_results[day] = ('fail',)
+                            batch_results[day] = ('nodata',)
                             failed_days.append(day)
                     except HTTP403Error:
                         batch_results[day] = ('403',)
                         failed_days.append(day)
+                    except DownloadFailedError:
+                        # Transient failure (timeout, connection, parse error, etc.)
+                        # Do NOT create .nodata — data may exist, retry next run
+                        batch_results[day] = ('fail',)
+                        failed_days.append(day)
                     except Exception as e:
+                        # Unexpected error — also do NOT create .nodata
                         print(f"  [{label}] Error for {day}: {type(e).__name__}: {e}")
                         batch_results[day] = ('fail',)
                         failed_days.append(day)
@@ -1512,11 +1585,12 @@ class NSEMarketDataDownloader:
             # Diagnostics: file counts and sizes
             raw_files = list(raw_dir.glob(f"{prefix}_*.parquet"))
             nodata_files = list(raw_dir.glob(f"{prefix}_*.nodata"))
+            weekend_files = list(raw_dir.glob(f"{prefix}_*.nodata_weekend"))
             proc_files = list(processed_dir.glob("*.parquet"))
             raw_size = sum(f.stat().st_size for f in raw_files) / (1024 * 1024)
             proc_size = sum(f.stat().st_size for f in proc_files) / (1024 * 1024)
             print(f"  [{label}] {len(raw_files)} raw files ({raw_size:.1f} MB), "
-                  f"{len(nodata_files)} no-data markers, "
+                  f"{len(nodata_files)} no-data + {len(weekend_files)} weekend markers, "
                   f"{len(proc_files)} processed files ({proc_size:.1f} MB), "
                   f"took {cat_elapsed:.1f}s", flush=True)
             print(f"  {label} update done.", flush=True)
