@@ -94,10 +94,18 @@ class HTTP403Error(Exception):
 class NSEMarketDataDownloader:
     """Class to handle robust downloading and storage of NSE market data."""
 
+    MAX_WORKERS = 2  # Concurrent download threads (keep low to avoid rate limits)
+    REQUEST_DELAY = 0.5  # Minimum seconds between requests (per-thread)
+    BATCH_COOLDOWN = 3.0  # Seconds to pause between download batches
+    SESSION_REFRESH_AFTER = 120  # Re-init session after this many requests
+
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
         self._session_lock = threading.Lock()
+        self._throttle_lock = threading.Lock()
+        self._last_request_time = 0.0
+        self._request_count = 0
         self._last_session_init = 0.0
         self._consecutive_failures = 0
         self._init_session()
@@ -157,6 +165,18 @@ class NSEMarketDataDownloader:
         - ChunkedEncodingError: Incomplete response — retries
         - HTML error pages disguised as 200 — detected and treated as failure
         """
+        # Throttle: ensure minimum gap between requests across all threads
+        with self._throttle_lock:
+            now = time.time()
+            elapsed = now - self._last_request_time
+            if elapsed < self.REQUEST_DELAY:
+                time.sleep(self.REQUEST_DELAY - elapsed)
+            self._last_request_time = time.time()
+            self._request_count += 1
+            # Proactively refresh session before hitting rate limits
+            if self._request_count % self.SESSION_REFRESH_AFTER == 0:
+                self._init_session()
+                time.sleep(1)
         headers = {}
         if referer:
             headers["Referer"] = referer
@@ -1206,6 +1226,11 @@ class NSEMarketDataDownloader:
                 del combined_new
                 continue
 
+            # Safety net: ensure group_col exists (old raw files may lack it)
+            if group_col not in combined_new.columns:
+                print(f"  [{label}] Warning: '{group_col}' column missing in batch {batch_idx+1} — setting to 'UNKNOWN'.")
+                combined_new[group_col] = 'UNKNOWN'
+
             for name, group in combined_new.groupby(group_col):
                 file_path = target_dir / f"{name}.parquet"
                 if file_path.exists():
@@ -1271,7 +1296,6 @@ class NSEMarketDataDownloader:
         return DEFAULT_START_DATE
 
     # --- Concurrent download helpers ---
-    MAX_WORKERS = 4  # Max parallel downloads (be respectful to NSE servers)
     DOWNLOAD_DELAY = 0.3  # Delay between scheduling downloads (seconds)
 
     def _download_day_cm(self, day: datetime.date) -> tuple:
@@ -1359,10 +1383,14 @@ class NSEMarketDataDownloader:
         print(f"  Downloading {total} days of {label} data (newest first, {self.MAX_WORKERS} workers)...", flush=True)
 
         # Process in batches to allow concurrent downloads while tracking 403 streaks
-        BATCH_SIZE = self.MAX_WORKERS * 3  # e.g. 12 days per batch
+        BATCH_SIZE = self.MAX_WORKERS * 3  # e.g. 6 days per batch
         for batch_start in range(0, total, BATCH_SIZE):
             if stopped_early:
                 break
+
+            # Pause between batches to stay under rate limits
+            if batch_start > 0:
+                time.sleep(self.BATCH_COOLDOWN)
 
             batch_end = min(batch_start + BATCH_SIZE, total)
             batch_days = days_to_download[batch_start:batch_end]
