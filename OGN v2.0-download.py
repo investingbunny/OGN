@@ -1217,14 +1217,16 @@ class NSEMarketDataDownloader:
                 group = group.sort_values('Date')
                 group.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
 
-    BATCH_MERGE_SIZE = 50  # Number of raw files to read and merge at a time
+    MERGE_WORKERS = 4  # Parallel threads for writing per-symbol parquet files
+    MERGE_READ_BATCH = 200  # Raw files to read per batch (memory control)
 
     def merge_raw_to_processed(self, raw_dir: Path, raw_prefix: str, target_dir: Path, label: str, group_col: str = 'Symbol'):
         """Merges raw day-parquet files from disk into per-symbol processed files.
-        
-        Reads raw files from disk in small batches to avoid OOM.
-        After successfully merging a batch, the raw files are left on disk
-        as a cache (they'll be skipped on next download run).
+
+        Strategy for speed:
+        1. Read raw files in large batches (MERGE_READ_BATCH at a time).
+        2. Concat + group by symbol ONCE per batch (single pass).
+        3. Write per-symbol files in parallel threads (I/O bound, releases GIL).
         """
         raw_files = sorted(raw_dir.glob(f"{raw_prefix}_*.parquet"))
         if not raw_files:
@@ -1235,83 +1237,93 @@ class NSEMarketDataDownloader:
         last_processed = self.get_last_date(target_dir)
         files_to_merge = []
         for f in raw_files:
-            # Extract date from filename like fo_20100503.parquet
             try:
-                date_str = f.stem.split('_', 1)[1]  # "20100503"
+                date_str = f.stem.split('_', 1)[1]
                 file_date = datetime.datetime.strptime(date_str, '%Y%m%d').date()
                 if file_date > last_processed:
                     files_to_merge.append(f)
             except (IndexError, ValueError):
-                files_to_merge.append(f)  # Include if we can't parse the date
+                files_to_merge.append(f)
 
         if not files_to_merge:
             print(f"  [{label}] All raw files already merged.", flush=True)
             return
 
         total_files = len(files_to_merge)
-        batch_size = self.BATCH_MERGE_SIZE
+        batch_size = self.MERGE_READ_BATCH
         num_batches = (total_files + batch_size - 1) // batch_size
-        last_progress_time = time.time()
-        print(f"  [{label}] Merging {total_files} raw files in {num_batches} batches...", flush=True)
+        t0 = time.time()
+        print(f"  [{label}] Merging {total_files} raw files in {num_batches} batch(es)...", flush=True)
 
         for batch_idx in range(num_batches):
             start = batch_idx * batch_size
             end = min(start + batch_size, total_files)
             batch_files = files_to_merge[start:end]
 
-            # Read batch of raw files from disk
+            # --- Phase 1: Read raw files ---
             batch_dfs = []
             for f in batch_files:
                 try:
-                    df = pd.read_parquet(f, engine='pyarrow')
-                    batch_dfs.append(df)
+                    batch_dfs.append(pd.read_parquet(f, engine='pyarrow'))
                 except Exception as e:
-                    print(f"  [{label}] Error reading raw file {f.name}: {e}")
+                    print(f"  [{label}] Error reading {f.name}: {e}")
 
             if not batch_dfs:
                 continue
 
             combined_new = pd.concat(batch_dfs, ignore_index=True)
-            del batch_dfs  # Free list of DFs
+            del batch_dfs
 
             if combined_new.empty:
                 del combined_new
                 continue
 
-            # Safety net: ensure group_col exists (old raw files may lack it)
             if group_col not in combined_new.columns:
-                print(f"  [{label}] Warning: '{group_col}' column missing in batch {batch_idx+1} — setting to 'UNKNOWN'.")
+                print(f"  [{label}] Warning: '{group_col}' missing — setting to 'UNKNOWN'.")
                 combined_new[group_col] = 'UNKNOWN'
 
-            for name, group in combined_new.groupby(group_col):
-                file_path = target_dir / f"{name}.parquet"
-                if file_path.exists():
-                    existing_df = pd.read_parquet(file_path, engine='pyarrow')
-                    # pd.concat automatically handles differing columns (new cols get NaN in old rows)
-                    merged = pd.concat([existing_df, group], ignore_index=True)
-                    # Determine dedup key: use all key columns that exist
-                    dedup_cols = ['Date']
-                    for extra_key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
-                        if extra_key in merged.columns:
-                            dedup_cols.append(extra_key)
-                    merged = merged.drop_duplicates(subset=dedup_cols, keep='last')
-                    del existing_df
-                else:
-                    merged = group
-                merged = merged.sort_values('Date')
-                # Ensure no mixed-type object columns that would break parquet
-                for col in merged.columns:
-                    if merged[col].dtype == object and col != 'Date':
-                        merged[col] = merged[col].astype(str)
-                merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
-                del merged
-
+            # --- Phase 2: Group once, build per-symbol DataFrames ---
+            grouped = combined_new.groupby(group_col)
+            symbol_names = list(grouped.groups.keys())
+            symbol_groups = {name: group for name, group in grouped}
             del combined_new
 
-            now = time.time()
-            if now - last_progress_time >= 10 or (batch_idx + 1) == num_batches:
-                print(f"  [{label}] Merged batch {batch_idx + 1}/{num_batches} (files {start + 1}-{end} of {total_files})", flush=True)
-                last_progress_time = now
+            # Determine dedup key columns (same for all symbols in this category)
+            sample_df = next(iter(symbol_groups.values()))
+            dedup_cols = ['Date']
+            for extra_key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
+                if extra_key in sample_df.columns:
+                    dedup_cols.append(extra_key)
+
+            # --- Phase 3: Write in parallel ---
+            def _merge_and_write(name_group):
+                name, new_data = name_group
+                file_path = target_dir / f"{name}.parquet"
+                try:
+                    if file_path.exists():
+                        existing = pd.read_parquet(file_path, engine='pyarrow')
+                        merged = pd.concat([existing, new_data], ignore_index=True)
+                        merged = merged.drop_duplicates(subset=dedup_cols, keep='last')
+                        del existing
+                    else:
+                        merged = new_data
+                    merged = merged.sort_values('Date')
+                    for col in merged.columns:
+                        if merged[col].dtype == object and col != 'Date':
+                            merged[col] = merged[col].astype(str)
+                    merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
+                    del merged
+                except Exception as e:
+                    print(f"  [{label}] Error writing {name}.parquet: {e}")
+
+            with ThreadPoolExecutor(max_workers=self.MERGE_WORKERS) as pool:
+                list(pool.map(_merge_and_write, symbol_groups.items()))
+
+            del symbol_groups
+
+            elapsed = time.time() - t0
+            print(f"  [{label}] Merged batch {batch_idx + 1}/{num_batches} "
+                  f"({end - start} files, {len(symbol_names)} symbols, {elapsed:.1f}s elapsed)", flush=True)
 
     def get_last_date(self, processed_dir: Path) -> datetime.date:
         """Finds the latest date across all processed files."""
@@ -1421,8 +1433,9 @@ class NSEMarketDataDownloader:
                 weekend_skipped += 1
             elif nodata_file.exists():
                 nodata_skipped += 1
-            elif day.weekday() >= 5:
+            elif day.weekday() >= 5 and (day.month, day.day) != BUDGET_DAY:
                 # Weekend (Sat=5, Sun=6) — no trading, skip without requesting
+                # Exception: Feb 1 (Budget day) is always a trading day
                 try:
                     nodata_wknd.touch(exist_ok=True)
                 except OSError:
