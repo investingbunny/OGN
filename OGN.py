@@ -89,11 +89,23 @@ WATCHLIST = [
 # ---------------------------------------------------------------------------
 
 def _load_parquet(directory: Path, symbol: str) -> pd.DataFrame:
-    """Load a single symbol's parquet file from a processed directory."""
+    """Load a single symbol's parquet file from a processed directory.
+
+    Args:
+        directory: Path to the processed data directory (e.g. Equity/Processed).
+        symbol:    NSE symbol name (used as the parquet filename stem).
+
+    Returns:
+        DataFrame with the symbol's data, Date column parsed as datetime.
+
+    Raises:
+        FileNotFoundError: If the parquet file does not exist.
+    """
     fpath = directory / f"{symbol}.parquet"
     if not fpath.exists():
         raise FileNotFoundError(f"No data file found: {fpath}")
     df = pd.read_parquet(fpath, engine='pyarrow')
+    # Ensure Date column is proper datetime for filtering/sorting
     if 'Date' in df.columns:
         df['Date'] = pd.to_datetime(df['Date'])
     return df
@@ -142,6 +154,7 @@ def load_derivatives(symbol: str, start: str = None, end: str = None) -> pd.Data
              Option type
     """
     df = _load_parquet(DERIVATIVES_PROCESSED, symbol)
+    # Parse Expiry as datetime for date-based filtering downstream
     if 'Expiry' in df.columns:
         df['Expiry'] = pd.to_datetime(df['Expiry'])
     return _filter_dates(df, start, end)
@@ -188,6 +201,7 @@ def load_monthly_futures(symbol: str, start: str = None,
     df = load_futures(symbol, start, end)
     if df.empty:
         return df
+    # Sort by Date and Expiry, then take first per date → nearest expiry
     df = df.sort_values(['Date', 'Expiry'])
     return df.groupby('Date').first().reset_index()
 
@@ -201,8 +215,10 @@ def load_monthly_options(symbol: str, start: str = None,
     df = load_options(symbol, start, end)
     if df.empty:
         return df
+    # Find the nearest (earliest) expiry for each trading date
     nearest = df.groupby('Date')['Expiry'].min().reset_index()
     nearest.columns = ['Date', '_near']
+    # Keep only rows matching the nearest expiry per date
     df = df.merge(nearest, on='Date')
     df = df[df['Expiry'] == df['_near']].drop(columns=['_near'])
     return df.reset_index(drop=True)
@@ -343,16 +359,24 @@ def load_equity_panel(symbols: list, start: str = None, end: str = None,
 
     Returns DataFrame with Date index and symbol-name columns.
     Useful for correlation analysis, portfolio construction, etc.
+
+    Args:
+        symbols: List of NSE symbol names.
+        start:   Optional start date 'YYYY-MM-DD'.
+        end:     Optional end date 'YYYY-MM-DD'.
+        column:  Column to extract (default 'Close').
     """
     frames = {}
     for sym in symbols:
         try:
             df = load_equity(sym, start, end)
+            # Pivot each symbol's column into a dict entry
             frames[sym] = df.set_index('Date')[column]
         except FileNotFoundError:
-            pass
+            pass  # Skip symbols without data files
     if not frames:
         return pd.DataFrame()
+    # Combine into a wide DataFrame (one column per symbol)
     panel = pd.DataFrame(frames)
     panel.index.name = 'Date'
     return panel
@@ -360,7 +384,14 @@ def load_equity_panel(symbols: list, start: str = None, end: str = None,
 
 def load_index_panel(symbols: list = None, start: str = None,
                      end: str = None, column: str = 'Close') -> pd.DataFrame:
-    """Load a single column for multiple indices → wide DataFrame."""
+    """Load a single column for multiple indices → wide DataFrame.
+
+    Args:
+        symbols: List of index names (default: TRACKED_INDICES).
+        start:   Optional start date 'YYYY-MM-DD'.
+        end:     Optional end date 'YYYY-MM-DD'.
+        column:  Column to extract (default 'Close').
+    """
     if symbols is None:
         symbols = TRACKED_INDICES
     frames = {}
@@ -369,9 +400,10 @@ def load_index_panel(symbols: list = None, start: str = None,
             df = load_index(sym, start, end)
             frames[sym] = df.set_index('Date')[column]
         except FileNotFoundError:
-            pass
+            pass  # Skip indices without data files
     if not frames:
         return pd.DataFrame()
+    # Combine into a wide DataFrame (one column per index)
     panel = pd.DataFrame(frames)
     panel.index.name = 'Date'
     return panel
@@ -383,7 +415,16 @@ def load_index_panel(symbols: list = None, start: str = None,
 
 def _filter_dates(df: pd.DataFrame, start: str = None,
                   end: str = None) -> pd.DataFrame:
-    """Filter DataFrame by date range."""
+    """Filter DataFrame by date range (inclusive on both ends).
+
+    Args:
+        df:    DataFrame with a 'Date' column.
+        start: Optional start date string 'YYYY-MM-DD'.
+        end:   Optional end date string 'YYYY-MM-DD'.
+
+    Returns:
+        Filtered DataFrame with reset index.
+    """
     if df.empty or 'Date' not in df.columns:
         return df
     if start:
@@ -394,12 +435,17 @@ def _filter_dates(df: pd.DataFrame, start: str = None,
 
 
 def get_latest_date(directory: Path = None) -> datetime.date:
-    """Get the most recent date available in a data store directory."""
+    """Get the most recent date available in a data store directory.
+
+    Reads the first symbol alphabetically and returns its max date.
+    Defaults to EQUITY_PROCESSED if no directory is specified.
+    """
     if directory is None:
         directory = EQUITY_PROCESSED
     syms = list_symbols(directory)
     if not syms:
         return None
+    # Sample the first symbol to determine the latest date
     df = _load_parquet(directory, syms[0])
     if 'Date' in df.columns and not df.empty:
         return pd.to_datetime(df['Date']).max().date()
@@ -407,7 +453,11 @@ def get_latest_date(directory: Path = None) -> datetime.date:
 
 
 def data_summary() -> pd.DataFrame:
-    """Return a summary of available data across all categories."""
+    """Return a summary of available data across all categories.
+
+    Returns a DataFrame with columns: Category, Symbols (count),
+    Directory (path string), Exists (bool).
+    """
     categories = {
         'Equity':             EQUITY_PROCESSED,
         'Derivatives':        DERIVATIVES_PROCESSED,
@@ -426,9 +476,9 @@ def data_summary() -> pd.DataFrame:
         syms = list_symbols(path)
         rows.append({
             'Category': name,
-            'Symbols': len(syms),
+            'Symbols': len(syms),        # Number of parquet files
             'Directory': str(path),
-            'Exists': path.exists(),
+            'Exists': path.exists(),      # Whether the directory exists on disk
         })
     return pd.DataFrame(rows)
 
