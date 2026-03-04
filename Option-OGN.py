@@ -394,19 +394,33 @@ def Renko_DF(DF, ticker):
     return renko_df
 
 
-def PlotRenko(DF, num_bars=100):
-    """Plot Renko chart."""
+def PlotRenko(DF, num_bars=100, ax=None):
+    """Plot Renko chart.
+
+    Args:
+        DF:       Renko OHLC DataFrame from Renko_DF().
+        num_bars: Number of trailing bricks to display.
+        ax:       Optional matplotlib Axes to draw on.  If None a new
+                  standalone figure is created and returned.
+
+    Returns:
+        The figure object when *ax* is None, otherwise None (draws
+        in-place on the supplied axes).
+    """
     if DF.empty:
-        return
+        return None
     plt.ioff()
     df = DF.tail(num_bars).copy()
     if len(df) < 2:
-        return
+        return None
     price_move = abs(df.iloc[1]['open'] - df.iloc[1]['close'])
 
-    fig = plt.figure()
-    fig.clf()
-    axes = fig.gca()
+    # If no axes supplied, create a standalone figure
+    standalone = ax is None
+    if standalone:
+        fig = plt.figure()
+        fig.clf()
+        ax = fig.gca()
 
     for idx, (_, row) in enumerate(df.iterrows(), 1):
         op, cl = row['open'], row['close']
@@ -415,19 +429,23 @@ def PlotRenko(DF, num_bars=100):
         r = matplotlib.patches.Rectangle(
             (idx, op), 1, cl - op,
             edgecolor=colour[0], facecolor=colour[1], alpha=0.5)
-        axes.add_patch(r)
+        ax.add_patch(r)
 
-    plt.xlim([0, num_bars])
-    plt.ylim([min(df['open'].min(), df['close'].min()),
-              max(df['open'].max(), df['close'].max())])
-    fig.suptitle(
-        f"Bars from {df['date'].min():%d-%b-%Y} to {df['date'].max():%d-%b-%Y}"
-        f"\nPrice movement = {price_move}",
-        fontsize=14)
-    plt.xlabel('Bar Number')
-    plt.ylabel('Price')
-    plt.grid(True)
-    return fig
+    ax.set_xlim([0, num_bars])
+    ax.set_ylim([min(df['open'].min(), df['close'].min()),
+                 max(df['open'].max(), df['close'].max())])
+    ax.set_xlabel('Bar #', fontsize=8)
+    ax.set_ylabel('Price', fontsize=8)
+    ax.tick_params(labelsize=7)
+    ax.grid(True)
+    ax.set_title(
+        f"Renko  |  {df['date'].min():%d-%b-%Y} \u2192 {df['date'].max():%d-%b-%Y}"
+        f"  |  brick = {price_move:.0f}",
+        fontsize=9, fontweight='bold', pad=6)
+
+    if standalone:
+        return fig
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -538,16 +556,10 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     """
     data = DF.copy()
 
-    # Renko chart
+    # Compute Renko bricks (plotted later on the main figure)
+    renkodata = pd.DataFrame()
     if HAS_RENKO:
         renkodata = Renko_DF(data, ticker)
-        renko_fig = PlotRenko(renkodata, 100)
-        if renko_fig:
-            if pdf_pages:
-                pdf_pages.savefig(renko_fig)
-                plt.close(renko_fig)
-            else:
-                plt.show()
 
     data = data.iloc[-n:]
 
@@ -614,9 +626,8 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     # Right column: EMA (top), SMA (mid), bottom split into left/right halves
     ax_ema = fig2.add_axes((0.53, 0.75, 0.42, 0.20), sharex=ax_macd)
     ax_sma = fig2.add_axes((0.53, 0.52, 0.42, 0.20), sharex=ax_macd)
-    # Bottom-right left half: futures / max-pain (placeholder, currently unused)
-    ax_bottom_left = fig2.add_axes((0.53, 0.06, 0.20, 0.42))
-    ax_bottom_left.axis('off')  # Reserve space; can be used for futures overlay later
+    # Bottom-right left half: Renko chart (independent axes, no sharex)
+    ax_renko = fig2.add_axes((0.53, 0.06, 0.20, 0.42))
     # Bottom-right right half: technical audit table
     ax_table = fig2.add_axes((0.74, 0.06, 0.21, 0.42))
     ax_table.axis('off')
@@ -629,6 +640,7 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     ax_ema.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
     ax_ema.legend()
     ax_ema.grid(True)
+    ax_ema.set_title('EMA Crossover', fontsize=10, fontweight='bold', pad=8)
 
     # ── SMA panel ─────────────────────────────────────────────────────
     for col in ["20DMA", "50DMA", "200DMA"]:
@@ -637,6 +649,7 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     ax_sma.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
     ax_sma.legend()
     ax_sma.grid(True)
+    ax_sma.set_title('SMA Crossover', fontsize=10, fontweight='bold', pad=8)
 
     # ── MACD panel ────────────────────────────────────────────────────
     ax_macd.plot(data.index, data["MACD"], label="MACD")
@@ -644,6 +657,7 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     ax_macd.plot(data.index, data["Signal"], label="Signal")
     ax_macd.legend()
     ax_macd.grid(True)
+    ax_macd.set_title('MACD (12, 26, 9)', fontsize=10, fontweight='bold', pad=8)
 
     # ── RSI & ADX panel ───────────────────────────────────────────────
     ax_rsi.set_ylabel("(%)")
@@ -659,6 +673,7 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
         ax_rsi.plot(data.index, data["DIminusN"], label="DI-", color='red')
     ax_rsi.legend()
     ax_rsi.grid(True)
+    ax_rsi.set_title('RSI & ADX', fontsize=10, fontweight='bold', pad=8)
 
     # ── Bollinger Bands + OBV panel ───────────────────────────────────
     ax_bba.plot(data.index, data["BB_up"], label="BB_up")
@@ -667,6 +682,7 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     ax_bba.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
     ax_bba.legend()
     ax_bba.grid(True)
+    ax_bba.set_title('Bollinger Bands & OBV', fontsize=10, fontweight='bold', pad=8)
 
     if 'OBV' in data.columns:
         ax_obv = ax_bba.twinx()
@@ -693,10 +709,20 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
                       label=f'{price_max:.1f} (1)')
     ax_fibret.legend()
     ax_fibret.grid(True)
+    ax_fibret.set_title('Fibonacci Retracements', fontsize=10, fontweight='bold', pad=8)
 
     # Candlestick overlay on Fibonacci panel using mplfinance-compatible OHLC
     # (Using simple line plot since mplfinance add_plot requires different setup)
     ax_fibret.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
+
+    # ── Renko chart (bottom-left of right column) ─────────────────────
+    if not renkodata.empty:
+        PlotRenko(renkodata, 100, ax=ax_renko)
+    else:
+        ax_renko.axis('off')
+        ax_renko.text(0.5, 0.5, 'Renko unavailable',
+                      transform=ax_renko.transAxes, ha='center', va='center',
+                      fontsize=9, color='grey')
 
     # ── Technical Audit Table (bottom-right) ──────────────────────────
     try:
