@@ -431,6 +431,98 @@ def PlotRenko(DF, num_bars=100):
 
 
 # ---------------------------------------------------------------------------
+# Technical audit table (crossover / momentum / fractal analysis)
+# ---------------------------------------------------------------------------
+
+def analyze_stock(data, ticker):
+    """Run a multi-factor technical audit on the indicator DataFrame.
+
+    Evaluates crossover signals, momentum, volatility, and fractal
+    Fibonacci structure.  Returns a DataFrame with columns:
+        Condition, Status, Verdict
+
+    Args:
+        data:   DataFrame with pre-computed indicators (Close, EMA/SMA
+                columns, MACD, Signal, RSI, BB_up/BB_dn, Volume, etc.).
+                Must already be indexed or have the Date column.
+        ticker: Symbol name (for display only).
+    """
+    # Ensure we work with a copy to avoid side-effects
+    df = data.copy()
+
+    # Compute any extra EMAs/SMAs that the audit needs but may not exist yet
+    for span, col in [(5, 'EMA5'), (9, 'EMA9'), (13, 'EMA13'),
+                      (21, 'EMA21'), (48, 'EMA48')]:
+        if col not in df.columns:
+            src = df['Close'] if 'Close' in df.columns else df.iloc[:, 0]
+            df[col] = src.ewm(span=span, adjust=False).mean()
+    for window, col in [(20, 'SMA20'), (50, 'SMA50'), (200, 'SMA200')]:
+        if col not in df.columns:
+            src = df['Close'] if 'Close' in df.columns else df.iloc[:, 0]
+            df[col] = src.rolling(window=window).mean()
+
+    # Map existing indicator column names to the short names used here
+    ema_map = {'5DMA-E': 'EMA5', '9DMA-E': 'EMA9', '13DMA-E': 'EMA13',
+               '21DMA-E': 'EMA21', '48DMA-E': 'EMA48'}
+    sma_map = {'20DMA': 'SMA20', '50DMA': 'SMA50', '200DMA': 'SMA200'}
+    for old, new in {**ema_map, **sma_map}.items():
+        if old in df.columns and new not in df.columns:
+            df[new] = df[old]
+
+    # --- Fractal Fibonacci (last 60 bars ≈ 3 months) ---
+    recent = df.tail(60)
+    swing_high = recent['High'].max() if 'High' in recent.columns else recent['Close'].max()
+    swing_low = recent['Low'].min() if 'Low' in recent.columns else recent['Close'].min()
+    fib618 = swing_high - (0.382 * (swing_high - swing_low))
+
+    # --- Current bar values ---
+    curr = df.iloc[-1]
+    vol_avg = df['Volume'].rolling(20).mean().iloc[-1] if 'Volume' in df.columns else 0
+
+    results = []
+
+    # 1. Crossover categories
+    results.append(["Inst: 50/200 SMA",
+                    "Yes" if curr.get('SMA50', np.nan) > curr.get('SMA200', np.nan) else "No",
+                    "Bullish Market Regime"])
+    results.append(["Mom: 9/21 EMA",
+                    "Yes" if curr.get('EMA9', np.nan) > curr.get('EMA21', np.nan) else "No",
+                    "Short-term acceleration"])
+    results.append(["Trend: 13/48 EMA",
+                    "Yes" if curr.get('EMA13', np.nan) > curr.get('EMA48', np.nan) else "No",
+                    "Confirmed trend run"])
+    results.append(["Hybrid: 5E / 20S",
+                    "Yes" if curr.get('EMA5', np.nan) > curr.get('SMA20', np.nan) else "No",
+                    "Price aggressive vs mean"])
+
+    # 2. Momentum & volatility
+    macd_val = curr.get('MACD', np.nan)
+    sig_val = curr.get('Signal', np.nan)
+    results.append(["MACD > Signal",
+                    "Yes" if macd_val > sig_val else "No",
+                    "Momentum engine firing"])
+    rsi_val = curr.get('RSI', np.nan)
+    results.append(["RSI > 60",
+                    "Yes" if rsi_val > 60 else "No",
+                    "Super-Bullish zone"])
+    sma20_val = curr.get('SMA20', curr.get('MA', np.nan))
+    results.append(["Close > BB Mid",
+                    "Yes" if curr['Close'] > sma20_val else "No",
+                    "Bullish volatility channel"])
+
+    # 3. Fractal structure & filters
+    results.append([f"Fib > 61.8% ({fib618:.0f})",
+                    "Yes" if curr['Close'] > fib618 else "No",
+                    "Holding above pivot"])
+    if vol_avg > 0:
+        results.append(["Volume > 1.2× avg",
+                        "Yes" if curr.get('Volume', 0) > (vol_avg * 1.2) else "No",
+                        "Big players confirming"])
+
+    return pd.DataFrame(results, columns=["Condition", "Status", "Verdict"])
+
+
+# ---------------------------------------------------------------------------
 # Main chart builder
 # ---------------------------------------------------------------------------
 
@@ -506,90 +598,57 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
         ohlc.append([date2num(dt), row['Open'], row['High'], row['Low'], row['Close']])
 
     # ── Figure 2: main analysis panels (7-panel layout) ────────────
-    fig2 = plt.figure(figsize=(48, 27))
+    fig2 = plt.figure(figsize=(54, 30))  # Increased from (48, 27)
 
+    # Margins: left/right 5%, top/bottom 5% leaves 90% for content
+    # Left column: 0.05 to 0.47 (width=0.42)
+    # Right column: 0.52 to 0.95 (width=0.43)
+    # Plot area: 0.06 to 0.95 (height=0.89)
+    
     # Left column (4 panels): MACD, RSI/ADX, Fibonacci, Bollinger/OBV
-    ax_macd = fig2.add_axes((0, 0.84, 0.49, 0.24))
-    ax_rsi = fig2.add_axes((0, 0.56, 0.49, 0.24), sharex=ax_macd)
-    ax_fibret = fig2.add_axes((0, 0.28, 0.49, 0.24), sharex=ax_macd)
-    ax_bba = fig2.add_axes((0, 0, 0.49, 0.24), sharex=ax_macd)
+    ax_macd = fig2.add_axes((0.05, 0.75, 0.42, 0.20))
+    ax_rsi = fig2.add_axes((0.05, 0.52, 0.42, 0.20), sharex=ax_macd)
+    ax_fibret = fig2.add_axes((0.05, 0.29, 0.42, 0.20), sharex=ax_macd)
+    ax_bba = fig2.add_axes((0.05, 0.06, 0.42, 0.20), sharex=ax_macd)
 
-    # Right column (3 panels): EMA overlay, Max Pain, Futures fair-value
-    ax_ema = fig2.add_axes((0.51, 0.76, 0.49, 0.32), sharex=ax_macd)
-    ax_maxpain = fig2.add_axes((0.51, 0.52, 0.49, 0.2), sharex=ax_macd)
-    ax_futures = fig2.add_axes((0.51, 0, 0.49, 0.5), sharex=ax_macd)
+    # Right column: EMA (top), SMA (mid), bottom split into left/right halves
+    ax_ema = fig2.add_axes((0.53, 0.75, 0.42, 0.20), sharex=ax_macd)
+    ax_sma = fig2.add_axes((0.53, 0.52, 0.42, 0.20), sharex=ax_macd)
+    # Bottom-right left half: futures / max-pain (placeholder, currently unused)
+    ax_bottom_left = fig2.add_axes((0.53, 0.06, 0.20, 0.42))
+    ax_bottom_left.axis('off')  # Reserve space; can be used for futures overlay later
+    # Bottom-right right half: technical audit table
+    ax_table = fig2.add_axes((0.74, 0.06, 0.21, 0.42))
+    ax_table.axis('off')
 
     ax_macd.xaxis_date()  # Format x-axis as dates
 
-    # ── EMA panel ─────────────────────────────────────────────────────
-    ax_ema.plot(data.index, data["Close"], label=f"{ticker} Price")
-    for col in ["10DMA-E", "20DMA-E", "50DMA-E", "80DMA-E", "140DMA-E"]:
+    for col in ["5DMA-E", "9DMA-E", "13DMA-E", "21DMA-E", "48DMA-E"]:
         if col in data.columns:
             ax_ema.plot(data.index, data[col], label=col)
+    ax_ema.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
     ax_ema.legend()
+    ax_ema.grid(True)
 
-    # ── Futures fair-value overlay ────────────────────────────────────
-    if Futdf is not None and 'NearExpiry' in Futdf.columns:
-        try:
-            StdDev = data['Log_Ret'].std()
-            DailyRet = data['Log_Ret'].mean()
-            days = np.busday_count(
-                np.datetime64(data.index[0], 'D'),
-                np.datetime64(datetime.date.today(), 'D'))
-
-            for prefix, expiry_col in [('Near', 'NearExpiry'), ('Mid', 'MidExpiry'), ('Far', 'FarExpiry')]:
-                col_name = f"{prefix}FuturesFormula"
-                Futdf[col_name] = Futdf["Close"] * (
-                    1 + RiskFreeRate * business_days(
-                        pd.to_datetime(Futdf['Date']),
-                        pd.to_datetime(Futdf[expiry_col])) / 365
-                ) - Dividend
-
-            Average = DailyRet * days
-            SD = StdDev * math.sqrt(days)
-            StartingPrice = data.iloc[0].Close
-
-            SD1upLevel = StartingPrice * math.exp(Average + SD)
-            SD1downLevel = StartingPrice * math.exp(Average - SD)
-
-            Futdf.index = pd.to_datetime(Futdf["Date"])
-            Futdf.drop("Date", axis=1, inplace=True)
-
-            ax_futures.plot(Futdf.index, Futdf["Close"], color="black", label="Price")
-            colour_map = {
-                'Near': ('gray', 'silver'), 'Mid': ('blue', 'skyblue'),
-                'Far': ('darkorchid', 'plum'),
-            }
-            for prefix, (c1, c2) in colour_map.items():
-                sp_col = f"{prefix}SettlePrice"
-                ff_col = f"{prefix}FuturesFormula"
-                if sp_col in Futdf.columns:
-                    ax_futures.plot(Futdf.index, Futdf[sp_col], color=c1, label=f"{prefix}SP")
-                if ff_col in Futdf.columns:
-                    ax_futures.plot(Futdf.index, Futdf[ff_col], color=c2, label=f"{prefix}FF")
-
-            ax_futures.set_ylabel('Price')
-            ax_futures.plot(data.index, [StartingPrice] * len(data.index),
-                            label=f'SD1: {SD:.4f}, Average: {Average:.4f}')
-            ax_futures.axhspan(StartingPrice, SD1downLevel, alpha=0.5,
-                               color='mistyrose', label=f'{SD1downLevel:.1f} -SD1')
-            ax_futures.axhspan(SD1upLevel, StartingPrice, alpha=0.5,
-                               color='greenyellow', label=f'{SD1upLevel:.1f} +SD1')
-            ax_futures.legend()
-        except Exception as e:
-            ax_futures.text(0.5, 0.5, f"Futures overlay error:\n{e}",
-                            transform=ax_futures.transAxes, ha='center')
+    # ── SMA panel ─────────────────────────────────────────────────────
+    for col in ["20DMA", "50DMA", "200DMA"]:
+        if col in data.columns:
+            ax_sma.plot(data.index, data[col], label=col)
+    ax_sma.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
+    ax_sma.legend()
+    ax_sma.grid(True)
 
     # ── MACD panel ────────────────────────────────────────────────────
     ax_macd.plot(data.index, data["MACD"], label="MACD")
     ax_macd.bar(data.index, (data["MACD"] - data["Signal"]) * 3, label="hist")
     ax_macd.plot(data.index, data["Signal"], label="Signal")
     ax_macd.legend()
+    ax_macd.grid(True)
 
     # ── RSI & ADX panel ───────────────────────────────────────────────
     ax_rsi.set_ylabel("(%)")
-    ax_rsi.axhline(80, color='grey', linestyle='--', label="overbought")
-    ax_rsi.axhline(20, color='grey', linestyle='--', label="oversold")
+    ax_rsi.axhline(70, color='grey', linestyle='--', label="overbought")
+    ax_rsi.axhline(30, color='grey', linestyle='--', label="oversold")
     ax_rsi.axhline(50, color='grey', linestyle=':')
     ax_rsi.plot(data.index, data["RSI"], label="RSI", color='lightpink')
     if 'ADX' in data.columns:
@@ -599,12 +658,15 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     if 'DIminusN' in data.columns:
         ax_rsi.plot(data.index, data["DIminusN"], label="DI-", color='red')
     ax_rsi.legend()
+    ax_rsi.grid(True)
 
     # ── Bollinger Bands + OBV panel ───────────────────────────────────
     ax_bba.plot(data.index, data["BB_up"], label="BB_up")
     ax_bba.plot(data.index, data["BB_dn"], label="BB_dn")
     ax_bba.plot(data.index, data["MA"], label="MA")
+    ax_bba.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
     ax_bba.legend()
+    ax_bba.grid(True)
 
     if 'OBV' in data.columns:
         ax_obv = ax_bba.twinx()
@@ -630,36 +692,43 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     ax_fibret.axhspan(prev, price_max, alpha=0.5, color='green',
                       label=f'{price_max:.1f} (1)')
     ax_fibret.legend()
+    ax_fibret.grid(True)
 
     # Candlestick overlay on Fibonacci panel using mplfinance-compatible OHLC
     # (Using simple line plot since mplfinance add_plot requires different setup)
-    ax_fibret.plot(data.index, data['Close'], color='black', linewidth=0.8)
+    ax_fibret.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
 
-    # ── Max Pain panel ────────────────────────────────────────────────
-    if Mpdf is not None and not Mpdf.empty and 'MaxPain' in data.columns:
-        ax_maxpain.plot(data.index, data["Close"], label="Price")
-        ax_maxpain.plot(data.index, data["MaxPain"], color="red", marker="o", label="MaxPain")
-        ax_pcr = ax_maxpain.twinx()
-        if 'PCR' in data.columns:
-            ax_pcr.plot(data.index, data["PCR"], color="black", marker="*", label="PCR")
-        ax_maxpain.set_ylabel('Price')
-        ax_pcr.set_ylabel('PCR')
-        ax_pcr.grid(visible=False)
-        ax_maxpain.legend()
-    else:
-        # Show Fibonacci extensions instead
-        ext_levels = [
-            (1.272, 'limegreen'), (1.382, 'lime'),
-            (1.5, 'deepskyblue'), (1.618, 'powderblue'),
-        ]
-        prev_ext = price_max
-        for ratio, colour in ext_levels:
-            level = price_max - ratio * diff
-            ax_maxpain.axhspan(level, prev_ext, alpha=0.5, color=colour,
-                               label=f'{level:.1f} ({ratio})')
-            prev_ext = level
-        ax_maxpain.legend()
-        ax_maxpain.plot(data.index, data['Close'], color='black', linewidth=0.8)
+    # ── Technical Audit Table (bottom-right) ──────────────────────────
+    try:
+        report = analyze_stock(data, ticker)
+        # Build colour list: green for "Yes", red for "No"
+        cell_colours = []
+        for _, row in report.iterrows():
+            status_colour = '#c6efce' if row['Status'] == 'Yes' else '#ffc7ce'
+            cell_colours.append(['#f2f2f2', status_colour, '#f2f2f2'])
+
+        tbl = ax_table.table(
+            cellText=report.values,
+            colLabels=report.columns,
+            cellColours=cell_colours,
+            colColours=['#4472c4'] * 3,
+            cellLoc='center',
+            loc='upper center',
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(8)
+        tbl.scale(1.0, 1.5)  # Stretch rows for readability
+        # Style header row
+        for (r, c), cell in tbl.get_celld().items():
+            if r == 0:
+                cell.set_text_props(color='white', fontweight='bold')
+            cell.set_edgecolor('#cccccc')
+        ax_table.set_title(f"{ticker} — Technical Audit", fontsize=10,
+                           fontweight='bold', pad=8)
+    except Exception as e:
+        ax_table.text(0.5, 0.5, f"Audit error:\n{e}",
+                      transform=ax_table.transAxes, ha='center', va='center',
+                      fontsize=9, color='red')
 
     if pdf_pages:
         pdf_pages.savefig(fig2)
@@ -775,10 +844,10 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None):
 
         # --- Moving averages ---
         # Simple Moving Averages (SMA)
-        for w in [10, 20, 50, 100, 200]:
+        for w in [20, 50, 200]:
             Indicatordf[f"{w}DMA"] = Indicatordf["Close"].rolling(window=w).mean()
         # Exponential Moving Averages (EMA)
-        for w in [10, 20, 50, 80, 140]:
+        for w in [5, 9, 13, 21, 48]:
             Indicatordf[f"{w}DMA-E"] = Indicatordf["Close"].ewm(
                 span=w, adjust=False).mean()
 
