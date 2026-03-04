@@ -388,8 +388,19 @@ def Renko_DF(DF, ticker):
                         "Open": "open", "Close": "close", "Volume": "volume"},
               inplace=True)
     df2 = Renko(df)
-    # Use 120-period ATR as brick size for adaptive brick scaling
-    df2.brick_size = round(ATR(DF, 120)["ATR"].iloc[-1], 0)
+    # Use ATR as brick size — try 120-period first, fall back to shorter
+    # periods for recently-listed symbols with limited history
+    brick = np.nan
+    for period in [120, 60, 20, 10]:
+        if len(DF) >= period:
+            brick = ATR(DF, period)["ATR"].iloc[-1]
+            if not np.isnan(brick):
+                break
+    if np.isnan(brick) or brick <= 0:
+        # Last resort: use simple range of last available bar
+        brick = max((DF['High'] - DF['Low']).median(), 1)
+        print(f"  [warn] ATR unavailable for {ticker}, using median range ({brick:.0f}) as brick size")
+    df2.brick_size = round(brick, 0)
     renko_df = df2.get_ohlc_data()
     return renko_df
 
@@ -559,8 +570,13 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     # Compute Renko bricks (plotted later on the main figure)
     renkodata = pd.DataFrame()
     if HAS_RENKO:
-        renkodata = Renko_DF(data, ticker)
+        try:
+            renkodata = Renko_DF(data, ticker)
+        except Exception as e:
+            print(f"  [warn] Renko failed for {ticker}: {e}")
 
+    # Clamp display window to available data
+    n = min(n, len(data))
     data = data.iloc[-n:]
 
     # ── Try loading options / futures for overlay ──────────────────────
@@ -887,7 +903,8 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None):
         Indicatordf.reset_index(inplace=True)
 
         # ── Plot ──────────────────────────────────────────────────────
-        plot_chart(Indicatordf, 25, Scrip, 0, pdf_pages=pdf_pages)
+        display_bars = min(25, len(Indicatordf))
+        plot_chart(Indicatordf, display_bars, Scrip, 0, pdf_pages=pdf_pages)
 
     if pdf_pages:
         pdf_pages.close()
