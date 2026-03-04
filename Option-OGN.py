@@ -119,20 +119,26 @@ def put_otm(df, focus_date):
 
 
 def max_pain_strike(call_sums, put_sums):
-    """Compute the strike at which total option-writer pain is minimised."""
+    """Compute the strike at which total option-writer pain is minimised.
+
+    For each candidate strike, calculates the total intrinsic value * OI
+    that option writers would have to pay out (ITM calls + ITM puts).
+    The strike with the lowest total payout is the "max pain" strike.
+    """
     strikes = sorted(set(call_sums['Strike Price']).union(set(put_sums['Strike Price'])))
     pain = {}
     for s in strikes:
-        call_pain = call_sums.loc[call_sums['Strike Price'] < s,
-                                  'Open Int'].sum() * 0  # ITM calls
-        # For each strike, sum intrinsic * OI for all ITM options
+        # ITM calls: strikes below the candidate settlement price
         itm_calls = call_sums[call_sums['Strike Price'] < s].copy()
         itm_calls['pain'] = (s - itm_calls['Strike Price']) * itm_calls['Open Int']
+        # ITM puts: strikes above the candidate settlement price
         itm_puts = put_sums[put_sums['Strike Price'] > s].copy()
         itm_puts['pain'] = (itm_puts['Strike Price'] - s) * itm_puts['Open Int']
+        # Total writer payout at this settlement price
         pain[s] = itm_calls['pain'].sum() + itm_puts['pain'].sum()
     if not pain:
         return np.nan
+    # Strike that minimises total writer pain
     return min(pain, key=pain.get)
 
 
@@ -175,30 +181,58 @@ def MACD(DF, a=12, b=26, c=9):
 
 
 def RSI(DF, n=14):
-    """Wilder-style RSI."""
+    """Wilder-style RSI (Relative Strength Index).
+
+    Uses Wilder's smoothing method: the first average is a simple mean
+    over n periods, then each subsequent average is exponentially smoothed
+    with factor (n-1)/n.
+
+    Args:
+        DF: DataFrame with a 'Close' column.
+        n:  Lookback period (default 14).
+
+    Returns:
+        Series of RSI values (0–100 scale).
+    """
     df = DF.copy()
     delta = df['Close'].diff()
-    gain = delta.clip(lower=0)
-    loss = (-delta).clip(lower=0)
+    gain = delta.clip(lower=0)      # Positive price changes only
+    loss = (-delta).clip(lower=0)   # Negative changes made positive
 
+    # Seed with NaN for the first n rows (insufficient data)
     avg_gain = [np.nan] * n
     avg_loss = [np.nan] * n
+    # First average: simple mean of the first n periods
     avg_gain.append(gain.iloc[1:n + 1].mean())
     avg_loss.append(loss.iloc[1:n + 1].mean())
+    # Wilder smoothing: avg = (prev_avg * (n-1) + current) / n
     for i in range(n + 1, len(df)):
         avg_gain.append((avg_gain[-1] * (n - 1) + gain.iloc[i]) / n)
         avg_loss.append((avg_loss[-1] * (n - 1) + loss.iloc[i]) / n)
     df['avg_gain'] = np.array(avg_gain)
     df['avg_loss'] = np.array(avg_loss)
-    df['RS'] = df['avg_gain'] / df['avg_loss']
-    df['RSI'] = 100 - (100 / (1 + df['RS']))
+    df['RS'] = df['avg_gain'] / df['avg_loss']  # Relative Strength
+    df['RSI'] = 100 - (100 / (1 + df['RS']))    # Normalise to 0–100
     return df['RSI']
 
 
 def ADX(DF, n=20):
-    """Average Directional Index (ADX), DI+, DI-."""
+    """Average Directional Index (ADX), DI+, DI-.
+
+    Uses Wilder's smoothing method for TR, DM+, and DM- to compute
+    directional indicators (DI+, DI-), then smooths DX into ADX.
+
+    Args:
+        DF: DataFrame with 'High', 'Low', 'Close' columns.
+        n:  Lookback period (default 20).
+
+    Returns:
+        DataFrame with added columns: ADX, DIplusN, DIminusN, DX, etc.
+    """
     df2 = DF.copy()
-    df2['TR'] = ATR(df2, n)['TR']
+    df2['TR'] = ATR(df2, n)['TR']  # True Range from ATR helper
+
+    # Directional Movement: DM+ = upward move, DM- = downward move
     df2['DMplus'] = np.where(
         (df2['High'] - df2['High'].shift(1)) > (df2['Low'].shift(1) - df2['Low']),
         df2['High'] - df2['High'].shift(1), 0)
@@ -208,79 +242,113 @@ def ADX(DF, n=20):
         df2['Low'].shift(1) - df2['Low'], 0)
     df2['DMminus'] = np.where(df2['DMminus'] < 0, 0, df2['DMminus'])
 
+    # Wilder smoothing for TR, DM+, DM- over n periods
     TRn, DMpN, DMmN = [], [], []
     TR = df2['TR'].tolist()
     DMp = df2['DMplus'].tolist()
     DMm = df2['DMminus'].tolist()
     for i in range(len(df2)):
         if i < n:
-            TRn.append(np.nan); DMpN.append(np.nan); DMmN.append(np.nan)
+            # Not enough data yet
+            TRn.append(np.nan)
+            DMpN.append(np.nan)
+            DMmN.append(np.nan)
         elif i == n:
+            # First smoothed value: simple sum of n periods
             TRn.append(df2['TR'].rolling(n).sum().iloc[n])
             DMpN.append(df2['DMplus'].rolling(n).sum().iloc[n])
             DMmN.append(df2['DMminus'].rolling(n).sum().iloc[n])
         else:
+            # Wilder smoothing: prev - (prev/n) + current
             TRn.append(TRn[-1] - TRn[-1] / n + TR[i])
             DMpN.append(DMpN[-1] - DMpN[-1] / n + DMp[i])
             DMmN.append(DMmN[-1] - DMmN[-1] / n + DMm[i])
     df2['TRn'] = np.array(TRn)
     df2['DMplusN'] = np.array(DMpN)
     df2['DMminusN'] = np.array(DMmN)
+
+    # Directional Indicators (percentage of smoothed DM to smoothed TR)
     df2['DIplusN'] = 100 * (df2['DMplusN'] / df2['TRn'])
     df2['DIminusN'] = 100 * (df2['DMminusN'] / df2['TRn'])
     df2['DIdiff'] = abs(df2['DIplusN'] - df2['DIminusN'])
     df2['DIsum'] = df2['DIplusN'] + df2['DIminusN']
-    df2['DX'] = 100 * (df2['DIdiff'] / df2['DIsum'])
+    df2['DX'] = 100 * (df2['DIdiff'] / df2['DIsum'])  # Directional Index
 
+    # ADX: smoothed DX (needs 2*n - 1 bars before first value)
     adx_vals = []
     DX = df2['DX'].tolist()
     for j in range(len(df2)):
         if j < 2 * n - 1:
-            adx_vals.append(np.nan)
+            adx_vals.append(np.nan)  # Insufficient data
         elif j == 2 * n - 1:
+            # First ADX: simple mean of DX over last n bars
             adx_vals.append(df2['DX'].iloc[j - n + 1:j + 1].mean())
         else:
+            # Wilder smoothing: ((n-1) * prev_ADX + current_DX) / n
             adx_vals.append(((n - 1) * adx_vals[-1] + DX[j]) / n)
     df2['ADX'] = np.array(adx_vals)
     return df2
 
 
 def OBV(DF):
-    """On Balance Volume."""
+    """On Balance Volume.
+
+    Cumulative volume indicator: adds volume on up-days, subtracts on
+    down-days.  Used to confirm price trends via volume flow.
+    """
     df = DF.copy()
     df['daily_ret'] = df['Close'].pct_change()
+    # Direction: +1 on up/flat days, -1 on down days
     df['direction'] = np.where(df['daily_ret'] >= 0, 1, -1)
-    df.iloc[0, df.columns.get_loc('direction')] = 0
+    df.iloc[0, df.columns.get_loc('direction')] = 0  # No direction on first bar
     df['vol_adj'] = df['Volume'] * df['direction']
-    df['obv'] = df['vol_adj'].cumsum()
+    df['obv'] = df['vol_adj'].cumsum()  # Running cumulative OBV
     return df
 
 
 def ATR(DF, n=20):
-    """True Range and Average True Range."""
+    """True Range and Average True Range.
+
+    TR = max(High-Low, |High-PrevClose|, |Low-PrevClose|)
+    ATR = simple rolling mean of TR over n periods.
+
+    Args:
+        DF: DataFrame with 'High', 'Low', 'Close' columns.
+        n:  Rolling window size (default 20).
+    """
     df = DF.copy()
-    df['H-L'] = abs(df['High'] - df['Low'])
-    df['H-PC'] = abs(df['High'] - df['Close'].shift(1))
-    df['L-PC'] = abs(df['Low'] - df['Close'].shift(1))
+    df['H-L'] = abs(df['High'] - df['Low'])              # Intraday range
+    df['H-PC'] = abs(df['High'] - df['Close'].shift(1))  # Gap up component
+    df['L-PC'] = abs(df['Low'] - df['Close'].shift(1))   # Gap down component
     df['TR'] = df[['H-L', 'H-PC', 'L-PC']].max(axis=1, skipna=False)
     df['ATR'] = df['TR'].rolling(n).mean()
-    df.drop(['H-L', 'H-PC', 'L-PC'], axis=1, inplace=True)
+    df.drop(['H-L', 'H-PC', 'L-PC'], axis=1, inplace=True)  # Clean up temp cols
     return df
 
 
 def slope(ser, n=5):
-    """Slope of regression line for n consecutive points (degrees)."""
+    """Slope of regression line for n consecutive points (degrees).
+
+    Normalises both x (time) and y (price) to [0,1] range, then fits
+    OLS regression over rolling windows.  Returns slope angle in degrees.
+
+    Args:
+        ser: Price series.
+        n:   Rolling window size (default 5).
+    """
+    # Normalise price to [0, 1] for comparable slope magnitudes
     ser = (ser - ser.min()) / (ser.max() - ser.min())
     x = np.array(range(len(ser)))
-    x = (x - x.min()) / (x.max() - x.min())
-    slopes = [0.0] * (n - 1)
+    x = (x - x.min()) / (x.max() - x.min())  # Normalise time axis
+    slopes = [0.0] * (n - 1)  # Pad initial values
     for i in range(n, len(ser) + 1):
         y_scaled = ser.iloc[i - n:i]
         x_scaled = x[i - n:i]
-        x_scaled = sm.add_constant(x_scaled)
+        x_scaled = sm.add_constant(x_scaled)  # Add intercept term
         model = sm.OLS(y_scaled, x_scaled)
         results = model.fit()
-        slopes.append(results.params[-1])
+        slopes.append(results.params[-1])  # Coefficient = slope
+    # Convert slope ratio to angle in degrees
     return np.rad2deg(np.arctan(np.array(slopes)))
 
 
@@ -299,21 +367,28 @@ def BollBnd(DF, n=20):
 # ---------------------------------------------------------------------------
 
 def Renko_DF(DF, ticker):
-    """Convert OHLCV data into Renko bricks (requires stocktrends)."""
+    """Convert OHLCV data into Renko bricks (requires stocktrends).
+
+    Brick size is set to the 120-period ATR of the source data.
+
+    Args:
+        DF:     DataFrame with Date, Open, High, Low, Close, Volume.
+        ticker: Symbol name (for logging only).
+
+    Returns:
+        Renko OHLC DataFrame, or empty DataFrame if stocktrends is missing.
+    """
     if not HAS_RENKO:
         print("  [skip] stocktrends not installed — Renko unavailable")
         return pd.DataFrame()
     df = DF.copy()
-    # Select columns: date, open, high, low, close, volume
-    if ticker in ("NIFTY", "BANKNIFTY"):
-        df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
-    else:
-        # Equity data already has the right columns
-        df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
+    # Select and rename columns to lowercase (stocktrends convention)
+    df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
     df.rename(columns={"Date": "date", "High": "high", "Low": "low",
                         "Open": "open", "Close": "close", "Volume": "volume"},
               inplace=True)
     df2 = Renko(df)
+    # Use 120-period ATR as brick size for adaptive brick scaling
     df2.brick_size = round(ATR(DF, 120)["ATR"].iloc[-1], 0)
     renko_df = df2.get_ohlc_data()
     return renko_df
@@ -335,6 +410,7 @@ def PlotRenko(DF, num_bars=100):
 
     for idx, (_, row) in enumerate(df.iterrows(), 1):
         op, cl = row['open'], row['close']
+        # Green for up-bricks, red for down-bricks
         colour = ('darkgreen', 'green') if op < cl else ('darkred', 'red')
         r = matplotlib.patches.Rectangle(
             (idx, op), 1, cl - op,
@@ -424,24 +500,26 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     data.index = pd.to_datetime(data["Date"])
     data.drop("Date", axis=1, inplace=True)
 
-    # ── Build OHLC list for candlestick ───────────────────────────────
+    # ── Build OHLC list for candlestick (date as matplotlib number) ───
     ohlc = []
     for dt, row in data.iterrows():
         ohlc.append([date2num(dt), row['Open'], row['High'], row['Low'], row['Close']])
 
-    # ── Figure 2: main analysis panels ────────────────────────────────
+    # ── Figure 2: main analysis panels (7-panel layout) ────────────
     fig2 = plt.figure(figsize=(48, 27))
 
+    # Left column (4 panels): MACD, RSI/ADX, Fibonacci, Bollinger/OBV
     ax_macd = fig2.add_axes((0, 0.84, 0.49, 0.24))
     ax_rsi = fig2.add_axes((0, 0.56, 0.49, 0.24), sharex=ax_macd)
     ax_fibret = fig2.add_axes((0, 0.28, 0.49, 0.24), sharex=ax_macd)
     ax_bba = fig2.add_axes((0, 0, 0.49, 0.24), sharex=ax_macd)
 
+    # Right column (3 panels): EMA overlay, Max Pain, Futures fair-value
     ax_ema = fig2.add_axes((0.51, 0.76, 0.49, 0.32), sharex=ax_macd)
     ax_maxpain = fig2.add_axes((0.51, 0.52, 0.49, 0.2), sharex=ax_macd)
     ax_futures = fig2.add_axes((0.51, 0, 0.49, 0.5), sharex=ax_macd)
 
-    ax_macd.xaxis_date()
+    ax_macd.xaxis_date()  # Format x-axis as dates
 
     # ── EMA panel ─────────────────────────────────────────────────────
     ax_ema.plot(data.index, data["Close"], label=f"{ticker} Price")
@@ -660,51 +738,46 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None):
         Indicatordf = OHLCdf.copy()
         Indicatordf = Indicatordf.set_index("Date")
 
-        # MACD
-        Indicatordf = MACD(Indicatordf, 12, 26, 9)
+        # --- Momentum indicators ---
+        Indicatordf = MACD(Indicatordf, 12, 26, 9)       # MACD (12/26/9)
+        Indicatordf["RSI"] = RSI(Indicatordf, 14)        # RSI (14-period)
 
-        # Bollinger Bands
-        Indicatordf = BollBnd(Indicatordf, 20)
+        # --- Volatility indicators ---
+        Indicatordf = BollBnd(Indicatordf, 20)            # Bollinger Bands (20-period)
+        Indicatordf = ATR(Indicatordf, 20)                # Average True Range (20-period)
 
-        # ATR
-        Indicatordf = ATR(Indicatordf, 20)
-
-        # ADX
-        ADXdf = ADX(Indicatordf, 20)
+        # --- Trend strength ---
+        ADXdf = ADX(Indicatordf, 20)                      # ADX (20-period Wilder)
         Indicatordf['ADX'] = ADXdf['ADX']
-        Indicatordf['DIplusN'] = ADXdf['DIplusN']
-        Indicatordf['DIminusN'] = ADXdf['DIminusN']
+        Indicatordf['DIplusN'] = ADXdf['DIplusN']         # Bullish directional indicator
+        Indicatordf['DIminusN'] = ADXdf['DIminusN']       # Bearish directional indicator
 
-        # Rolling ADX
+        # Smoothed ADX: 5-day and 15-day rolling means
         Indicatordf['ADXRoll5'] = Indicatordf['ADX'].rolling(5).mean()
         Indicatordf['ADXRoll10'] = Indicatordf['ADX'].rolling(15).mean()
 
-        # Rolling volume
-        Indicatordf['VolRoll5'] = Indicatordf['Volume'].rolling(5).mean()
-        Indicatordf['VolRoll10'] = Indicatordf['Volume'].rolling(10).mean()
+        # --- Volume indicators ---
+        Indicatordf['VolRoll5'] = Indicatordf['Volume'].rolling(5).mean()   # 5-day avg volume
+        Indicatordf['VolRoll10'] = Indicatordf['Volume'].rolling(10).mean() # 10-day avg volume
 
-        # Beta (via talib if available)
+        OBVdf = OBV(Indicatordf)                          # On Balance Volume
+        Indicatordf["OBV"] = OBVdf["obv"]
+        Indicatordf["Daily_Ret"] = OBVdf['daily_ret']
+        Indicatordf["Log_Ret"] = np.log(1 + OBVdf['daily_ret'])  # Log returns for stats
+
+        # --- Beta via talib (optional) ---
         if HAS_TALIB:
             Indicatordf["Beta"] = talib.BETA(
                 Indicatordf["High"], Indicatordf["Low"], timeperiod=14)
 
-        # RSI
-        Indicatordf["RSI"] = RSI(Indicatordf, 14)
-
-        # OBV
-        OBVdf = OBV(Indicatordf)
-        Indicatordf["OBV"] = OBVdf["obv"]
-        Indicatordf["Daily_Ret"] = OBVdf['daily_ret']
-        Indicatordf["Log_Ret"] = np.log(1 + OBVdf['daily_ret'])
-
-        # Slope
+        # --- Regression slope (5-bar rolling) ---
         Indicatordf["Slope"] = slope(Indicatordf["Close"], 5)
 
-        # Simple DMAs
+        # --- Moving averages ---
+        # Simple Moving Averages (SMA)
         for w in [10, 20, 50, 100, 200]:
             Indicatordf[f"{w}DMA"] = Indicatordf["Close"].rolling(window=w).mean()
-
-        # Exponential DMAs
+        # Exponential Moving Averages (EMA)
         for w in [10, 20, 50, 80, 140]:
             Indicatordf[f"{w}DMA-E"] = Indicatordf["Close"].ewm(
                 span=w, adjust=False).mean()

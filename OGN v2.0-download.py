@@ -939,10 +939,14 @@ class NSEMarketDataDownloader:
             raise DownloadFailedError(f"Parse error for WDM Daily {date}: {e}") from e
 
     def _clean_cm_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
-        """Standardizes Equity data."""
+        """Standardizes Equity data.
+
+        Handles both UDiFF format (post July 2024, TckrSymb/OpnPric columns)
+        and legacy format (SYMBOL/OPEN columns) via a unified column mapping.
+        """
         df.columns = [c.strip() for c in df.columns]
-        
-        # UDiFF Mapping
+
+        # UDiFF + Legacy column mapping → standardised names
         mapping = {
             'TradDt': 'Date', 'TckrSymb': 'Symbol', 'SctySrs': 'Series',
             'OpnPric': 'Open', 'HghPric': 'High', 'LwPric': 'Low', 'ClsPric': 'Close',
@@ -960,11 +964,12 @@ class NSEMarketDataDownloader:
         else:
             df['Symbol'] = df['Symbol'].astype(str).str.strip()
 
-        # Select important columns
+        # Select important columns (drop any extras from UDiFF/legacy format)
         cols = ['Date', 'Symbol', 'Series', 'Open', 'High', 'Low', 'Close', 'Last', 'Prev Close', 'Volume', 'Turnover']
         available_cols = [c for c in cols if c in df.columns]
         df = df[available_cols].copy()
-        
+
+        # Parse dates and coerce numeric columns
         df['Date'] = pd.to_datetime(df['Date']).dt.date
         numeric_cols = ['Open', 'High', 'Low', 'Close', 'Last', 'Prev Close', 'Volume', 'Turnover']
         for col in numeric_cols:
@@ -974,7 +979,11 @@ class NSEMarketDataDownloader:
         return df
 
     def _clean_fo_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
-        """Standardizes F&O data."""
+        """Standardizes F&O data.
+
+        Handles both UDiFF format (post July 2024, FinInstrmTp/SttlmPric columns)
+        and legacy format (INSTRUMENT/SETTLE_PR columns) via a unified column mapping.
+        """
         df.columns = [c.strip() for c in df.columns]
         
         mapping = {
@@ -1008,9 +1017,10 @@ class NSEMarketDataDownloader:
 
     def _clean_indices_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
         """Standardizes Indices data from PR report.
-        
+
         Handles varying column formats across different years of NSE PR reports.
         Uses fuzzy matching to find the symbol/name column regardless of header naming.
+        Filters output to only known tracked indices (NIFTY, BANKNIFTY, etc.).
         """
         df.columns = [c.strip() for c in df.columns]
 
@@ -1244,7 +1254,7 @@ class NSEMarketDataDownloader:
 
         DAT format has: Record Type, Symbol, Series, Qty Traded,
         Deliverable Qty, % of Deliverable to Traded.
-        Record type 20 = data rows.
+        Record type 20 = data rows (10 = header, 30 = trailer).
         """
         df.columns = [c.strip() for c in df.columns]
 
@@ -1339,16 +1349,25 @@ class NSEMarketDataDownloader:
         return df
 
     def update_processed_data(self, df: pd.DataFrame, target_dir: Path, group_col: str = 'Symbol'):
-        """Appends new data to per-symbol Parquet files."""
+        """Appends new data to per-symbol Parquet files.
+
+        Groups the input DataFrame by `group_col`, then for each group:
+        - If a parquet file already exists, concatenates and deduplicates.
+        - Otherwise, creates a new file.
+
+        Deduplication keys depend on the data type (Equity vs Derivatives).
+        """
         if df is None or df.empty:
             return
 
         for name, group in df.groupby(group_col):
             file_path = target_dir / f"{name}.parquet"
             if file_path.exists():
+                # Append to existing file: concat → dedup → sort
                 existing_df = pd.read_parquet(file_path, engine='pyarrow')
                 # pd.concat automatically handles differing columns
                 combined_df = pd.concat([existing_df, group], ignore_index=True)
+                # Build dedup key: Date + any available identity columns
                 dedup_cols = ['Date']
                 for extra_key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
                     if extra_key in combined_df.columns:
@@ -1357,6 +1376,7 @@ class NSEMarketDataDownloader:
                 combined_df = combined_df.sort_values('Date')
                 combined_df.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
             else:
+                # Create new file for this symbol
                 group = group.sort_values('Date')
                 group.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
 
@@ -1688,30 +1708,37 @@ class NSEMarketDataDownloader:
         return (day, df)
 
     def _download_day_ss(self, day: datetime.date) -> tuple:
+        """Download Short Selling report for one day. Returns (day, df_or_None)."""
         df = self.download_short_selling(day)
         return (day, df)
 
     def _download_day_vol(self, day: datetime.date) -> tuple:
+        """Download Daily Volatility report for one day. Returns (day, df_or_None)."""
         df = self.download_daily_volatility(day)
         return (day, df)
 
     def _download_day_ma(self, day: datetime.date) -> tuple:
+        """Download Market Activity report for one day. Returns (day, df_or_None)."""
         df = self.download_market_activity(day)
         return (day, df)
 
     def _download_day_pb(self, day: datetime.date) -> tuple:
+        """Download Price Band report for one day. Returns (day, df_or_None)."""
         df = self.download_price_band(day)
         return (day, df)
 
     def _download_day_pe(self, day: datetime.date) -> tuple:
+        """Download PE Ratio report for one day. Returns (day, df_or_None)."""
         df = self.download_pe_ratio(day)
         return (day, df)
 
     def _download_day_cb(self, day: datetime.date) -> tuple:
+        """Download Corporate Bonds report for one day. Returns (day, df_or_None)."""
         df = self.download_corp_bonds(day)
         return (day, df)
 
     def _download_day_del(self, day: datetime.date) -> tuple:
+        """Download Delivery Positions report for one day. Returns (day, df_or_None)."""
         df = self.download_delivery_positions(day)
         return (day, df)
 
@@ -1816,7 +1843,8 @@ class NSEMarketDataDownloader:
             if today_nodata.exists():
                 today_nodata.unlink(missing_ok=True)
 
-        # Skip days that already have raw files, .nodata, or .nodata_weekend markers
+        # Skip days that already have raw files, .nodata, or .nodata_weekend markers.
+        # This avoids redundant HTTP requests on subsequent runs.
         days_to_download = []
         skipped = 0
         nodata_skipped = 0
@@ -1860,7 +1888,7 @@ class NSEMarketDataDownloader:
             print(f"  [{label}] All days already downloaded.", flush=True)
             return
 
-        # Reverse: process newest days first
+        # Reverse: process newest days first (more likely to succeed, updates faster)
         days_to_download = list(reversed(days_to_download))
 
         total = len(days_to_download)
@@ -1873,7 +1901,8 @@ class NSEMarketDataDownloader:
         last_progress_time = time.time()
         print(f"  Downloading {total} days of {label} data (newest first, {self.MAX_WORKERS} workers)...", flush=True)
 
-        # Process in batches to allow concurrent downloads while tracking 403 streaks
+        # Process in batches to allow concurrent downloads while tracking 403 streaks.
+        # Batch size = MAX_WORKERS * 5 to balance parallelism with 403 detection.
         BATCH_SIZE = self.MAX_WORKERS * 5  # e.g. 20 days per batch
         for batch_start in range(0, total, BATCH_SIZE):
             if stopped_early:
@@ -1941,7 +1970,9 @@ class NSEMarketDataDownloader:
                         batch_results[day] = ('fail',)
                         failed_days.append(day)
 
-            # Check consecutive 403 streak in date order (newest first = batch_days order)
+            # Check consecutive 403 streak in date order (newest first = batch_days order).
+            # If we hit MAX_CONSECUTIVE_403 in a row, older data is likely unavailable
+            # on NSE, so stop going further back for this category.
             for day in batch_days:
                 result = batch_results.get(day, ('fail',))
                 if result[0] == '403':
@@ -1977,6 +2008,11 @@ class NSEMarketDataDownloader:
         Already-downloaded days are automatically skipped (raw file on disk).
         If 5 consecutive 403 errors are hit going backwards, that category
         stops and the next category begins.
+
+        For each category the pipeline is:
+          1. Retry a random sample of .nodata days (recover false negatives)
+          2. Download missing days concurrently (newest-first)
+          3. Merge raw day-parquet files into per-symbol processed files
         """
         print("Starting Incremental Update...")
         t0 = time.time()
