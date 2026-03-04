@@ -434,14 +434,14 @@ def PlotRenko(DF, num_bars=100, ax=None):
     ax.set_xlim([0, num_bars])
     ax.set_ylim([min(df['open'].min(), df['close'].min()),
                  max(df['open'].max(), df['close'].max())])
-    ax.set_xlabel('Bar #', fontsize=8)
-    ax.set_ylabel('Price', fontsize=8)
-    ax.tick_params(labelsize=7)
+    ax.set_xlabel('Bar #', fontsize=30)
+    ax.set_ylabel('Price', fontsize=30)
+    ax.tick_params(labelsize=20)
     ax.grid(True)
     ax.set_title(
         f"Renko  |  {df['date'].min():%d-%b-%Y} \u2192 {df['date'].max():%d-%b-%Y}"
         f"  |  brick = {price_move:.0f}",
-        fontsize=9, fontweight='bold', pad=6)
+        fontsize=30, fontweight='bold', pad=6)
 
     if standalone:
         return fig
@@ -638,26 +638,29 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
         if col in data.columns:
             ax_ema.plot(data.index, data[col], label=col)
     ax_ema.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
-    ax_ema.legend()
+    ax_ema.legend(fontsize=20)
     ax_ema.grid(True)
-    ax_ema.set_title('EMA Crossover', fontsize=10, fontweight='bold', pad=8)
+    ax_ema.tick_params(labelsize=20)
+    ax_ema.set_title('EMA Crossover', fontsize=30, fontweight='bold', pad=8)
 
     # ── SMA panel ─────────────────────────────────────────────────────
     for col in ["20DMA", "50DMA", "200DMA"]:
         if col in data.columns:
             ax_sma.plot(data.index, data[col], label=col)
     ax_sma.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
-    ax_sma.legend()
+    ax_sma.legend(fontsize=20)
     ax_sma.grid(True)
-    ax_sma.set_title('SMA Crossover', fontsize=10, fontweight='bold', pad=8)
+    ax_sma.tick_params(labelsize=20)
+    ax_sma.set_title('SMA Crossover', fontsize=30, fontweight='bold', pad=8)
 
     # ── MACD panel ────────────────────────────────────────────────────
     ax_macd.plot(data.index, data["MACD"], label="MACD")
     ax_macd.bar(data.index, (data["MACD"] - data["Signal"]) * 3, label="hist")
     ax_macd.plot(data.index, data["Signal"], label="Signal")
-    ax_macd.legend()
+    ax_macd.legend(fontsize=20)
     ax_macd.grid(True)
-    ax_macd.set_title('MACD (12, 26, 9)', fontsize=10, fontweight='bold', pad=8)
+    ax_macd.tick_params(labelsize=20)
+    ax_macd.set_title('MACD (12, 26, 9)', fontsize=30, fontweight='bold', pad=8)
 
     # ── RSI & ADX panel ───────────────────────────────────────────────
     ax_rsi.set_ylabel("(%)")
@@ -671,23 +674,26 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
         ax_rsi.plot(data.index, data["DIplusN"], label="DI+", color='green')
     if 'DIminusN' in data.columns:
         ax_rsi.plot(data.index, data["DIminusN"], label="DI-", color='red')
-    ax_rsi.legend()
+    ax_rsi.legend(fontsize=20)
     ax_rsi.grid(True)
-    ax_rsi.set_title('RSI & ADX', fontsize=10, fontweight='bold', pad=8)
+    ax_rsi.tick_params(labelsize=20)
+    ax_rsi.set_title('RSI & ADX', fontsize=30, fontweight='bold', pad=8)
 
     # ── Bollinger Bands + OBV panel ───────────────────────────────────
     ax_bba.plot(data.index, data["BB_up"], label="BB_up")
     ax_bba.plot(data.index, data["BB_dn"], label="BB_dn")
     ax_bba.plot(data.index, data["MA"], label="MA")
     ax_bba.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
-    ax_bba.legend()
+    ax_bba.legend(fontsize=20)
     ax_bba.grid(True)
-    ax_bba.set_title('Bollinger Bands & OBV', fontsize=10, fontweight='bold', pad=8)
+    ax_bba.tick_params(labelsize=20)
+    ax_bba.set_title('Bollinger Bands & OBV', fontsize=30, fontweight='bold', pad=8)
 
     if 'OBV' in data.columns:
         ax_obv = ax_bba.twinx()
         ax_obv.plot(data.index, data["OBV"] / 100000, marker="*", label="OBV")
         ax_obv.set_ylabel('OBV')
+        ax_obv.tick_params(labelsize=20)
         ax_obv.grid(visible=False)
 
     # ── Fibonacci retracements ────────────────────────────────────────
@@ -707,9 +713,10 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
         prev = level
     ax_fibret.axhspan(prev, price_max, alpha=0.5, color='green',
                       label=f'{price_max:.1f} (1)')
-    ax_fibret.legend()
+    ax_fibret.legend(fontsize=20)
     ax_fibret.grid(True)
-    ax_fibret.set_title('Fibonacci Retracements', fontsize=10, fontweight='bold', pad=8)
+    ax_fibret.tick_params(labelsize=20)
+    ax_fibret.set_title('Fibonacci Retracements', fontsize=30, fontweight='bold', pad=8)
 
     # Candlestick overlay on Fibonacci panel using mplfinance-compatible OHLC
     # (Using simple line plot since mplfinance add_plot requires different setup)
@@ -742,7 +749,7 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
             loc='upper center',
         )
         tbl.auto_set_font_size(False)
-        tbl.set_fontsize(20)
+        tbl.set_fontsize(23)
         tbl.scale(1.0, 6.0)  # Stretch rows for readability
         # Style header row
         for (r, c), cell in tbl.get_celld().items():
@@ -880,7 +887,7 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None):
         Indicatordf.reset_index(inplace=True)
 
         # ── Plot ──────────────────────────────────────────────────────
-        plot_chart(Indicatordf, 60, Scrip, 0, pdf_pages=pdf_pages)
+        plot_chart(Indicatordf, 25, Scrip, 0, pdf_pages=pdf_pages)
 
     if pdf_pages:
         pdf_pages.close()
