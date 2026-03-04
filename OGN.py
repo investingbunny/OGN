@@ -437,19 +437,44 @@ def _filter_dates(df: pd.DataFrame, start: str = None,
 def get_latest_date(directory: Path = None) -> datetime.date:
     """Get the most recent date available in a data store directory.
 
-    Reads the first symbol alphabetically and returns its max date.
-    Defaults to EQUITY_PROCESSED if no directory is specified.
+    Samples a set of well-known liquid symbols first, then falls back to
+    a broader scan of up to 50 symbols.  Returns the maximum date found
+    across all sampled files.  Defaults to EQUITY_PROCESSED if no
+    directory is specified.
     """
     if directory is None:
         directory = EQUITY_PROCESSED
     syms = list_symbols(directory)
     if not syms:
         return None
-    # Sample the first symbol to determine the latest date
-    df = _load_parquet(directory, syms[0])
-    if 'Date' in df.columns and not df.empty:
-        return pd.to_datetime(df['Date']).max().date()
-    return None
+
+    # Prefer well-known liquid symbols — they are most likely to have
+    # the latest trading-day data.  Fall back to a broader sample if
+    # none of these are present.
+    priority_symbols = [
+        'RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK',
+        'SBIN', 'TATAMOTORS', 'ITC', 'LT', 'AXISBANK',
+        # Index names (for Indices/Processed)
+        'NIFTY', 'BANKNIFTY', 'NIFTY500',
+    ]
+    candidates = [s for s in priority_symbols if s in syms]
+
+    # If none of the priority symbols exist, sample up to 50 from the full list
+    if not candidates:
+        import random
+        candidates = random.sample(syms, min(50, len(syms)))
+
+    latest = None
+    for sym in candidates:
+        try:
+            df = _load_parquet(directory, sym)
+            if 'Date' in df.columns and not df.empty:
+                sym_max = pd.to_datetime(df['Date']).max().date()
+                if latest is None or sym_max > latest:
+                    latest = sym_max
+        except Exception:
+            continue
+    return latest
 
 
 def data_summary() -> pd.DataFrame:
