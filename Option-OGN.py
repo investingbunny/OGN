@@ -716,14 +716,14 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
             loc='upper center',
         )
         tbl.auto_set_font_size(False)
-        tbl.set_fontsize(8)
-        tbl.scale(1.0, 1.5)  # Stretch rows for readability
+        tbl.set_fontsize(20)
+        tbl.scale(1.0, 6.0)  # Stretch rows for readability
         # Style header row
         for (r, c), cell in tbl.get_celld().items():
             if r == 0:
                 cell.set_text_props(color='white', fontweight='bold')
             cell.set_edgecolor('#cccccc')
-        ax_table.set_title(f"{ticker} — Technical Audit", fontsize=10,
+        ax_table.set_title(f"{ticker} — Technical Audit", fontsize=30,
                            fontweight='bold', pad=8)
     except Exception as e:
         ax_table.text(0.5, 0.5, f"Audit error:\n{e}",
