@@ -347,7 +347,7 @@ def slope(ser, n=5):
         x_scaled = sm.add_constant(x_scaled)  # Add intercept term
         model = sm.OLS(y_scaled, x_scaled)
         results = model.fit()
-        slopes.append(results.params[-1])  # Coefficient = slope
+        slopes.append(results.params.iloc[-1])  # Coefficient = slope
     # Convert slope ratio to angle in degrees
     return np.rad2deg(np.arctan(np.array(slopes)))
 
