@@ -852,6 +852,11 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None):
             print(f"  [skip] Empty data for {Scrip}")
             continue
 
+        # ── Ensure OHLCV columns are numeric (parquet may store as string) ──
+        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+            if col in OHLCdf.columns:
+                OHLCdf[col] = pd.to_numeric(OHLCdf[col], errors='coerce')
+
         # ── Compute indicators ────────────────────────────────────────
         Indicatordf = OHLCdf.copy()
         Indicatordf = Indicatordf.set_index("Date")
