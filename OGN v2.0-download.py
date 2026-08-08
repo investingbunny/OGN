@@ -79,6 +79,16 @@ DELIVERY_RAW = DATA_ROOT / "DeliveryPositions" / "Raw"
 DELIVERY_PROCESSED = DATA_ROOT / "DeliveryPositions" / "Processed"
 WDM_RAW = DATA_ROOT / "WDM" / "Raw"
 WDM_PROCESSED = DATA_ROOT / "WDM" / "Processed"
+MACRO_PROCESSED = DATA_ROOT / "Macro" / "Processed"
+
+# Comment out any line below to skip that full-history FRED series.
+# Format: (stored symbol, FRED series ID, display name, unit)
+FRED_SERIES = [
+    ("US02Y", "DGS2", "US Treasury 2-Year Constant Maturity Yield", "Percent"),
+    ("US10Y", "DGS10", "US Treasury 10-Year Constant Maturity Yield", "Percent"),
+    ("US03M", "DTB3", "US 3-Month Treasury Bill Secondary Market Rate", "Percent"),
+    ("GVZ", "GVZCLS", "CBOE Gold ETF Volatility Index", "Index"),
+]
 
 # Budget day (Feb 1) is always attempted even if it falls on a weekend.
 # Actual market holidays (Republic Day, Holi, etc.) vary each year and are
@@ -158,7 +168,7 @@ class NSEMarketDataDownloader:
                      VOLATILITY_RAW, VOLATILITY_PROCESSED, MARKETACTIVITY_RAW, MARKETACTIVITY_PROCESSED,
                      PRICEBAND_RAW, PRICEBAND_PROCESSED, PERATIO_RAW, PERATIO_PROCESSED,
                      CORPBONDS_RAW, CORPBONDS_PROCESSED, DELIVERY_RAW, DELIVERY_PROCESSED,
-                     WDM_RAW, WDM_PROCESSED]:
+                     WDM_RAW, WDM_PROCESSED, MACRO_PROCESSED]:
             path.mkdir(parents=True, exist_ok=True)
 
     def get_trading_days(self, start_date: datetime.date, end_date: datetime.date) -> List[datetime.date]:
@@ -497,6 +507,47 @@ class NSEMarketDataDownloader:
         except Exception as e:
             print(f"Error parsing Delivery Positions for {date}: {e}")
             raise DownloadFailedError(f"Parse error for Delivery Positions {date}: {e}") from e
+
+    def download_fred_series(self, symbol: str, series_id: str,
+                             name: str, unit: str) -> Optional[pd.DataFrame]:
+        """Downloads up to 50 years of one daily FRED series."""
+        start_date = (
+            pd.Timestamp(datetime.date.today()) - pd.DateOffset(years=50)
+        ).date()
+        url = (f"https://fred.stlouisfed.org/graph/fredgraph.csv"
+               f"?id={series_id}&cosd={start_date.isoformat()}")
+        try:
+            response = requests.get(url, timeout=30)
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            content = response.content
+        except requests.exceptions.RequestException as e:
+            raise DownloadFailedError(
+                f"FRED download failed for {series_id}: {e}") from e
+
+        try:
+            df = pd.read_csv(io.BytesIO(content), na_values='.')
+            expected_columns = {'observation_date', series_id}
+            if not expected_columns.issubset(df.columns):
+                raise DownloadFailedError(
+                    f"Unexpected FRED CSV columns for {series_id}: {list(df.columns)}")
+
+            df = df.rename(columns={'observation_date': 'Date', series_id: 'Value'})
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.date
+            df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
+            df = df[(df['Date'] >= start_date) & df['Value'].notna()].copy()
+            df['Symbol'] = symbol
+            df['Series'] = series_id
+            df['Name'] = name
+            df['Unit'] = unit
+            df['Source'] = 'FRED'
+            return df[['Date', 'Symbol', 'Value', 'Series', 'Name', 'Unit', 'Source']]
+        except DownloadFailedError:
+            raise
+        except Exception as e:
+            raise DownloadFailedError(
+                f"Parse error for FRED series {series_id}: {e}") from e
 
     def download_cm_bhavcopy(self, date: datetime.date) -> Optional[pd.DataFrame]:
         """Downloads Equity (Capital Market) Bhavcopy for a given date."""
@@ -1749,6 +1800,29 @@ class NSEMarketDataDownloader:
 
     NODATA_RETRY_SAMPLE = 10  # Number of random .nodata days to retry per category
 
+    def update_fred_series(self):
+        """Refreshes all enabled full-history series in FRED_SERIES."""
+        if not FRED_SERIES:
+            return
+
+        print("\n--- FRED Macro Series ---", flush=True)
+        for symbol, series_id, name, unit in FRED_SERIES:
+            target = MACRO_PROCESSED / f"{symbol}.parquet"
+            temp_target = target.with_suffix('.parquet.tmp')
+            try:
+                df = self.download_fred_series(symbol, series_id, name, unit)
+                if df is None or df.empty:
+                    print(f"  [{symbol}] No data returned for {series_id}.", flush=True)
+                    continue
+
+                df.to_parquet(temp_target, engine='pyarrow', compression='zstd', index=False)
+                temp_target.replace(target)
+                print(f"  [{symbol}] Saved {len(df):,} observations "
+                      f"({df['Date'].min()} to {df['Date'].max()}).", flush=True)
+            except Exception as e:
+                temp_target.unlink(missing_ok=True)
+                print(f"  [{symbol}] Update failed: {type(e).__name__}: {e}", flush=True)
+
     def _retry_nodata_sample(self, download_fn, raw_dir, raw_prefix, processed_dir, label):
         """Retries a random sample of .nodata days to recover falsely-marked dates.
 
@@ -2022,6 +2096,8 @@ class NSEMarketDataDownloader:
         # If 5 consecutive 403 errors are hit working backwards, that category stops.
         today = datetime.date.today()
         all_days = self.get_trading_days(DEFAULT_START_DATE, today)
+
+        self.update_fred_series()
 
         # ── Category list ──────────────────────────────────────────────
         # Comment out any line below to skip that category entirely.
