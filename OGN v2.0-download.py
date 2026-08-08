@@ -85,6 +85,8 @@ MACRO_PROCESSED = DATA_ROOT / "Macro" / "Processed"
 # Format: (stored symbol, FRED series ID, display name, unit)
 FRED_SERIES = [
     ("US02Y", "DGS2", "US Treasury 2-Year Constant Maturity Yield", "Percent"),
+    ("US10Y", "DGS10", "US Treasury 10-Year Constant Maturity Yield", "Percent"),
+    ("US03M", "DTB3", "US 3-Month Treasury Bill Secondary Market Rate", "Percent"),
     ("GVZ", "GVZCLS", "CBOE Gold ETF Volatility Index", "Index"),
 ]
 
