@@ -38,6 +38,7 @@ PERATIO_PROCESSED        = DATA_ROOT / "PERatio" / "Processed"
 CORPBONDS_PROCESSED      = DATA_ROOT / "CorporateBonds" / "Processed"
 DELIVERY_PROCESSED       = DATA_ROOT / "DeliveryPositions" / "Processed"
 WDM_PROCESSED            = DATA_ROOT / "WDM" / "Processed"
+MACRO_PROCESSED          = DATA_ROOT / "Macro" / "Processed"
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +351,25 @@ def load_wdm(symbol: str, start: str = None,
 
 
 # ---------------------------------------------------------------------------
+# FRED Macro Series
+# ---------------------------------------------------------------------------
+
+def load_macro(symbol: str, start: str = None,
+               end: str = None) -> pd.DataFrame:
+    """Load a FRED series such as US02Y or GVZ.
+
+    Columns: Date, Symbol, Value, Series, Name, Unit, Source
+    """
+    df = _load_parquet(MACRO_PROCESSED, symbol)
+    return _filter_dates(df, start, end)
+
+
+def list_macro_symbols() -> list:
+    """Return all available FRED macro-series aliases."""
+    return list_symbols(MACRO_PROCESSED)
+
+
+# ---------------------------------------------------------------------------
 # Multi-symbol convenience loaders
 # ---------------------------------------------------------------------------
 
@@ -495,6 +515,7 @@ def data_summary() -> pd.DataFrame:
         'Corporate Bonds':    CORPBONDS_PROCESSED,
         'Delivery Positions': DELIVERY_PROCESSED,
         'WDM Daily':          WDM_PROCESSED,
+        'Macro (FRED)':        MACRO_PROCESSED,
     }
     rows = []
     for name, path in categories.items():
