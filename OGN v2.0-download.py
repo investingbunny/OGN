@@ -12,6 +12,7 @@ Data is stored in Parquet format for optimal space and performance.
 import os
 import io
 import json
+import sys
 import time
 import random
 import zipfile
@@ -81,13 +82,42 @@ WDM_RAW = DATA_ROOT / "WDM" / "Raw"
 WDM_PROCESSED = DATA_ROOT / "WDM" / "Processed"
 MACRO_PROCESSED = DATA_ROOT / "Macro" / "Processed"
 
-# Comment out any line below to skip that full-history FRED series.
+# Shared schema for every file in Macro/Processed.
+MACRO_COLUMNS = ['Date', 'Symbol', 'Value', 'Series', 'Name', 'Unit', 'Source']
+MACRO_MAX_HISTORY_YEARS = 50   # First-run lookback when no stored history exists
+MACRO_REFRESH_OVERLAP_DAYS = 10  # Trailing window re-fetched to pick up revisions
+
+# Comment out any line below to skip that FRED series.
 # Format: (stored symbol, FRED series ID, display name, unit)
 FRED_SERIES = [
     ("US02Y", "DGS2", "US Treasury 2-Year Constant Maturity Yield", "Percent"),
     ("US10Y", "DGS10", "US Treasury 10-Year Constant Maturity Yield", "Percent"),
     ("US03M", "DTB3", "US 3-Month Treasury Bill Secondary Market Rate", "Percent"),
     ("GVZ", "GVZCLS", "CBOE Gold ETF Volatility Index", "Index"),
+    ("USCORPOAS", "BAMLC0A0CM", "ICE BofA US Corporate Index Option-Adjusted Spread", "Percent"),
+    ("USDJPY", "DEXJPUS", "Japanese Yen to US Dollar Spot Exchange Rate", "JPY per USD"),
+    ("USDINR", "DEXINUS", "Indian Rupee to US Dollar Spot Exchange Rate", "INR per USD"),
+    ("FEDTARU", "DFEDTARU", "Federal Funds Target Range - Upper Limit", "Percent"),
+    ("T10Y2Y", "T10Y2Y", "10-Year Minus 2-Year Treasury Constant Maturity Spread", "Percent"),
+    ("T10YIE", "T10YIE", "10-Year Breakeven Inflation Rate", "Percent"),
+    ("FEDASSETS", "WALCL", "Federal Reserve Total Assets", "Millions of USD"),
+    ("USHYOAS", "BAMLH0A0HYM2", "ICE BofA US High Yield Index Option-Adjusted Spread", "Percent"),
+    ("WTI", "DCOILWTICO", "Crude Oil Prices: West Texas Intermediate", "USD per Barrel"),
+    ("EURUSD", "DEXUSEU", "US Dollar to Euro Spot Exchange Rate", "USD per EUR"),
+    ("STLFSI", "STLFSI4", "St. Louis Fed Financial Stress Index", "Index"),
+]
+
+# Comment out any line below to skip that Yahoo Finance series.
+# Format: (stored symbol, Yahoo ticker, display name, unit)
+YAHOO_SERIES = [
+    ("GLD", "GLD", "SPDR Gold Shares ETF", "USD"),
+    ("SLV", "SLV", "iShares Silver Trust ETF", "USD"),
+]
+
+# Ratios derived from series already stored in Macro/Processed.
+# Format: (stored symbol, numerator symbol, denominator symbol, display name)
+MACRO_RATIOS = [
+    ("GLD_SLV", "GLD", "SLV", "SPDR Gold Shares / iShares Silver Trust Price Ratio"),
 ]
 
 # Budget day (Feb 1) is always attempted even if it falls on a weekend.
@@ -508,46 +538,148 @@ class NSEMarketDataDownloader:
             print(f"Error parsing Delivery Positions for {date}: {e}")
             raise DownloadFailedError(f"Parse error for Delivery Positions {date}: {e}") from e
 
-    def download_fred_series(self, symbol: str, series_id: str,
-                             name: str, unit: str) -> Optional[pd.DataFrame]:
-        """Downloads up to 50 years of one daily FRED series."""
-        start_date = (
-            pd.Timestamp(datetime.date.today()) - pd.DateOffset(years=50)
-        ).date()
+    MACRO_MAX_RETRIES = 3  # Attempts per macro source before giving up
+
+    def download_fred_series(self, symbol: str, series_id: str, name: str,
+                             unit: str, start_date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads one FRED series from `start_date` onwards.
+
+        Tolerates FRED's legacy `DATE` header alongside the current
+        `observation_date`, and any casing of the value column.
+        """
         url = (f"https://fred.stlouisfed.org/graph/fredgraph.csv"
                f"?id={series_id}&cosd={start_date.isoformat()}")
-        try:
-            response = requests.get(url, timeout=30)
-            if response.status_code == 404:
-                return None
-            response.raise_for_status()
-            content = response.content
-        except requests.exceptions.RequestException as e:
+
+        content = None
+        last_error = None
+        for attempt in range(self.MACRO_MAX_RETRIES):
+            try:
+                response = requests.get(url, timeout=30 + attempt * 15)
+                if response.status_code == 404:
+                    return None
+                response.raise_for_status()
+                content = response.content
+                break
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                if attempt < self.MACRO_MAX_RETRIES - 1:
+                    time.sleep(2 ** attempt)
+        if content is None:
             raise DownloadFailedError(
-                f"FRED download failed for {series_id}: {e}") from e
+                f"FRED download failed for {series_id}: {last_error}")
+
+        if not content.strip():
+            raise DownloadFailedError(f"Empty FRED response for {series_id}")
+        head = content[:200].lstrip().lower()
+        if head.startswith(b'<!doctype html') or head.startswith(b'<html'):
+            raise DownloadFailedError(f"FRED returned an HTML page for {series_id}")
 
         try:
-            df = pd.read_csv(io.BytesIO(content), na_values='.')
-            expected_columns = {'observation_date', series_id}
-            if not expected_columns.issubset(df.columns):
-                raise DownloadFailedError(
-                    f"Unexpected FRED CSV columns for {series_id}: {list(df.columns)}")
+            df = pd.read_csv(io.BytesIO(content),
+                             na_values=['.', 'NA', 'N/A', 'null', 'NaN'])
+        except Exception as e:
+            raise DownloadFailedError(
+                f"Could not parse FRED CSV for {series_id}: {e}") from e
 
-            df = df.rename(columns={'observation_date': 'Date', series_id: 'Value'})
-            df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.date
-            df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
-            df = df[(df['Date'] >= start_date) & df['Value'].notna()].copy()
-            df['Symbol'] = symbol
-            df['Series'] = series_id
-            df['Name'] = name
-            df['Unit'] = unit
-            df['Source'] = 'FRED'
-            return df[['Date', 'Symbol', 'Value', 'Series', 'Name', 'Unit', 'Source']]
+        if df.empty or len(df.columns) < 2:
+            return None
+
+        date_col = self._pick_column(
+            df.columns, ('observation_date', 'date', 'time_period', 'datetime', 'timestamp'))
+        if date_col is None:
+            date_col = df.columns[0]
+
+        value_col = self._pick_column(df.columns, (series_id.lower(), 'value'))
+        if value_col is None:
+            remaining = [c for c in df.columns if c != date_col]
+            if not remaining:
+                raise DownloadFailedError(
+                    f"No value column in FRED CSV for {series_id}: {list(df.columns)}")
+            value_col = remaining[0]
+
+        out = df[[date_col, value_col]].rename(
+            columns={date_col: 'Date', value_col: 'Value'})
+        out['Symbol'] = symbol
+        out['Series'] = series_id
+        out['Name'] = name
+        out['Unit'] = unit
+        out['Source'] = 'FRED'
+
+        out = self._macro_normalize(out)
+        out = out[out['Date'] >= start_date]
+        return out if not out.empty else None
+
+    def download_yahoo_series(self, symbol: str, ticker: str, name: str, unit: str,
+                              start_date: Optional[datetime.date]) -> Optional[pd.DataFrame]:
+        """Downloads daily closes for one Yahoo Finance ticker.
+
+        `start_date=None` fetches the full available history.
+        """
+        try:
+            import yfinance as yf
+        except ImportError as e:
+            raise DownloadFailedError(
+                "yfinance is not installed — run 'pip install yfinance'") from e
+
+        raw = None
+        last_error = None
+        for attempt in range(self.MACRO_MAX_RETRIES):
+            try:
+                handle = yf.Ticker(ticker)
+                if start_date is None:
+                    raw = handle.history(period="max", interval="1d", auto_adjust=False)
+                else:
+                    raw = handle.history(start=start_date.isoformat(), interval="1d",
+                                         auto_adjust=False)
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < self.MACRO_MAX_RETRIES - 1:
+                    time.sleep(2 ** attempt)
+        if raw is None:
+            raise DownloadFailedError(
+                f"Yahoo download failed for {ticker}: {last_error}")
+        if raw.empty:
+            return None
+
+        try:
+            frame = raw.copy()
+            if isinstance(frame.columns, pd.MultiIndex):
+                # yfinance emits (field, ticker) columns when grouping is active
+                frame.columns = [c[0] if isinstance(c, tuple) else c for c in frame.columns]
+
+            price_col = self._pick_column(frame.columns, ('close', 'adj close', 'adjclose'))
+            if price_col is None:
+                raise DownloadFailedError(
+                    f"No close column for {ticker}: {list(frame.columns)}")
+
+            prices = frame[price_col]
+            if isinstance(prices, pd.DataFrame):
+                prices = prices.iloc[:, 0]
+
+            index = pd.to_datetime(frame.index, errors='coerce')
+            if getattr(index, 'tz', None) is not None:
+                index = index.tz_localize(None)
+
+            out = pd.DataFrame({
+                'Date': index,
+                'Value': pd.to_numeric(prices.to_numpy(), errors='coerce'),
+            })
+            out['Symbol'] = symbol
+            out['Series'] = ticker
+            out['Name'] = name
+            out['Unit'] = unit
+            out['Source'] = 'Yahoo'
+
+            out = self._macro_normalize(out)
+            if start_date is not None:
+                out = out[out['Date'] >= start_date]
+            return out if not out.empty else None
         except DownloadFailedError:
             raise
         except Exception as e:
             raise DownloadFailedError(
-                f"Parse error for FRED series {series_id}: {e}") from e
+                f"Parse error for Yahoo ticker {ticker}: {e}") from e
 
     def download_cm_bhavcopy(self, date: datetime.date) -> Optional[pd.DataFrame]:
         """Downloads Equity (Capital Market) Bhavcopy for a given date."""
@@ -1800,27 +1932,181 @@ class NSEMarketDataDownloader:
 
     NODATA_RETRY_SAMPLE = 10  # Number of random .nodata days to retry per category
 
+    @staticmethod
+    def _pick_column(columns, candidates) -> Optional[str]:
+        """Case- and whitespace-insensitive column lookup."""
+        lookup = {str(c).strip().lower(): c for c in columns}
+        for candidate in candidates:
+            if candidate in lookup:
+                return lookup[candidate]
+        return None
+
+    @staticmethod
+    def _macro_normalize(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+        """Coerces any macro frame to MACRO_COLUMNS with date/float typing.
+
+        Guards the ratio join, where a datetime64 'Date' in one file and a
+        python-date 'Date' in another would silently match nothing.
+        """
+        if df is None or df.empty:
+            return pd.DataFrame(columns=MACRO_COLUMNS)
+
+        out = df.copy()
+        for col in MACRO_COLUMNS:
+            if col not in out.columns:
+                out[col] = pd.NA
+        out = out[MACRO_COLUMNS]
+
+        out['Date'] = pd.to_datetime(out['Date'], errors='coerce')
+        values = out['Value']
+        if values.dtype == object:
+            values = values.astype(str).str.replace(',', '', regex=False).str.strip()
+        out['Value'] = pd.to_numeric(values, errors='coerce')
+
+        out = out[out['Date'].notna() & out['Value'].notna()].copy()
+        if out.empty:
+            return pd.DataFrame(columns=MACRO_COLUMNS)
+
+        out['Date'] = out['Date'].dt.date
+        for col in ('Symbol', 'Series', 'Name', 'Unit', 'Source'):
+            out[col] = out[col].astype(str)
+        return (out.drop_duplicates(subset=['Date'], keep='last')
+                   .sort_values('Date')
+                   .reset_index(drop=True))
+
+    def _macro_read(self, symbol: str) -> Optional[pd.DataFrame]:
+        """Reads a stored Macro series, or None if absent/unreadable/empty."""
+        path = MACRO_PROCESSED / f"{symbol}.parquet"
+        if not path.exists():
+            return None
+        try:
+            stored = pd.read_parquet(path, engine='pyarrow')
+        except Exception as e:
+            print(f"  [{symbol}] Could not read stored file ({e}) — rebuilding.", flush=True)
+            return None
+        normalized = self._macro_normalize(stored)
+        return normalized if not normalized.empty else None
+
+    @staticmethod
+    def _macro_incremental_start(existing: Optional[pd.DataFrame]) -> Optional[datetime.date]:
+        """Start date for an incremental refresh, or None when no history exists."""
+        if existing is None or existing.empty or 'Date' not in existing.columns:
+            return None
+        last = pd.Timestamp(existing['Date'].max())
+        return (last - pd.Timedelta(days=MACRO_REFRESH_OVERLAP_DAYS)).date()
+
+    def _macro_write(self, symbol: str, new_df: pd.DataFrame,
+                     existing: Optional[pd.DataFrame]) -> pd.DataFrame:
+        """Merges new rows into a stored Macro series and writes atomically."""
+        combined = self._macro_normalize(new_df)
+        if existing is not None and not existing.empty:
+            # New rows go last so drop_duplicates(keep='last') prefers them.
+            combined = self._macro_normalize(
+                pd.concat([self._macro_normalize(existing), combined], ignore_index=True))
+        if combined.empty:
+            raise DownloadFailedError(f"No usable rows to write for {symbol}")
+
+        target = MACRO_PROCESSED / f"{symbol}.parquet"
+        temp_target = target.with_suffix('.parquet.tmp')
+        try:
+            combined.to_parquet(temp_target, engine='pyarrow', compression='zstd', index=False)
+            temp_target.replace(target)
+        except Exception:
+            temp_target.unlink(missing_ok=True)
+            raise
+        return combined
+
     def update_fred_series(self):
-        """Refreshes all enabled full-history series in FRED_SERIES."""
+        """Incrementally refreshes all enabled series in FRED_SERIES."""
         if not FRED_SERIES:
             return
 
         print("\n--- FRED Macro Series ---", flush=True)
         for symbol, series_id, name, unit in FRED_SERIES:
-            target = MACRO_PROCESSED / f"{symbol}.parquet"
-            temp_target = target.with_suffix('.parquet.tmp')
             try:
-                df = self.download_fred_series(symbol, series_id, name, unit)
+                existing = self._macro_read(symbol)
+                start = self._macro_incremental_start(existing)
+                if start is None:
+                    start = (pd.Timestamp(datetime.date.today())
+                             - pd.DateOffset(years=MACRO_MAX_HISTORY_YEARS)).date()
+
+                df = self.download_fred_series(symbol, series_id, name, unit, start)
                 if df is None or df.empty:
-                    print(f"  [{symbol}] No data returned for {series_id}.", flush=True)
+                    print(f"  [{symbol}] No new data since {start}.", flush=True)
                     continue
 
-                df.to_parquet(temp_target, engine='pyarrow', compression='zstd', index=False)
-                temp_target.replace(target)
-                print(f"  [{symbol}] Saved {len(df):,} observations "
-                      f"({df['Date'].min()} to {df['Date'].max()}).", flush=True)
+                combined = self._macro_write(symbol, df, existing)
+                print(f"  [{symbol}] +{len(df):,} rows from {start} -> {len(combined):,} total "
+                      f"({combined['Date'].min()} to {combined['Date'].max()}).", flush=True)
             except Exception as e:
-                temp_target.unlink(missing_ok=True)
+                print(f"  [{symbol}] Update failed: {type(e).__name__}: {e}", flush=True)
+
+    def update_yahoo_series(self):
+        """Incrementally refreshes all enabled series in YAHOO_SERIES."""
+        if not YAHOO_SERIES:
+            return
+
+        print("\n--- Yahoo Finance Series ---", flush=True)
+        for symbol, ticker, name, unit in YAHOO_SERIES:
+            try:
+                existing = self._macro_read(symbol)
+                start = self._macro_incremental_start(existing)
+
+                df = self.download_yahoo_series(symbol, ticker, name, unit, start)
+                if df is None or df.empty:
+                    print(f"  [{symbol}] No new data for {ticker}.", flush=True)
+                    continue
+
+                combined = self._macro_write(symbol, df, existing)
+                scope = f"from {start}" if start else "full history"
+                print(f"  [{symbol}] +{len(df):,} rows ({scope}) -> {len(combined):,} total "
+                      f"({combined['Date'].min()} to {combined['Date'].max()}).", flush=True)
+            except Exception as e:
+                print(f"  [{symbol}] Update failed: {type(e).__name__}: {e}", flush=True)
+
+    def update_macro_ratios(self):
+        """Incrementally recomputes ratios derived from stored Macro series."""
+        if not MACRO_RATIOS:
+            return
+
+        print("\n--- Derived Macro Ratios ---", flush=True)
+        for symbol, num_symbol, den_symbol, name in MACRO_RATIOS:
+            try:
+                numerator = self._macro_read(num_symbol)
+                denominator = self._macro_read(den_symbol)
+                if numerator is None or numerator.empty or denominator is None or denominator.empty:
+                    print(f"  [{symbol}] Skipped - {num_symbol} or {den_symbol} "
+                          f"not available.", flush=True)
+                    continue
+
+                existing = self._macro_read(symbol)
+                start = self._macro_incremental_start(existing)
+
+                merged = pd.merge(
+                    numerator[['Date', 'Value']].rename(columns={'Value': 'Numerator'}),
+                    denominator[['Date', 'Value']].rename(columns={'Value': 'Denominator'}),
+                    on='Date', how='inner')
+                if start is not None:
+                    merged = merged[merged['Date'] >= start]
+                merged = merged[merged['Denominator'].notna() & (merged['Denominator'] != 0)]
+                if merged.empty:
+                    print(f"  [{symbol}] No new dates to compute.", flush=True)
+                    continue
+
+                df = pd.DataFrame({
+                    'Date': merged['Date'].to_numpy(),
+                    'Symbol': symbol,
+                    'Value': (merged['Numerator'] / merged['Denominator']).to_numpy(),
+                    'Series': f"{num_symbol}/{den_symbol}",
+                    'Name': name,
+                    'Unit': 'Ratio',
+                    'Source': 'Derived',
+                })[MACRO_COLUMNS]
+
+                combined = self._macro_write(symbol, df, existing)
+                print(f"  [{symbol}] +{len(df):,} rows -> {len(combined):,} total "
+                      f"({combined['Date'].min()} to {combined['Date'].max()}).", flush=True)
+            except Exception as e:
                 print(f"  [{symbol}] Update failed: {type(e).__name__}: {e}", flush=True)
 
     def _retry_nodata_sample(self, download_fn, raw_dir, raw_prefix, processed_dir, label):
@@ -2098,6 +2384,8 @@ class NSEMarketDataDownloader:
         all_days = self.get_trading_days(DEFAULT_START_DATE, today)
 
         self.update_fred_series()
+        self.update_yahoo_series()
+        self.update_macro_ratios()
 
         # ── Category list ──────────────────────────────────────────────
         # Comment out any line below to skip that category entirely.
@@ -2144,6 +2432,9 @@ class NSEMarketDataDownloader:
         print(f"\nUpdate Complete. Total time: {elapsed:.1f}s")
 
 def main():
+    # Legacy Windows code pages cannot encode this script's Unicode output.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     downloader = NSEMarketDataDownloader()
     downloader.run_incremental_update()
 
