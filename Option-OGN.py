@@ -17,13 +17,19 @@ Usage:
     python Option-OGN.py --pdf                # all FnO symbols → charts/FnO_Analysis.pdf
     python Option-OGN.py --pdf RELIANCE       # single symbol → charts/RELIANCE_Analysis.pdf
     python Option-OGN.py --pdf output.pdf     # custom output file
+    python Option-OGN.py COMP GLD SLV         # pairwise statistical comparison
+    python Option-OGN.py COMP GLD SLV 250     # ... restricted to the last 250 days
+    python Option-OGN.py --pdf COMP US02Y__US10Y NIFTY   # comparison → PDF
 
 @author: HRTR
 """
 
+import io
 import sys
 import math
 import datetime
+import warnings
+import contextlib
 from functools import reduce
 
 import matplotlib
@@ -36,6 +42,7 @@ import pandas as pd
 import numpy as np
 import seaborn as sns
 import statsmodels.api as sm
+from statsmodels.tsa.stattools import coint, grangercausalitytests
 
 # Optional: trendln for support/resistance trendlines
 try:
@@ -58,6 +65,31 @@ try:
 except ImportError:
     HAS_TALIB = False
 
+# Dynamic Time Warping. The compiled C extension is optional, so probe it once
+# here rather than per call and fall back to the pure-Python implementation.
+try:
+    from dtaidistance import dtw as _dtw
+    with contextlib.redirect_stdout(io.StringIO()), \
+            contextlib.redirect_stderr(io.StringIO()):
+        try:
+            _dtw.distance_fast(np.zeros(3), np.zeros(3))
+            HAS_DTW_C = True
+        except Exception:
+            HAS_DTW_C = False
+    HAS_DTW = True
+except ImportError:
+    _dtw = None
+    HAS_DTW = False
+    HAS_DTW_C = False
+
+# Mutual information (k-NN / Kraskov estimator)
+try:
+    from sklearn.feature_selection import mutual_info_regression
+    HAS_SKLEARN = True
+except ImportError:
+    mutual_info_regression = None
+    HAS_SKLEARN = False
+
 # Data loader — reads from MarketData_Parquet/ processed parquet files
 from OGN import (
     load_equity,
@@ -66,6 +98,19 @@ from OGN import (
     load_index,
     NSEFnOList,
     WATCHLIST,
+    _load_parquet,
+    EQUITY_PROCESSED,
+    DERIVATIVES_PROCESSED,
+    INDICES_PROCESSED,
+    SHORTSELLING_PROCESSED,
+    VOLATILITY_PROCESSED,
+    MARKETACTIVITY_PROCESSED,
+    PRICEBAND_PROCESSED,
+    PERATIO_PROCESSED,
+    CORPBONDS_PROCESSED,
+    DELIVERY_PROCESSED,
+    WDM_PROCESSED,
+    MACRO_PROCESSED,
 )
 
 # ---------------------------------------------------------------------------
@@ -917,6 +962,646 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None):
 
 
 # ---------------------------------------------------------------------------
+# COMP — pairwise statistical comparison across any two data series
+# ---------------------------------------------------------------------------
+
+COMP_MAX_LAG = 10        # Lags scanned by Granger causality and cross-correlation
+COMP_MIN_OBS = 60        # Below this the estimators are not worth reporting
+DTW_MAX_POINTS = 1000    # Series are resampled to this length before DTW
+DTW_BAND_FRACTION = 0.1  # Sakoe-Chiba band as a fraction of series length
+RATIO_OPERATOR = '__'    # NUM__DEN, e.g. US02Y__US10Y
+
+# Searched in order, so a bare symbol resolves to the most likely source first.
+_COMP_SOURCES = [
+    ("Macro", MACRO_PROCESSED),
+    ("Equity", EQUITY_PROCESSED),
+    ("Index", INDICES_PROCESSED),
+    ("Derivatives", DERIVATIVES_PROCESSED),
+    ("Volatility", VOLATILITY_PROCESSED),
+    ("PE Ratio", PERATIO_PROCESSED),
+    ("Short Selling", SHORTSELLING_PROCESSED),
+    ("Delivery", DELIVERY_PROCESSED),
+    ("Corporate Bonds", CORPBONDS_PROCESSED),
+    ("Price Band", PRICEBAND_PROCESSED),
+    ("Market Activity", MARKETACTIVITY_PROCESSED),
+    ("WDM", WDM_PROCESSED),
+]
+
+# First match wins when reducing a source frame to one comparable number.
+_COMP_VALUE_COLUMNS = [
+    'Close', 'Value', 'Settle Price', 'PE', 'Daily Volatility',
+    'Annl Volatility', 'Deliverable Qty', 'Qty Short Sold', 'Traded Value',
+]
+
+_COMP_SKIP_COLUMNS = {'Date', 'Strike Price', 'Sr No', 'Open Int',
+                      'Change in OI', 'Record Type'}
+
+
+def _comp_pick_value_column(df):
+    """Choose the numeric column that best represents a source frame."""
+    for col in _COMP_VALUE_COLUMNS:
+        if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+            return col
+    for col in df.columns:
+        if col not in _COMP_SKIP_COLUMNS and pd.api.types.is_numeric_dtype(df[col]):
+            return col
+    return None
+
+
+def _comp_to_daily_series(df, label):
+    """Collapse a processed frame to one numeric observation per calendar day.
+
+    Sources differ in timestamp type (python date, datetime64, tz-aware) and
+    in row granularity, so dates are stripped to tz-naive midnight and rows
+    are reduced to a single daily print before any comparison happens.
+    """
+    if 'Date' not in df.columns:
+        raise ValueError(f"'{label}' has no Date column.")
+
+    frame = df.copy()
+    dates = pd.to_datetime(frame['Date'], errors='coerce')
+    if dates.dt.tz is not None:
+        dates = dates.dt.tz_localize(None)
+    frame['Date'] = dates.dt.normalize()
+    frame = frame[frame['Date'].notna()]
+    if frame.empty:
+        raise ValueError(f"'{label}' has no parseable dates.")
+
+    # Derivatives carry many contracts per day; the front-month future is the
+    # single series that behaves like a price history.
+    if 'Instrument' in frame.columns:
+        futures = frame[frame['Instrument'].astype(str)
+                        .str.contains('FUT', case=False, na=False)]
+        if not futures.empty:
+            frame = futures
+        if 'Expiry' in frame.columns:
+            frame = (frame.sort_values(['Date', 'Expiry'])
+                          .groupby('Date', as_index=False)
+                          .first())
+
+    column = _comp_pick_value_column(frame)
+    if column is None:
+        raise ValueError(f"'{label}' has no numeric column to compare.")
+
+    values = pd.to_numeric(frame[column], errors='coerce')
+    out = pd.DataFrame({'Date': frame['Date'].to_numpy(),
+                        'Value': values.to_numpy()}).dropna()
+    if out.empty:
+        raise ValueError(f"'{label}' has no usable numeric data.")
+
+    return out.groupby('Date')['Value'].mean().sort_index(), column
+
+
+def _comp_load_symbol(symbol):
+    """Locate `symbol` in any processed directory. Returns (df, source)."""
+    for source, directory in _COMP_SOURCES:
+        if (directory / f"{symbol}.parquet").exists():
+            return _load_parquet(directory, symbol), source
+    return None, None
+
+
+def resolve_comp_series(token):
+    """Resolve a COMP argument to a daily series.
+
+    Accepts a stored symbol from any downloaded source, or a ratio written as
+    NUM__DEN (e.g. US02Y__US10Y).  The double underscore keeps stored names
+    that contain a single underscore (WDM's Debt_* files, GLD_SLV) unambiguous
+    and stays safe to use in filenames.
+
+    Returns:
+        (series, label, description)
+    """
+    token = token.strip()
+    if not token:
+        raise ValueError("Empty symbol.")
+
+    frame, source = _comp_load_symbol(token)
+    if frame is not None:
+        series, column = _comp_to_daily_series(frame, token)
+        return series, token, f"{source} [{column}]"
+
+    if RATIO_OPERATOR in token:
+        parts = token.split(RATIO_OPERATOR)
+        if len(parts) != 2:
+            raise ValueError(
+                f"'{token}' contains more than one '{RATIO_OPERATOR}' - a ratio "
+                f"must be NUM{RATIO_OPERATOR}DEN.")
+
+        num_name, den_name = parts[0].strip(), parts[1].strip()
+        num_frame, _ = _comp_load_symbol(num_name)
+        if num_frame is None:
+            raise ValueError(f"'{token}': numerator '{num_name}' not found.")
+        den_frame, _ = _comp_load_symbol(den_name)
+        if den_frame is None:
+            raise ValueError(f"'{token}': denominator '{den_name}' not found.")
+
+        num_series, _ = _comp_to_daily_series(num_frame, num_name)
+        den_series, _ = _comp_to_daily_series(den_frame, den_name)
+        joined = pd.concat([num_series.rename('num'), den_series.rename('den')],
+                           axis=1, join='inner').dropna()
+        joined = joined[joined['den'] != 0]
+        if joined.empty:
+            raise ValueError(
+                f"'{token}': {num_name} and {den_name} share no overlapping dates.")
+        ratio = (joined['num'] / joined['den']).sort_index()
+        return ratio, token, f"ratio {num_name}/{den_name} (computed)"
+
+    raise ValueError(
+        f"Unknown symbol '{token}' - not found in any processed data directory. "
+        f"For a ratio use NUM{RATIO_OPERATOR}DEN "
+        f"(e.g. US02Y{RATIO_OPERATOR}US10Y).")
+
+
+# --- Statistical measures --------------------------------------------------
+
+def _comp_resample(values, max_points):
+    """Uniformly resample a 1-D array down to at most `max_points`."""
+    array = np.asarray(values, dtype=float)
+    if len(array) <= max_points:
+        return array
+    positions = np.linspace(0, len(array) - 1, max_points)
+    return np.interp(positions, np.arange(len(array)), array)
+
+
+def _comp_zscore(values):
+    array = np.asarray(values, dtype=float)
+    spread = np.std(array)
+    return (array - np.mean(array)) / spread if spread > 0 else array - np.mean(array)
+
+
+def dtw_distance(a, b, band_fraction=DTW_BAND_FRACTION, max_points=DTW_MAX_POINTS):
+    """Sakoe-Chiba banded DTW distance between two z-normalised series.
+
+    Series are resampled to `max_points` first so the cost stays bounded for
+    multi-decade histories, and the distance is length-normalised so it is
+    comparable across pairs.
+    """
+    if not HAS_DTW:
+        return float('nan')
+
+    x = _comp_zscore(_comp_resample(a, max_points))
+    y = _comp_zscore(_comp_resample(b, max_points))
+    n, m = len(x), len(y)
+    if n < 2 or m < 2:
+        return float('nan')
+
+    window = max(int(band_fraction * max(n, m)), abs(n - m) + 1)
+    if HAS_DTW_C:
+        distance = _dtw.distance_fast(x, y, window=window, use_pruning=True)
+    else:
+        distance = _dtw.distance(x, y, window=window, use_pruning=True)
+
+    if not np.isfinite(distance):
+        return float('nan')
+    return distance / max(n, m)
+
+
+def mutual_information(x, y, seed=0):
+    """Mutual information in bits, via scikit-learn's k-NN (Kraskov) estimator.
+
+    Captures non-linear dependence that Pearson correlation misses.  Unlike a
+    histogram estimate it is essentially unbiased, so independent series score
+    ~0 rather than a spurious positive value.
+    """
+    if not HAS_SKLEARN:
+        return float('nan')
+
+    features = np.asarray(x, dtype=float).reshape(-1, 1)
+    target = np.asarray(y, dtype=float)
+    if len(target) < 20:
+        return float('nan')
+
+    nats = float(mutual_info_regression(features, target, random_state=seed)[0])
+    return nats / math.log(2)
+
+
+def cross_correlation(x, y, max_lag=COMP_MAX_LAG):
+    """Correlation of x[t] against y[t+k] for k in [-max_lag, max_lag].
+
+    A positive lag means x leads y.
+    """
+    sx = pd.Series(np.asarray(x, dtype=float))
+    sy = pd.Series(np.asarray(y, dtype=float))
+    return [(k, sx.corr(sy.shift(-k))) for k in range(-max_lag, max_lag + 1)]
+
+
+def granger_min_pvalue(cause, effect, max_lag=COMP_MAX_LAG):
+    """Smallest p-value (and its lag) for `cause` Granger-causing `effect`."""
+    data = np.column_stack([np.asarray(effect, dtype=float),
+                            np.asarray(cause, dtype=float)])
+    # Older statsmodels prints a report here; stdout is redirected rather than
+    # passing verbose=False, which newer releases deprecated.
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        results = grangercausalitytests(data, maxlag=max_lag)
+
+    best_p, best_lag = float('nan'), None
+    for lag, (tests, _) in results.items():
+        p_value = tests['ssr_ftest'][1]
+        if math.isnan(best_p) or p_value < best_p:
+            best_p, best_lag = p_value, lag
+    return best_p, best_lag
+
+
+def compute_comparison(series_a, series_b, label_a, label_b,
+                       max_lag=COMP_MAX_LAG, days=None):
+    """Run all five measures over the two series' overlapping horizon.
+
+    `days` trims to the most recent N observations *after* aligning, so the
+    sample size is exactly N rather than whatever the two calendars happen to
+    share.  When omitted the full overlap (the shorter series' horizon) is used.
+
+    Cointegration needs the non-stationary levels; the remaining measures run
+    on stationary returns, since Granger tests on raw levels are spurious.
+    """
+    aligned = pd.concat([series_a.rename(label_a), series_b.rename(label_b)],
+                        axis=1, join='inner').dropna()
+    total_overlap = len(aligned)
+
+    if days is not None:
+        if days < COMP_MIN_OBS:
+            raise ValueError(
+                f"days={days} is below the {COMP_MIN_OBS}-observation minimum "
+                f"needed by these estimators.")
+        aligned = aligned.tail(days)
+
+    if len(aligned) < COMP_MIN_OBS:
+        raise ValueError(
+            f"Only {len(aligned)} overlapping observations between {label_a} and "
+            f"{label_b} - need at least {COMP_MIN_OBS}.")
+
+    levels_a = aligned[label_a].to_numpy(dtype=float)
+    levels_b = aligned[label_b].to_numpy(dtype=float)
+
+    # Log returns need strictly positive levels; spreads such as T10Y2Y can be
+    # zero or negative, so those fall back to first differences.
+    if bool((aligned > 0).all().all()):
+        changes = np.log(aligned).diff().dropna()
+        change_kind = "log returns"
+    else:
+        changes = aligned.diff().dropna()
+        change_kind = "first differences"
+
+    returns_a = changes[label_a].to_numpy(dtype=float)
+    returns_b = changes[label_b].to_numpy(dtype=float)
+
+    results = {
+        'aligned': aligned,
+        'changes': changes,
+        'change_kind': change_kind,
+        'label_a': label_a,
+        'label_b': label_b,
+        'max_lag': max_lag,
+        'days_requested': days,
+        'total_overlap': total_overlap,
+    }
+
+    # --- Cointegration (on levels) ---
+    try:
+        t_stat, p_value, _ = coint(levels_a, levels_b)
+        results['coint'] = {'stat': t_stat, 'p': p_value}
+    except Exception as e:
+        results['coint'] = {'error': str(e)}
+
+    # Hedge ratio and spread for the chart, from OLS of B on A
+    try:
+        design = sm.add_constant(levels_a)
+        fit = sm.OLS(levels_b, design).fit()
+        intercept, beta = float(fit.params[0]), float(fit.params[1])
+        results['spread'] = pd.Series(levels_b - (intercept + beta * levels_a),
+                                      index=aligned.index)
+        results['beta'] = beta
+    except Exception:
+        results['spread'] = None
+        results['beta'] = float('nan')
+
+    # --- Granger causality (both directions, on changes) ---
+    for key, cause, effect, names in (
+            ('granger_ab', returns_a, returns_b, (label_a, label_b)),
+            ('granger_ba', returns_b, returns_a, (label_b, label_a))):
+        try:
+            p_value, lag = granger_min_pvalue(cause, effect, max_lag)
+            results[key] = {'p': p_value, 'lag': lag, 'names': names}
+        except Exception as e:
+            results[key] = {'error': str(e), 'names': names}
+
+    # --- Cross-correlation (on changes) ---
+    try:
+        pairs = cross_correlation(returns_a, returns_b, max_lag)
+        valid = [(k, c) for k, c in pairs if c is not None and not math.isnan(c)]
+        results['ccf'] = pairs
+        if valid:
+            best_lag, best_corr = max(valid, key=lambda item: abs(item[1]))
+            results['ccf_best'] = {'lag': best_lag, 'corr': best_corr}
+            results['contemporaneous'] = dict(valid).get(0, float('nan'))
+        else:
+            results['ccf_best'] = {'error': 'no valid correlations'}
+    except Exception as e:
+        results['ccf'] = []
+        results['ccf_best'] = {'error': str(e)}
+
+    # --- DTW (on levels, z-normalised inside) ---
+    try:
+        results['dtw'] = dtw_distance(levels_a, levels_b)
+    except Exception as e:
+        results['dtw'] = float('nan')
+        results['dtw_error'] = str(e)
+
+    # --- Mutual information (on changes) ---
+    try:
+        results['mi'] = mutual_information(returns_a, returns_b)
+    except Exception as e:
+        results['mi'] = float('nan')
+        results['mi_error'] = str(e)
+
+    return results
+
+
+def build_comparison_table(results):
+    """Turn raw measure output into the on-screen / PDF summary table."""
+    label_a = results['label_a']
+    label_b = results['label_b']
+    rows = []
+
+    coint_result = results.get('coint', {})
+    if 'error' in coint_result:
+        value, reading = "n/a", f"failed: {coint_result['error'][:40]}"
+    else:
+        p_value = coint_result['p']
+        value = f"p = {p_value:.4f}"
+        if p_value < 0.01:
+            reading = "Strongly cointegrated - tradeable spread"
+        elif p_value < 0.05:
+            reading = "Cointegrated at 5% - spread mean-reverts"
+        elif p_value < 0.10:
+            reading = "Weak evidence at 10% only"
+        else:
+            reading = "Not cointegrated - do not trade the spread"
+    rows.append(["Cointegration", value, reading,
+                 "Stable mean-reverting spread; the basis for pairs trading."])
+
+    for key in ('granger_ab', 'granger_ba'):
+        result = results.get(key, {})
+        cause, effect = result.get('names', (label_a, label_b))
+        name = f"Granger {cause} -> {effect}"
+        if 'error' in result:
+            value, reading = "n/a", f"failed: {result['error'][:40]}"
+        else:
+            p_value, lag = result['p'], result['lag']
+            value = f"p = {p_value:.4f} (lag {lag})"
+            if p_value < 0.01:
+                reading = f"{cause} strongly leads {effect}"
+            elif p_value < 0.05:
+                reading = f"{cause} leads {effect} at 5%"
+            else:
+                reading = f"No predictive power from {cause}"
+        rows.append([name, value, reading,
+                     "Past values of one series forecast the other; drives lead-lag trades."])
+
+    best = results.get('ccf_best', {})
+    if 'error' in best:
+        value, reading = "n/a", f"failed: {best['error'][:40]}"
+    else:
+        lag, corr = best['lag'], best['corr']
+        value = f"r = {corr:+.3f} @ lag {lag:+d}"
+        if lag == 0:
+            reading = "Strongest link is same-day - no exploitable delay"
+        elif lag > 0:
+            reading = f"{label_a} leads {label_b} by {lag} day(s)"
+        else:
+            reading = f"{label_b} leads {label_a} by {abs(lag)} day(s)"
+    rows.append(["Cross-Correlation", value, reading,
+                 "Correlation across time lags; pinpoints the trigger-to-response delay."])
+
+    dtw_value = results.get('dtw', float('nan'))
+    if math.isnan(dtw_value):
+        value, reading = "n/a", "could not be computed"
+    else:
+        value = f"{dtw_value:.4f}"
+        if dtw_value < 0.02:
+            reading = "Near-identical shape profile"
+        elif dtw_value < 0.05:
+            reading = "Similar shape allowing for phase shift"
+        else:
+            reading = "Shapes diverge materially"
+    rows.append(["Dynamic Time Warping", value, reading,
+                 "Shape similarity despite speed/phase differences; groups like regimes."])
+
+    mi_value = results.get('mi', float('nan'))
+    if math.isnan(mi_value):
+        value, reading = "n/a", "could not be computed"
+    else:
+        value = f"{mi_value:.4f} bits"
+        if mi_value < 0.02:
+            reading = "Effectively independent"
+        elif mi_value < 0.10:
+            reading = "Mild shared information"
+        else:
+            reading = "Substantial shared info incl. non-linear"
+    rows.append(["Mutual Information", value, reading,
+                 "Total shared information, linear and non-linear; used for feature selection."])
+
+    return pd.DataFrame(
+        rows, columns=["Measure", "Value", "Reading", "What it tells you"])
+
+
+def _comp_window_note(results):
+    """Short ' | last N days' suffix when a window was requested."""
+    if not results.get('days_requested'):
+        return ""
+    return f"   |   last {len(results['aligned']):,} days"
+
+
+def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
+    """Render the COMP figure: series, spread, cross-correlation and table."""
+    aligned = results['aligned']
+    label_a = results['label_a']
+    label_b = results['label_b']
+
+    figure = plt.figure(figsize=(30, 17))
+    ax_raw = figure.add_axes((0.05, 0.70, 0.41, 0.21))
+    ax_norm = figure.add_axes((0.56, 0.70, 0.41, 0.21))
+    ax_spread = figure.add_axes((0.05, 0.40, 0.41, 0.21))
+    ax_ccf = figure.add_axes((0.56, 0.40, 0.41, 0.21))
+    ax_table = figure.add_axes((0.04, 0.06, 0.93, 0.24))
+    ax_table.axis('off')
+
+    figure.suptitle(f"COMP   {label_a}   vs   {label_b}{_comp_window_note(results)}",
+                    fontsize=34, fontweight='bold', y=0.975)
+
+    # --- Raw levels on twin axes (units rarely match) ---
+    ax_raw.plot(aligned.index, aligned[label_a], color='tab:blue', linewidth=1.8,
+                label=f"{label_a}  ({desc_a})")
+    ax_raw.set_ylabel(label_a, fontsize=16, color='tab:blue')
+    ax_raw.tick_params(axis='y', labelcolor='tab:blue', labelsize=13)
+    ax_raw.tick_params(axis='x', labelsize=13)
+    ax_raw_twin = ax_raw.twinx()
+    ax_raw_twin.plot(aligned.index, aligned[label_b], color='tab:red', linewidth=1.8,
+                     label=f"{label_b}  ({desc_b})")
+    ax_raw_twin.set_ylabel(label_b, fontsize=16, color='tab:red')
+    ax_raw_twin.tick_params(axis='y', labelcolor='tab:red', labelsize=13)
+    ax_raw_twin.grid(visible=False)
+    ax_raw.grid(True, alpha=0.3)
+    ax_raw.set_title(
+        f"Levels  |  {aligned.index.min():%d-%b-%Y} to {aligned.index.max():%d-%b-%Y}"
+        f"  |  {len(aligned):,} common days",
+        fontsize=20, fontweight='bold', pad=8)
+    handles = ax_raw.get_lines() + ax_raw_twin.get_lines()
+    ax_raw.legend(handles, [h.get_label() for h in handles], fontsize=13, loc='best')
+
+    # --- Rebased overlay so the two shapes are directly comparable ---
+    for column, colour in ((label_a, 'tab:blue'), (label_b, 'tab:red')):
+        values = aligned[column]
+        base = values.iloc[0]
+        rebased = (values / base * 100.0) if base not in (0, np.nan) else _comp_zscore(values)
+        ax_norm.plot(aligned.index, rebased, color=colour, linewidth=1.8, label=column)
+    ax_norm.axhline(100, color='grey', linestyle='--', linewidth=1)
+    ax_norm.legend(fontsize=14)
+    ax_norm.grid(True, alpha=0.3)
+    ax_norm.tick_params(labelsize=13)
+    ax_norm.set_title('Rebased to 100 at common start', fontsize=20,
+                      fontweight='bold', pad=8)
+
+    # --- Cointegration spread ---
+    spread = results.get('spread')
+    if spread is not None and not spread.empty:
+        mean = spread.mean()
+        sigma = spread.std()
+        ax_spread.plot(spread.index, spread, color='tab:purple', linewidth=1.5,
+                       label='Spread (residual)')
+        ax_spread.axhline(mean, color='black', linestyle='-', linewidth=1.2, label='mean')
+        ax_spread.axhline(mean + 2 * sigma, color='tab:red', linestyle='--',
+                          linewidth=1.2, label='+2 sigma')
+        ax_spread.axhline(mean - 2 * sigma, color='tab:green', linestyle='--',
+                          linewidth=1.2, label='-2 sigma')
+        ax_spread.legend(fontsize=13)
+        beta = results.get('beta', float('nan'))
+        ax_spread.set_title(
+            f"Cointegration spread   {label_b} - ({beta:.4f} x {label_a})",
+            fontsize=20, fontweight='bold', pad=8)
+    else:
+        ax_spread.text(0.5, 0.5, 'Spread unavailable', transform=ax_spread.transAxes,
+                       ha='center', va='center', fontsize=16, color='grey')
+    ax_spread.grid(True, alpha=0.3)
+    ax_spread.tick_params(labelsize=13)
+
+    # --- Cross-correlation function ---
+    pairs = [(k, c) for k, c in results.get('ccf', [])
+             if c is not None and not math.isnan(c)]
+    if pairs:
+        lags = [k for k, _ in pairs]
+        corrs = [c for _, c in pairs]
+        best = results.get('ccf_best', {})
+        colours = ['tab:orange' if k == best.get('lag') else 'tab:blue' for k in lags]
+        ax_ccf.bar(lags, corrs, color=colours)
+        ax_ccf.axhline(0, color='black', linewidth=1)
+        ax_ccf.set_xlabel(f"Lag (days)   -  positive = {label_a} leads {label_b}",
+                          fontsize=15)
+        ax_ccf.set_ylabel('Correlation', fontsize=15)
+        ax_ccf.set_title(f"Cross-correlation of {results['change_kind']}",
+                         fontsize=20, fontweight='bold', pad=8)
+    else:
+        ax_ccf.text(0.5, 0.5, 'Cross-correlation unavailable',
+                    transform=ax_ccf.transAxes, ha='center', va='center',
+                    fontsize=16, color='grey')
+    ax_ccf.grid(True, alpha=0.3)
+    ax_ccf.tick_params(labelsize=13)
+
+    # --- Summary table ---
+    cell_colours = []
+    for _, row in table.iterrows():
+        reading = row['Reading'].lower()
+        if any(word in reading for word in ('strong', 'cointegrated at', 'leads',
+                                            'substantial', 'near-identical')):
+            tint = '#c6efce'
+        elif any(word in reading for word in ('not ', 'no ', 'n/a', 'failed',
+                                              'independent', 'diverge')):
+            tint = '#ffc7ce'
+        else:
+            tint = '#ffeb9c'
+        cell_colours.append(['#f2f2f2', tint, tint, '#f2f2f2'])
+
+    tbl = ax_table.table(
+        cellText=table.values,
+        colLabels=table.columns,
+        cellColours=cell_colours,
+        colColours=['#4472c4'] * len(table.columns),
+        cellLoc='left',
+        colWidths=[0.20, 0.16, 0.29, 0.35],
+        loc='upper center',
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(15)
+    tbl.scale(1.0, 3.4)
+    for (row_idx, _), cell in tbl.get_celld().items():
+        cell.set_edgecolor('#cccccc')
+        if row_idx == 0:
+            cell.set_text_props(color='white', fontweight='bold')
+    ax_table.set_title(
+        f"Statistical comparison  |  cointegration on levels, "
+        f"everything else on {results['change_kind']}  |  max lag "
+        f"{results['max_lag']} days",
+        fontsize=22, fontweight='bold', pad=14)
+
+    if pdf_pages:
+        pdf_pages.savefig(figure)
+        plt.close(figure)
+    else:
+        plt.show()
+
+
+def compare_series(token_a, token_b, days=None, pdf_path=None):
+    """COMP entry point: resolve, align, measure, and render two series."""
+    if pdf_path:
+        matplotlib.use('Agg')
+
+    series_a, label_a, desc_a = resolve_comp_series(token_a)
+    series_b, label_b, desc_b = resolve_comp_series(token_b)
+
+    print(f"\n{'='*78}")
+    print(f"  COMP  {label_a}  vs  {label_b}")
+    print(f"{'='*78}")
+    print(f"  {label_a:<22} {desc_a:<34} "
+          f"{series_a.index.min():%Y-%m-%d} to {series_a.index.max():%Y-%m-%d} "
+          f"({len(series_a):,} obs)")
+    print(f"  {label_b:<22} {desc_b:<34} "
+          f"{series_b.index.min():%Y-%m-%d} to {series_b.index.max():%Y-%m-%d} "
+          f"({len(series_b):,} obs)")
+
+    results = compute_comparison(series_a, series_b, label_a, label_b, days=days)
+    aligned = results['aligned']
+    overlap = results['total_overlap']
+    if days and len(aligned) < days:
+        scope = f"{len(aligned):,} days - all that overlap, fewer than the {days:,} asked for"
+    elif days:
+        scope = f"last {len(aligned):,} of {overlap:,} overlapping days"
+    else:
+        scope = f"{len(aligned):,} overlapping days, full common horizon"
+    print(f"\n  Analysis window: {aligned.index.min():%Y-%m-%d} to "
+          f"{aligned.index.max():%Y-%m-%d}  ({scope})")
+    print(f"  Stationary transform: {results['change_kind']}\n")
+
+    table = build_comparison_table(results)
+    with pd.option_context('display.max_colwidth', 60, 'display.width', 200):
+        print(table.to_string(index=False))
+    print()
+
+    pdf_pages = None
+    if pdf_path:
+        from pathlib import Path
+        Path(pdf_path).parent.mkdir(parents=True, exist_ok=True)
+        pdf_pages = PdfPages(pdf_path)
+
+    plot_comparison(results, table, desc_a, desc_b, pdf_pages=pdf_pages)
+
+    if pdf_pages:
+        pdf_pages.close()
+        print(f"  PDF saved: {pdf_path}\n")
+
+    return results, table
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -929,11 +1614,61 @@ def main():
         python Option-OGN.py --pdf                # PDF, all FnO → charts/FnO_Analysis.pdf
         python Option-OGN.py --pdf RELIANCE       # PDF, single → charts/RELIANCE_Analysis.pdf
         python Option-OGN.py --pdf output.pdf     # PDF, all FnO → output.pdf
+        python Option-OGN.py COMP GLD SLV         # compare two series interactively
+        python Option-OGN.py COMP GLD SLV 250     # compare over the last 250 days
+        python Option-OGN.py --pdf COMP GLD SLV   # comparison → charts/COMP_GLD_vs_SLV.pdf
     """
     args = sys.argv[1:]
     use_pdf = '--pdf' in args
     if use_pdf:
         args.remove('--pdf')
+
+    # Legacy Windows code pages cannot encode this script's Unicode output.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    if args and args[0].upper() == 'COMP':
+        pdf_path = None
+        tokens = []
+        for arg in args[1:]:
+            if arg.lower().endswith('.pdf'):
+                pdf_path = arg
+            else:
+                tokens.append(arg)
+
+        days = None
+        if len(tokens) == 3:
+            try:
+                days = int(tokens[2])
+            except ValueError:
+                print(f"  [error] days must be a whole number, got '{tokens[2]}'.")
+                return
+            if days <= 0:
+                print(f"  [error] days must be positive, got {days}.")
+                return
+            tokens = tokens[:2]
+
+        if len(tokens) != 2:
+            print("Usage: python Option-OGN.py [--pdf] COMP <symbol1> <symbol2> [days]")
+            print("  Symbols may be any downloaded series (GLD, NIFTY, US10Y, "
+                  "RELIANCE, ...)")
+            print(f"  or a ratio written as NUM{RATIO_OPERATOR}DEN "
+                  f"(e.g. US02Y{RATIO_OPERATOR}US10Y).")
+            print("  days  optional - analyse only the most recent N days.")
+            print("        Omitted: use the full overlap of the two series.")
+            return
+
+        if use_pdf and not pdf_path:
+            suffix = f"_{days}d" if days else ""
+            pdf_path = (f"charts/COMP_{tokens[0].upper()}_vs_"
+                        f"{tokens[1].upper()}{suffix}.pdf")
+
+        try:
+            compare_series(tokens[0], tokens[1], days=days,
+                           pdf_path=pdf_path if use_pdf else None)
+        except (ValueError, FileNotFoundError) as e:
+            print(f"  [error] {e}")
+        return
 
     symbol = None
     pdf_path = None
