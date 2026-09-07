@@ -16,6 +16,7 @@ Usage:
     python Option-OGN.py WTI                       # full analysis for one series
     python Option-OGN.py WTI US02Y__US10Y          # ... plus a statistical comparison
     python Option-OGN.py WTI US02Y__US10Y 250      # ... over the last 250 days
+    python Option-OGN.py --estimator Raw WTI       # pick the volatility estimator
     python Option-OGN.py --pdf                     # all FnO symbols -> charts/FnO_Analysis.pdf
     python Option-OGN.py --pdf WTI                 # single symbol -> charts/WTI_Analysis.pdf
     python Option-OGN.py --pdf output.pdf          # custom output file
@@ -36,12 +37,14 @@ import matplotlib.pyplot as plt
 import matplotlib.patches
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.dates import date2num
+from matplotlib.ticker import FuncFormatter
 import mplfinance as mpf
 import pandas as pd
 import numpy as np
 import seaborn as sns
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import coint, grangercausalitytests
+from scipy.stats import norm
 
 # Optional: trendln for support/resistance trendlines
 try:
@@ -89,6 +92,14 @@ except ImportError:
     mutual_info_regression = None
     HAS_SKLEARN = False
 
+# Volatility estimators - one module per model, each exposing get_estimator()
+try:
+    import models
+    HAS_MODELS = True
+except ImportError:
+    models = None
+    HAS_MODELS = False
+
 # Data loader — reads from MarketData_Parquet/ processed parquet files
 from OGN import (
     load_equity,
@@ -122,6 +133,47 @@ FullFuturesFilePath = "full-futures" # now {Symbol}.parquet in Derivatives/Proce
 MonthlyOptionsFilePath = "monthly-options"
 
 RiskFreeRate = 0.065  # ~6.5% annualised (adjust as needed)
+
+# ── Report composition ────────────────────────────────────────────────────
+# Comment out any line to drop that section from the generated report.
+REPORT_SECTIONS = [
+    'technical',    # multi-panel indicator chart for the first symbol
+    'volatility',   # volatility cone / rolling / histogram page
+    'comparison',   # statistical comparison, only when a second symbol is given
+]
+
+# Comment out any line to drop that panel from the volatility page.
+VOLATILITY_PANELS = [
+    'cone',
+    'box',
+    'rolling',
+    'histogram',
+    'summary',
+]
+
+# Estimator modules, each exposing get_estimator(price_data, window, clean).
+ESTIMATORS = [
+    'GarmanKlass',
+    'HodgesTompkins',
+    'Kurtosis',
+    'Parkinson',
+    'Raw',
+    'RogersSatchell',
+    'Skew',
+    'YangZhang',
+]
+DEFAULT_ESTIMATOR = 'YangZhang'
+
+# Skew and Kurtosis are distribution moments, not volatilities, so they are
+# labelled as plain numbers rather than percentages.
+MOMENT_ESTIMATORS = {'Skew', 'Kurtosis'}
+
+# These need a real intraday high/low range and read as zero on flat bars.
+RANGE_ESTIMATORS = {'GarmanKlass', 'Parkinson', 'RogersSatchell'}
+
+VOLATILITY_WINDOWS = [3, 5, 10, 20, 30, 60, 90]  # Cone x-axis
+VOLATILITY_WINDOW = 30                            # Rolling / histogram window
+VOLATILITY_QUANTILES = [0.25, 0.75]
 
 
 # ---------------------------------------------------------------------------
@@ -858,8 +910,10 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
 # ---------------------------------------------------------------------------
 
 def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
-                compare_with=None, days=None):
+                compare_with=None, days=None, estimator=DEFAULT_ESTIMATOR):
     """Run technical analysis for each symbol in the list.
+
+    Sections are driven by REPORT_SECTIONS, so any of them can be commented out.
 
     Args:
         scrip_list:   List of symbols to analyse (default: NSEFnOList)
@@ -868,6 +922,7 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         compare_with: If set, append a statistical comparison of the analysed
                       symbol against this second series
         days:         Window (in observations) for that comparison
+        estimator:    Volatility estimator name (see ESTIMATORS)
     """
     if single_scrip:
         symbols = [single_scrip]
@@ -960,11 +1015,20 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         Indicatordf.reset_index(inplace=True)
 
         # ── Plot ──────────────────────────────────────────────────────
-        display_bars = min(25, len(Indicatordf))
-        plot_chart(Indicatordf, display_bars, Scrip, 0, pdf_pages=pdf_pages)
+        if 'technical' in REPORT_SECTIONS:
+            display_bars = min(25, len(Indicatordf))
+            plot_chart(Indicatordf, display_bars, Scrip, 0, pdf_pages=pdf_pages)
+
+        # ── Volatility profile ────────────────────────────────────────
+        if 'volatility' in REPORT_SECTIONS:
+            try:
+                volatility_analysis(OHLCdf.set_index('Date'), Scrip,
+                                    estimator=estimator, pdf_pages=pdf_pages)
+            except (ValueError, KeyError) as e:
+                print(f"  [volatility skipped] {e}")
 
         # ── Appended statistical comparison ───────────────────────────
-        if compare_with:
+        if compare_with and 'comparison' in REPORT_SECTIONS:
             try:
                 compare_series(Scrip, compare_with, days=days,
                                pdf_pages=pdf_pages)
@@ -1662,6 +1726,247 @@ def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None):
 
 
 # ---------------------------------------------------------------------------
+# Volatility estimators (cone, rolling, distribution)
+# ---------------------------------------------------------------------------
+
+def get_volatility_estimator(price_data, estimator=DEFAULT_ESTIMATOR,
+                             window=VOLATILITY_WINDOW, clean=True):
+    """Rolling estimator series from the standalone model modules.
+
+    Dispatches to models.<estimator>.get_estimator().  Skew and Kurtosis accept
+    the same three arguments but return distribution moments, not volatility.
+    """
+    if not HAS_MODELS:
+        raise ValueError("Estimator modules unavailable - could not import models.py")
+    if estimator not in ESTIMATORS:
+        raise ValueError(f"Unknown estimator '{estimator}'. "
+                         f"Choose from: {', '.join(ESTIMATORS)}")
+
+    return getattr(models, estimator).get_estimator(
+        price_data=price_data, window=window, clean=clean)
+
+
+def _has_intraday_range(price_data):
+    """True when High and Low actually differ, i.e. these are real OHLC bars."""
+    if not {'High', 'Low'}.issubset(price_data.columns):
+        return False
+    spread = (price_data['High'] - price_data['Low']).abs()
+    return bool(spread.notna().any() and spread.max() > 0)
+
+
+def compute_volatility_profile(price_data, estimator=DEFAULT_ESTIMATOR,
+                               windows=None, window=VOLATILITY_WINDOW,
+                               quantiles=None):
+    """Cone statistics plus the rolling series for one symbol.
+
+    Returns None when there is not enough history for any requested window.
+    """
+    windows = list(windows or VOLATILITY_WINDOWS)
+    quantiles = list(quantiles or VOLATILITY_QUANTILES)
+    if len(quantiles) != 2 or quantiles[0] >= quantiles[1]:
+        raise ValueError("quantiles must be [lower, upper] with lower < upper")
+
+    usable = [w for w in windows if len(price_data) > w + 1]
+    if not usable:
+        return None
+
+    cone = {'windows': [], 'max': [], 'top_q': [], 'median': [],
+            'bottom_q': [], 'min': [], 'realized': [], 'series': []}
+
+    for w in usable:
+        series = get_volatility_estimator(price_data, estimator, w)
+        series = series.replace([np.inf, -np.inf], np.nan).dropna()
+        if series.empty:
+            continue
+        cone['windows'].append(w)
+        cone['max'].append(series.max())
+        cone['top_q'].append(series.quantile(quantiles[1]))
+        cone['median'].append(series.median())
+        cone['bottom_q'].append(series.quantile(quantiles[0]))
+        cone['min'].append(series.min())
+        cone['realized'].append(series.iloc[-1])
+        cone['series'].append(series)
+
+    if not cone['windows']:
+        return None
+
+    rolling_window = window if len(price_data) > window + 1 else cone['windows'][-1]
+    rolling = get_volatility_estimator(price_data, estimator, rolling_window)
+    rolling = rolling.replace([np.inf, -np.inf], np.nan).dropna()
+
+    return {
+        'estimator': estimator,
+        'is_moment': estimator in MOMENT_ESTIMATORS,
+        'cone': cone,
+        'quantiles': quantiles,
+        'rolling': rolling,
+        'rolling_window': rolling_window,
+        'flat_bars': not _has_intraday_range(price_data),
+    }
+
+
+def _volatility_formatter(profile):
+    """Percent labels for volatilities, plain numbers for Skew/Kurtosis."""
+    if profile['is_moment']:
+        return lambda x: f"{x:.1f}"
+    return lambda x: f"{x * 100:.0f}%"
+
+
+def plot_volatility(profile, ticker, pdf_pages=None):
+    """Render the volatility page: cone, box, rolling series and distribution."""
+    cone = profile['cone']
+    estimator = profile['estimator']
+    rolling = profile['rolling']
+    label = _volatility_formatter(profile)
+    lower, upper = profile['quantiles']
+
+    figure = plt.figure(figsize=(30, 17))
+    figure.suptitle(
+        f"{ticker}   Volatility Profile   |   {estimator} estimator"
+        + ("   |   flat bars: range-based models read zero" if profile['flat_bars'] else ""),
+        fontsize=32, fontweight='bold', y=0.975)
+
+    has = lambda name: name in VOLATILITY_PANELS
+
+    # --- Cone: estimator distribution across rolling windows ---
+    if has('cone'):
+        ax_cone = figure.add_axes((0.05, 0.56, 0.55, 0.34))
+        ax_cone.plot(cone['windows'], cone['max'], marker='o', label='Max')
+        ax_cone.plot(cone['windows'], cone['top_q'], marker='o',
+                     label=f"{int(upper * 100)}th Prctl")
+        ax_cone.plot(cone['windows'], cone['median'], marker='o', label='Median')
+        ax_cone.plot(cone['windows'], cone['bottom_q'], marker='o',
+                     label=f"{int(lower * 100)}th Prctl")
+        ax_cone.plot(cone['windows'], cone['min'], marker='o', label='Min')
+        ax_cone.plot(cone['windows'], cone['realized'], 'r-.', marker='*',
+                     markersize=16, linewidth=2.5, label='Realized (latest)')
+        ax_cone.set_xticks(cone['windows'])
+        ax_cone.set_xlim(cone['windows'][0] - 3, cone['windows'][-1] + 3)
+        ax_cone.set_xlabel('Rolling window (days)', fontsize=15)
+        ax_cone.yaxis.set_major_formatter(FuncFormatter(lambda v, _: label(v)))
+        ax_cone.grid(True, axis='y', alpha=0.4)
+        ax_cone.tick_params(labelsize=13)
+        ax_cone.legend(fontsize=13)
+        ax_cone.set_title('Volatility Cone', fontsize=20, fontweight='bold', pad=8)
+
+    # --- Box plot of the same per-window distributions ---
+    if has('box'):
+        ax_box = figure.add_axes((0.65, 0.56, 0.30, 0.34))
+        ax_box.boxplot(cone['series'], notch=True, sym='+',
+                       tick_labels=[str(w) for w in cone['windows']])
+        ax_box.plot(range(1, len(cone['windows']) + 1), cone['realized'],
+                    color='r', marker='*', markersize=16, linestyle='none',
+                    markeredgecolor='k')
+        ax_box.set_xlabel('Rolling window (days)', fontsize=15)
+        ax_box.yaxis.set_major_formatter(FuncFormatter(lambda v, _: label(v)))
+        ax_box.grid(True, axis='y', alpha=0.4)
+        ax_box.tick_params(labelsize=13)
+        ax_box.set_title('Distribution by window', fontsize=20,
+                         fontweight='bold', pad=8)
+
+    # --- Rolling estimator with quantile bands ---
+    if has('rolling') and not rolling.empty:
+        ax_roll = figure.add_axes((0.05, 0.31, 0.90, 0.17))
+        w = profile['rolling_window']
+        ax_roll.plot(rolling.index, rolling, color='tab:red', linewidth=1.4,
+                     label=f"Realized ({w}d)")
+        ax_roll.plot(rolling.index, rolling.rolling(w).quantile(upper),
+                     color='tab:blue', linewidth=1, label=f"{int(upper * 100)}th Prctl")
+        ax_roll.plot(rolling.index, rolling.rolling(w).median(),
+                     color='black', linewidth=1, label='Median')
+        ax_roll.plot(rolling.index, rolling.rolling(w).quantile(lower),
+                     color='tab:green', linewidth=1, label=f"{int(lower * 100)}th Prctl")
+        ax_roll.yaxis.set_major_formatter(FuncFormatter(lambda v, _: label(v)))
+        ax_roll.grid(True, alpha=0.3)
+        ax_roll.tick_params(labelsize=13)
+        ax_roll.legend(fontsize=13, ncol=4)
+        ax_roll.set_title(f'Rolling {estimator} ({w}-day window)',
+                          fontsize=20, fontweight='bold', pad=8)
+
+    # --- Histogram of estimator values, latest marked ---
+    if has('histogram') and not rolling.empty:
+        ax_hist = figure.add_axes((0.05, 0.06, 0.42, 0.17))
+        ax_hist.hist(rolling, bins=60, density=True, facecolor='tab:blue', alpha=0.35)
+        mean, std = rolling.mean(), rolling.std()
+        if std > 0:
+            grid = np.linspace(rolling.min(), rolling.max(), 200)
+            ax_hist.plot(grid, norm.pdf(grid, mean, std), 'g--', linewidth=1.5,
+                         label='Normal fit')
+        ax_hist.axvline(rolling.iloc[-1], color='r', linewidth=2,
+                        label=f"Latest {label(rolling.iloc[-1])}")
+        ax_hist.xaxis.set_major_formatter(FuncFormatter(lambda v, _: label(v)))
+        ax_hist.grid(True, axis='y', alpha=0.3)
+        ax_hist.tick_params(labelsize=13)
+        ax_hist.legend(fontsize=13)
+        ax_hist.set_title('Distribution of estimator values', fontsize=20,
+                          fontweight='bold', pad=8)
+
+    # --- Summary table ---
+    if has('summary') and not rolling.empty:
+        ax_table = figure.add_axes((0.53, 0.06, 0.42, 0.17))
+        ax_table.axis('off')
+        latest = rolling.iloc[-1]
+        percentile = float((rolling <= latest).mean() * 100)
+        if percentile >= 80:
+            reading = 'Elevated - rich vs its own history'
+        elif percentile <= 20:
+            reading = 'Depressed - cheap vs its own history'
+        else:
+            reading = 'Middle of its historical range'
+        rows = [
+            ['Estimator', estimator],
+            [f'Latest ({profile["rolling_window"]}d)', label(latest)],
+            ['Percentile rank', f"{percentile:.0f}th - {reading}"],
+            ['Median', label(rolling.median())],
+            ['Min / Max', f"{label(rolling.min())}  /  {label(rolling.max())}"],
+            ['Observations', f"{len(rolling):,}"],
+        ]
+        tbl = ax_table.table(cellText=rows, cellLoc='left',
+                             colWidths=[0.32, 0.68], loc='center')
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(15)
+        tbl.scale(1.0, 2.4)
+        for (row_idx, col_idx), cell in tbl.get_celld().items():
+            cell.set_edgecolor('#cccccc')
+            if col_idx == 0:
+                cell.set_facecolor('#f2f2f2')
+                cell.set_text_props(fontweight='bold')
+        ax_table.set_title('Summary', fontsize=20, fontweight='bold', pad=8)
+
+    if pdf_pages:
+        pdf_pages.savefig(figure)
+        plt.close(figure)
+    else:
+        plt.show()
+
+
+def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
+                        pdf_pages=None):
+    """Compute and render the volatility page for one symbol."""
+    if estimator in RANGE_ESTIMATORS and not _has_intraday_range(price_data):
+        print(f"  [volatility] {estimator} needs an intraday high/low range, but "
+              f"{ticker} has flat bars - it will read zero.")
+        print(f"  [volatility] Use Raw, HodgesTompkins or YangZhang for this series.")
+
+    profile = compute_volatility_profile(price_data, estimator=estimator)
+    if profile is None:
+        print(f"  [volatility] Not enough history for {ticker} "
+              f"(need more than {min(VOLATILITY_WINDOWS) + 1} rows).")
+        return None
+
+    rolling = profile['rolling']
+    if not rolling.empty:
+        label = _volatility_formatter(profile)
+        print(f"  [volatility] {estimator} ({profile['rolling_window']}d): "
+              f"latest {label(rolling.iloc[-1])}, "
+              f"median {label(rolling.median())}, "
+              f"range {label(rolling.min())} to {label(rolling.max())}")
+
+    plot_volatility(profile, ticker, pdf_pages=pdf_pages)
+    return profile
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1673,6 +1978,7 @@ def main():
         python Option-OGN.py WTI                      # full analysis, one symbol
         python Option-OGN.py WTI US02Y__US10Y         # ... plus a comparison
         python Option-OGN.py WTI US02Y__US10Y 250     # ... over the last 250 days
+        python Option-OGN.py --estimator Raw WTI      # choose the volatility estimator
         python Option-OGN.py --pdf                    # all FnO -> charts/FnO_Analysis.pdf
         python Option-OGN.py --pdf WTI                # -> charts/WTI_Analysis.pdf
         python Option-OGN.py --pdf WTI US02Y__US10Y   # -> charts/WTI_vs_US02Y__US10Y_Analysis.pdf
@@ -1682,6 +1988,22 @@ def main():
     use_pdf = '--pdf' in args
     if use_pdf:
         args.remove('--pdf')
+
+    estimator = DEFAULT_ESTIMATOR
+    if '--estimator' in args:
+        position = args.index('--estimator')
+        if position + 1 >= len(args):
+            print(f"  [error] --estimator needs a name. "
+                  f"Choose from: {', '.join(ESTIMATORS)}")
+            return
+        estimator = args[position + 1]
+        del args[position:position + 2]
+        match = [e for e in ESTIMATORS if e.lower() == estimator.lower()]
+        if not match:
+            print(f"  [error] Unknown estimator '{estimator}'. "
+                  f"Choose from: {', '.join(ESTIMATORS)}")
+            return
+        estimator = match[0]
 
     # Legacy Windows code pages cannot encode this script's Unicode output.
     if hasattr(sys.stdout, "reconfigure"):
@@ -1703,10 +2025,13 @@ def main():
             return
 
     if len(tokens) > 2:
-        print("Usage: python Option-OGN.py [--pdf] [symbol] [compare_symbol] [days]")
+        print("Usage: python Option-OGN.py [--pdf] [--estimator NAME] "
+              "[symbol] [compare_symbol] [days]")
         print("  symbol          full technical analysis for this series")
         print("  compare_symbol  optional - append a statistical comparison")
-        print(f"  days            optional - restrict the comparison to the last N days")
+        print("  days            optional - restrict the comparison to the last N days")
+        print(f"  --estimator     optional - default {DEFAULT_ESTIMATOR}; one of: "
+              f"{', '.join(ESTIMATORS)}")
         print(f"  Symbols may come from any downloaded source, or be a ratio")
         print(f"  written as NUM{RATIO_OPERATOR}DEN (e.g. US02Y{RATIO_OPERATOR}US10Y).")
         return
@@ -1731,7 +2056,8 @@ def main():
         FnOAnalysis(single_scrip=symbol,
                     pdf_path=pdf_path if use_pdf else None,
                     compare_with=compare_with,
-                    days=days)
+                    days=days,
+                    estimator=estimator)
     except (ValueError, FileNotFoundError) as e:
         print(f"  [error] {e}")
 

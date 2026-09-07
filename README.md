@@ -10,7 +10,8 @@ End-to-end pipeline for downloading, storing, and analysing NSE (National Stock 
 |---|---|
 | **OGN v2.0-download.py** | Downloads daily market data from NSE across 11 categories (Equity, Derivatives, Indices, Short Selling, Volatility, Market Activity, Price Band, PE Ratio, Corporate Bonds, Delivery Positions, WDM Daily), plus a 12th **Macro** category sourced from FRED and Yahoo Finance. Handles incremental updates, raw→processed merge, deduplication, and error recovery. |
 | **OGN.py** | Data loader module — provides Python functions to read processed Parquet data. Use `from OGN import load_equity, load_futures, load_options, load_index, load_macro` etc. in your own scripts or notebooks. |
-| **Option-OGN.py** | Technical analysis & charting — generates multi-panel charts (MACD, RSI, ADX, Bollinger Bands, Fibonacci, Max Pain, Futures Fair Value, Renko) from the Parquet store. Pass a second symbol to append a statistical comparison to the same report. Supports interactive display and PDF export. |
+| **Option-OGN.py** | Technical analysis & charting — generates multi-panel charts (MACD, RSI, ADX, Bollinger Bands, Fibonacci, Max Pain, Futures Fair Value, Renko), a volatility-cone page from the standalone estimator models, and an optional statistical comparison against a second symbol. Supports interactive display and PDF export. |
+| **models.py** + `GarmanKlass.py`, `HodgesTompkins.py`, `Kurtosis.py`, `Parkinson.py`, `Raw.py`, `RogersSatchell.py`, `Skew.py`, `YangZhang.py` | Volatility estimators. One module per model, each exposing `get_estimator(price_data, window, clean)`. |
 
 ---
 
@@ -43,7 +44,7 @@ Prints a summary table showing available categories, symbol counts, and director
 One command handles both the technical analysis and the optional pairwise comparison:
 
 ```
-python Option-OGN.py [--pdf] [symbol] [compare_symbol] [days]
+python Option-OGN.py [--pdf] [--estimator NAME] [symbol] [compare_symbol] [days]
 ```
 
 ```bash
@@ -60,6 +61,9 @@ python Option-OGN.py WTI US02Y__US10Y
 # ... with the comparison restricted to the last 250 days
 python Option-OGN.py WTI US02Y__US10Y 250
 
+# Choose the volatility estimator (default YangZhang)
+python Option-OGN.py --estimator Raw WTI
+
 # Export to PDF — all FnO symbols
 python Option-OGN.py --pdf
 
@@ -73,10 +77,14 @@ python Option-OGN.py --pdf WTI US02Y__US10Y
 python Option-OGN.py --pdf output.pdf
 ```
 
-With two symbols the report contains the **full technical analysis of the first symbol**,
-followed by the **comparison page** — in that order, in a single PDF.
+The report is assembled in this order:
 
-See [Statistical Comparison](#statistical-comparison) below for the measures.
+1. **Technical analysis** of the first symbol
+2. **Volatility profile** of the first symbol
+3. **Statistical comparison** — only when a second symbol is given
+
+See [Volatility Analysis](#volatility-analysis) and [Statistical Comparison](#statistical-comparison)
+below.
 
 ### 5. Use as a library
 
@@ -200,6 +208,94 @@ separators, and tz-aware timestamps.
 
 ---
 
+## Volatility Analysis
+
+Every report includes a volatility page for the **first** symbol, built from the standalone
+estimator modules (`GarmanKlass.py`, `YangZhang.py`, ...), each of which exposes
+`get_estimator(price_data, window, clean)` and is dispatched through `models.py`.
+
+```bash
+python Option-OGN.py --pdf WTI                    # default estimator (YangZhang)
+python Option-OGN.py --pdf --estimator Raw WTI    # pick another
+```
+
+### Available estimators
+
+| Estimator | Type | Inputs used | Notes |
+|---|---|---|---|
+| `YangZhang` | Volatility | O, H, L, C | **Default.** Handles overnight gaps and drift |
+| `GarmanKlass` | Volatility | O, H, L, C | Efficient, assumes no drift |
+| `Parkinson` | Volatility | H, L | High/low range only |
+| `RogersSatchell` | Volatility | O, H, L, C | Drift-independent |
+| `HodgesTompkins` | Volatility | C | Close-to-close, bias corrected |
+| `Raw` | Volatility | C | Plain close-to-close standard deviation |
+| `Skew` | Moment | C | Return distribution skew |
+| `Kurtosis` | Moment | C | Return distribution kurtosis |
+
+Volatility estimators are annualised (252 trading periods) and shown as percentages.
+`Skew` and `Kurtosis` are distribution moments, so they are labelled as plain numbers.
+
+> **Estimators needing an intraday range.** `GarmanKlass`, `Parkinson` and `RogersSatchell`
+> read the high/low spread. Single-value sources (FRED, Yahoo, ratios) are expanded to flat
+> bars where `High == Low`, so those three return **exactly zero** for such series. The tool
+> detects this and prints a warning suggesting `Raw`, `HodgesTompkins` or `YangZhang`, which
+> are all close-to-close based and remain meaningful.
+
+### The volatility page
+
+| Panel | Shows |
+|---|---|
+| `cone` | Max / 75th / median / 25th / min of the estimator across rolling windows, with the latest realized value overlaid |
+| `box` | Box-and-whisker of the same per-window distributions |
+| `rolling` | The rolling estimator through time with quantile bands |
+| `histogram` | Distribution of estimator values, normal fit, and latest value marked |
+| `summary` | Latest value, percentile rank against its own history, median, min/max, sample size |
+
+The cone is the classic read: if the realized line sits above the upper percentile band,
+short-dated volatility is rich relative to its own history.
+
+### Tuning
+
+At the top of [Option-OGN.py](Option-OGN.py):
+
+```python
+VOLATILITY_WINDOWS = [3, 5, 10, 20, 30, 60, 90]  # cone x-axis
+VOLATILITY_WINDOW = 30                            # rolling / histogram window
+VOLATILITY_QUANTILES = [0.25, 0.75]
+DEFAULT_ESTIMATOR = 'YangZhang'
+```
+
+---
+
+## Report Modularity
+
+The report is assembled from two commentable registries at the top of
+[Option-OGN.py](Option-OGN.py). **Comment out any line to drop that piece.**
+
+```python
+# Whole sections
+REPORT_SECTIONS = [
+    'technical',    # multi-panel indicator chart for the first symbol
+    'volatility',   # volatility cone / rolling / histogram page
+    'comparison',   # statistical comparison, only when a second symbol is given
+]
+
+# Individual panels on the volatility page
+VOLATILITY_PANELS = [
+    'cone',
+    'box',
+    'rolling',
+    'histogram',
+    'summary',
+]
+```
+
+For example, to produce only the technical chart, comment out `'volatility'` and
+`'comparison'`. Sections that fail (bad estimator, too little history, no overlapping
+dates) are skipped with a printed reason rather than aborting the run.
+
+---
+
 ## Statistical Comparison
 
 Passing a **second symbol** appends a statistical comparison to the report, after the full
@@ -314,7 +410,10 @@ contains, in order:
 **1. The full technical analysis of the first symbol** \u2014 EMA/SMA crossovers, MACD, RSI &
 ADX, Fibonacci retracements, Bollinger Bands & OBV, Renko, and the technical audit table.
 
-**2. The comparison page**, containing:
+**2. The volatility profile of the first symbol** — cone, per-window box plots, rolling
+estimator with quantile bands, distribution histogram, and a summary table.
+
+**3. The comparison page**, containing:
 
 1. Both series as levels on twin axes
 2. Both rebased to 100 at the common start date
@@ -335,4 +434,5 @@ overlapping days), the technical analysis is still produced and the reason is pr
 - `yfinance` is required for the Yahoo macro series (`GLD`, `SLV`)
 - `statsmodels`, `scikit-learn` and `dtaidistance` are required for the statistical
   comparison
+- `scipy` is required for the volatility histogram's normal fit
 - Optional: TA-Lib (C library + Python wrapper), trendln, stocktrends
