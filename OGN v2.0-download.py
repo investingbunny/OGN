@@ -128,6 +128,11 @@ MACRO_RATIOS = [
 # etc.) do NOT create markers so they are retried on the next run.
 BUDGET_DAY = (2, 1)  # (month, day) — always try this date
 
+# Hold datetime.date objects, so pandas reports them as dtype `object`.
+# They must never be swept up by the mixed-type coercion loops: stringifying
+# them makes the column uncomparable against dates in the stored file.
+DATE_COLUMNS = ('Date', 'Expiry')
+
 
 class HTTP403Error(Exception):
     """Raised when the server returns 403 Forbidden (data not available)."""
@@ -1550,12 +1555,8 @@ class NSEMarketDataDownloader:
                 existing_df = pd.read_parquet(file_path, engine='pyarrow')
                 # pd.concat automatically handles differing columns
                 combined_df = pd.concat([existing_df, group], ignore_index=True)
-                # Build dedup key: Date + any available identity columns
-                dedup_cols = ['Date']
-                for extra_key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
-                    if extra_key in combined_df.columns:
-                        dedup_cols.append(extra_key)
-                combined_df = combined_df.drop_duplicates(subset=dedup_cols, keep='last')
+                combined_df = combined_df.drop_duplicates(
+                    subset=self._dedup_keys(combined_df), keep='last')
                 combined_df = combined_df.sort_values('Date')
                 combined_df.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
             else:
@@ -1564,6 +1565,34 @@ class NSEMarketDataDownloader:
                 group.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
 
     MERGE_WORKERS = 12  # Parallel threads for writing per-symbol parquet files
+
+    @staticmethod
+    def _dedup_keys(df: pd.DataFrame) -> List[str]:
+        """Identity columns that make a row unique within a processed file.
+
+        Derivatives carry many rows per date (strike x expiry x option type),
+        so deduplicating on Date alone would collapse a whole day into one row.
+        """
+        keys = ['Date']
+        for extra_key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
+            if extra_key in df.columns:
+                keys.append(extra_key)
+        return keys
+
+    @staticmethod
+    def _restore_date_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """Converts ISO-string date columns back to datetime.date.
+
+        Retry files written before the stringification bug was fixed store
+        dates as text, which cannot be compared against the datetime.date
+        values in the processed file.
+        """
+        for col in DATE_COLUMNS:
+            if col in df.columns and df[col].dtype == object:
+                sample = df[col].dropna()
+                if not sample.empty and isinstance(sample.iloc[0], str):
+                    df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+        return df
 
     def merge_raw_to_processed(self, raw_dir: Path, raw_prefix: str, target_dir: Path, label: str, group_col: str = 'Symbol'):
         """Merges raw day-parquet files from disk into per-symbol processed files.
@@ -1593,9 +1622,10 @@ class NSEMarketDataDownloader:
                     symbol = rf.stem
                     try:
                         new_data = pd.read_parquet(rf, engine='pyarrow')
+                        new_data = self._restore_date_columns(new_data)
                         # Coerce object columns to clean types
                         for col in new_data.columns:
-                            if new_data[col].dtype == object and col != 'Date':
+                            if new_data[col].dtype == object and col not in DATE_COLUMNS:
                                 conv = pd.to_numeric(new_data[col], errors='coerce')
                                 if conv.notna().sum() >= new_data[col].notna().sum() * 0.5:
                                     new_data[col] = conv
@@ -1604,15 +1634,17 @@ class NSEMarketDataDownloader:
                         file_path = target_dir / f"{symbol}.parquet"
                         if file_path.exists():
                             existing = pd.read_parquet(file_path, engine='pyarrow')
+                            existing = self._restore_date_columns(existing)
                             combined = pd.concat([existing, new_data], ignore_index=True)
-                            combined = combined.drop_duplicates(subset=['Date'], keep='last')
+                            combined = combined.drop_duplicates(
+                                subset=self._dedup_keys(combined), keep='last')
                             combined = combined.sort_values('Date')
                             del existing
                         else:
                             combined = new_data.sort_values('Date')
                         # Coerce again after concat with existing (may re-introduce mixed types)
                         for col in combined.columns:
-                            if combined[col].dtype == object and col != 'Date':
+                            if combined[col].dtype == object and col not in DATE_COLUMNS:
                                 conv = pd.to_numeric(combined[col], errors='coerce')
                                 if conv.notna().sum() >= combined[col].notna().sum() * 0.5:
                                     combined[col] = conv
@@ -1821,7 +1853,7 @@ class NSEMarketDataDownloader:
                             retry_dir.mkdir(exist_ok=True)
                             save_df = merged if merged is not None else new_data
                             for c in save_df.columns:
-                                if save_df[c].dtype == object:
+                                if save_df[c].dtype == object and c not in DATE_COLUMNS:
                                     save_df[c] = save_df[c].astype(str)
                             save_df.to_parquet(retry_dir / f"{name}.parquet",
                                                engine='pyarrow', compression='zstd', index=False)

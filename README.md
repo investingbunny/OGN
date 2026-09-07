@@ -10,7 +10,7 @@ End-to-end pipeline for downloading, storing, and analysing NSE (National Stock 
 |---|---|
 | **OGN v2.0-download.py** | Downloads daily market data from NSE across 11 categories (Equity, Derivatives, Indices, Short Selling, Volatility, Market Activity, Price Band, PE Ratio, Corporate Bonds, Delivery Positions, WDM Daily), plus a 12th **Macro** category sourced from FRED and Yahoo Finance. Handles incremental updates, raw→processed merge, deduplication, and error recovery. |
 | **OGN.py** | Data loader module — provides Python functions to read processed Parquet data. Use `from OGN import load_equity, load_futures, load_options, load_index, load_macro` etc. in your own scripts or notebooks. |
-| **Option-OGN.py** | Technical analysis & charting — generates multi-panel charts (MACD, RSI, ADX, Bollinger Bands, Fibonacci, Max Pain, Futures Fair Value, Renko) from the Parquet store. Also provides **COMP**, a pairwise statistical comparison between any two series. Supports interactive display and PDF export. |
+| **Option-OGN.py** | Technical analysis & charting — generates multi-panel charts (MACD, RSI, ADX, Bollinger Bands, Fibonacci, Max Pain, Futures Fair Value, Renko) from the Parquet store. Pass a second symbol to append a statistical comparison to the same report. Supports interactive display and PDF export. |
 
 ---
 
@@ -40,39 +40,45 @@ Prints a summary table showing available categories, symbol counts, and director
 
 ### 4. Generate analysis charts
 
+One command handles both the technical analysis and the optional pairwise comparison:
+
+```
+python Option-OGN.py [--pdf] [symbol] [compare_symbol] [days]
+```
+
 ```bash
 # Interactive charts — all FnO symbols
 python Option-OGN.py
 
-# Interactive charts — single symbol
+# Full technical analysis for one series (any source, not just equities)
 python Option-OGN.py RELIANCE
+python Option-OGN.py WTI
+
+# Full analysis of the first symbol, plus a statistical comparison against the second
+python Option-OGN.py WTI US02Y__US10Y
+
+# ... with the comparison restricted to the last 250 days
+python Option-OGN.py WTI US02Y__US10Y 250
 
 # Export to PDF — all FnO symbols
 python Option-OGN.py --pdf
 
-# Export to PDF — single symbol
-python Option-OGN.py --pdf RELIANCE
+# Export to PDF — single symbol → charts/WTI_Analysis.pdf
+python Option-OGN.py --pdf WTI
+
+# Export to PDF — pair → charts/WTI_vs_US02Y__US10Y_Analysis.pdf
+python Option-OGN.py --pdf WTI US02Y__US10Y
 
 # Export to PDF — custom output file
 python Option-OGN.py --pdf output.pdf
 ```
 
-### 5. Compare two series statistically (COMP)
+With two symbols the report contains the **full technical analysis of the first symbol**,
+followed by the **comparison page** — in that order, in a single PDF.
 
-```bash
-# Interactive
-python Option-OGN.py COMP GLD SLV
+See [Statistical Comparison](#statistical-comparison) below for the measures.
 
-# Export to PDF → charts/COMP_GLD_vs_SLV.pdf
-python Option-OGN.py --pdf COMP GLD SLV
-
-# Ratios use a double underscore as the division operator
-python Option-OGN.py --pdf COMP US02Y__US10Y WTI
-```
-
-See [COMP — Pairwise Statistical Comparison](#comp--pairwise-statistical-comparison) below.
-
-### 6. Use as a library
+### 5. Use as a library
 
 ```python
 from OGN import load_equity, load_futures, load_options, load_index
@@ -194,54 +200,61 @@ separators, and tz-aware timestamps.
 
 ---
 
-## COMP — Pairwise Statistical Comparison
+## Statistical Comparison
 
-Compares **any two** downloaded series — across FRED, Yahoo, Equity, Indices, Derivatives,
-Volatility, PE Ratio and the rest — and reports the relationship measures used in
-statistical-arbitrage and lead-lag research.
+Passing a **second symbol** appends a statistical comparison to the report, after the full
+technical analysis of the first. It works across **any two** downloaded series — FRED,
+Yahoo, Equity, Indices, Derivatives, Volatility, PE Ratio and the rest — and reports the
+relationship measures used in statistical-arbitrage and lead-lag research.
 
 ```bash
-python Option-OGN.py COMP <symbol1> <symbol2> [days]
-python Option-OGN.py --pdf COMP <symbol1> <symbol2> [days]
+python Option-OGN.py [--pdf] <symbol> <compare_symbol> [days]
 ```
 
-### Arguments
+### Symbols
 
-Each argument is either a **stored symbol** or a **ratio** written as `NUM__DEN`, using a
+Either argument is a **stored symbol** or a **ratio** written as `NUM__DEN`, using a
 **double underscore** as the division operator:
 
 ```bash
-python Option-OGN.py COMP GLD SLV                # two macro series
-python Option-OGN.py COMP NIFTY US10Y            # index vs macro
-python Option-OGN.py COMP RELIANCE NIFTY         # equity vs index
-python Option-OGN.py COMP US02Y__US10Y WTI       # ratio vs macro
-python Option-OGN.py COMP GLD__SLV US10Y         # ratio computed on the fly
+python Option-OGN.py GLD SLV                # two macro series
+python Option-OGN.py NIFTY US10Y            # index vs macro
+python Option-OGN.py RELIANCE NIFTY         # equity vs index
+python Option-OGN.py WTI US02Y__US10Y       # macro vs ratio
+python Option-OGN.py GLD__SLV US10Y         # ratio computed on the fly
 ```
 
 The double underscore keeps ratios unambiguous against stored names that contain a single
 underscore — `GLD_SLV` loads the stored Parquet file, while `GLD__SLV` computes the ratio
 fresh from `GLD` and `SLV`. It is also filename-safe, so it survives in the generated PDF
-name (`charts/COMP_US02Y__US10Y_vs_WTI.pdf`).
+name (`charts/WTI_vs_US02Y__US10Y_Analysis.pdf`).
 
 A ratio is built in memory over the two legs' overlapping dates and is never written to
 disk. Exactly one `__` is allowed per argument.
 
+> **Any source can drive the full analysis.** Single-value series (FRED, Yahoo, ratios)
+> have no OHLC bars, so they are expanded into flat bars (`Open = High = Low = Close`,
+> `Volume = 0`) before the indicator stack runs. Price-derived indicators (MACD, RSI,
+> Bollinger, ATR, ADX) remain meaningful; volume-based panels (OBV, the volume audit row)
+> are inert for those series.
+
 ### Optional third argument: `days`
 
 ```bash
-python Option-OGN.py COMP GLD SLV 250            # last 250 days only
-python Option-OGN.py --pdf COMP GLD SLV 250      # → charts/COMP_GLD_vs_SLV_250d.pdf
-python Option-OGN.py COMP GLD SLV                # omitted → full common horizon
+python Option-OGN.py GLD SLV 250            # comparison over the last 250 days
+python Option-OGN.py --pdf GLD SLV 250      # → charts/GLD_vs_SLV_250d_Analysis.pdf
+python Option-OGN.py GLD SLV                # omitted → full common horizon
 ```
 
-- **Omitted** — the analysis runs over the entire overlap, i.e. the horizon of whichever
+- **Omitted** — the comparison runs over the entire overlap, i.e. the horizon of whichever
   series is shorter. Ratios inherit the same rule.
 - **Supplied** — only the most recent N observations are used. Trimming happens *after*
   alignment, so the sample is exactly N rows rather than whatever the two calendars happen
   to share in the last N calendar days.
 - Must be at least 60 (`COMP_MIN_OBS`); below that the estimators are not meaningful and
-  the run stops with a clear message.
+  the comparison is skipped with a clear message.
 - If N exceeds the available overlap, everything available is used and the console says so.
+- Only applies to the comparison, not to the technical-analysis chart.
 - The window is echoed on the console, in the chart title, and in the generated PDF name.
 
 ### Alignment rules
@@ -253,7 +266,8 @@ python Option-OGN.py COMP GLD SLV                # omitted → full common horiz
 - The two series are inner-joined, so the comparison automatically runs over the
   **shorter** of the two horizons. Ratios inherit the same rule. Pass the optional `days`
   argument to narrow it further.
-- Minimum 60 overlapping observations, otherwise the run stops with a clear message.
+- Minimum 60 overlapping observations, otherwise the comparison is skipped with a clear
+  message.
 
 ### Measures reported
 
@@ -294,16 +308,23 @@ python Option-OGN.py COMP GLD SLV                # omitted → full common horiz
 
 ### Output
 
-One figure (on screen, or PDF with `--pdf`) containing:
+The report is a single PDF (or a sequence of interactive windows). With two symbols it
+contains, in order:
+
+**1. The full technical analysis of the first symbol** \u2014 EMA/SMA crossovers, MACD, RSI &
+ADX, Fibonacci retracements, Bollinger Bands & OBV, Renko, and the technical audit table.
+
+**2. The comparison page**, containing:
 
 1. Both series as levels on twin axes
 2. Both rebased to 100 at the common start date
-3. The cointegration spread with mean and ±2σ bands
+3. The cointegration spread with mean and \u00b12\u03c3 bands
 4. The cross-correlation function, with the strongest lag highlighted
-5. A colour-coded summary table — measure name, value, a plain-English reading of *this*
+5. A colour-coded summary table \u2014 measure name, value, a plain-English reading of *this*
    result, and a one-line note on what the measure tells you
 
-The same table is printed to the console.
+The same table is printed to the console. If the comparison fails (for example too few
+overlapping days), the technical analysis is still produced and the reason is printed.
 
 ---
 
@@ -312,5 +333,6 @@ The same table is printed to the console.
 - Python 3.10+
 - See [requirements.txt](requirements.txt) for full list
 - `yfinance` is required for the Yahoo macro series (`GLD`, `SLV`)
-- `statsmodels`, `scikit-learn` and `dtaidistance` are required for COMP
+- `statsmodels`, `scikit-learn` and `dtaidistance` are required for the statistical
+  comparison
 - Optional: TA-Lib (C library + Python wrapper), trendln, stocktrends

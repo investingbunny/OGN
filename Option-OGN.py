@@ -12,14 +12,13 @@ multi-panel technical analysis charts including:
   - Support / resistance trendlines (optional, requires trendln)
 
 Usage:
-    python Option-OGN.py                    # analyse all FnO symbols (interactive)
-    python Option-OGN.py RELIANCE             # analyse a single symbol (interactive)
-    python Option-OGN.py --pdf                # all FnO symbols → charts/FnO_Analysis.pdf
-    python Option-OGN.py --pdf RELIANCE       # single symbol → charts/RELIANCE_Analysis.pdf
-    python Option-OGN.py --pdf output.pdf     # custom output file
-    python Option-OGN.py COMP GLD SLV         # pairwise statistical comparison
-    python Option-OGN.py COMP GLD SLV 250     # ... restricted to the last 250 days
-    python Option-OGN.py --pdf COMP US02Y__US10Y NIFTY   # comparison → PDF
+    python Option-OGN.py                          # analyse all FnO symbols (interactive)
+    python Option-OGN.py WTI                       # full analysis for one series
+    python Option-OGN.py WTI US02Y__US10Y          # ... plus a statistical comparison
+    python Option-OGN.py WTI US02Y__US10Y 250      # ... over the last 250 days
+    python Option-OGN.py --pdf                     # all FnO symbols -> charts/FnO_Analysis.pdf
+    python Option-OGN.py --pdf WTI                 # single symbol -> charts/WTI_Analysis.pdf
+    python Option-OGN.py --pdf output.pdf          # custom output file
 
 @author: HRTR
 """
@@ -377,24 +376,29 @@ def slope(ser, n=5):
     Normalises both x (time) and y (price) to [0,1] range, then fits
     OLS regression over rolling windows.  Returns slope angle in degrees.
 
+    Because x is evenly spaced, the rolling least-squares slope reduces to a
+    fixed-weight dot product, so this is computed by convolution rather than
+    by fitting one regression per row.
+
     Args:
         ser: Price series.
         n:   Rolling window size (default 5).
     """
-    # Normalise price to [0, 1] for comparable slope magnitudes
-    ser = (ser - ser.min()) / (ser.max() - ser.min())
-    x = np.array(range(len(ser)))
-    x = (x - x.min()) / (x.max() - x.min())  # Normalise time axis
-    slopes = [0.0] * (n - 1)  # Pad initial values
-    for i in range(n, len(ser) + 1):
-        y_scaled = ser.iloc[i - n:i]
-        x_scaled = x[i - n:i]
-        x_scaled = sm.add_constant(x_scaled)  # Add intercept term
-        model = sm.OLS(y_scaled, x_scaled)
-        results = model.fit()
-        slopes.append(results.params.iloc[-1])  # Coefficient = slope
-    # Convert slope ratio to angle in degrees
-    return np.rad2deg(np.arctan(np.array(slopes)))
+    values = np.asarray(ser, dtype=float)
+    count = len(values)
+    if n < 2 or count < n:
+        return np.zeros(count)
+
+    span = values.max() - values.min()
+    y = (values - values.min()) / span if span > 0 else np.zeros(count)
+    step = 1.0 / (count - 1)  # x is the index normalised to [0, 1]
+
+    offsets = np.arange(n) - (n - 1) / 2.0
+    denominator = step * np.sum(offsets ** 2)
+    rolling = np.convolve(y, offsets[::-1], mode='valid') / denominator
+
+    slopes = np.concatenate([np.zeros(n - 1), rolling])
+    return np.rad2deg(np.arctan(slopes))
 
 
 def BollBnd(DF, n=20):
@@ -853,13 +857,17 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
 # Main analysis orchestrator
 # ---------------------------------------------------------------------------
 
-def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None):
+def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
+                compare_with=None, days=None):
     """Run technical analysis for each symbol in the list.
 
     Args:
         scrip_list:   List of symbols to analyse (default: NSEFnOList)
         single_scrip: If set, analyse only this one symbol
         pdf_path:     If set, save all charts to this PDF file
+        compare_with: If set, append a statistical comparison of the analysed
+                      symbol against this second series
+        days:         Window (in observations) for that comparison
     """
     if single_scrip:
         symbols = [single_scrip]
@@ -882,16 +890,13 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None):
         print(f"  Analysing: {Scrip}")
         print(f"{'='*60}")
 
-        # ── Load equity OHLC data ─────────────────────────────────────
+        # ── Load OHLC data from whichever source holds this symbol ─────
         try:
-            OHLCdf = load_equity(Scrip)
-        except FileNotFoundError:
-            # Try loading as index
-            try:
-                OHLCdf = load_index(Scrip)
-            except FileNotFoundError:
-                print(f"  [skip] No data found for {Scrip}")
-                continue
+            OHLCdf, source_desc = load_analysis_frame(Scrip)
+            print(f"  Source: {source_desc}")
+        except (FileNotFoundError, ValueError) as e:
+            print(f"  [skip] {e}")
+            continue
 
         if OHLCdf.empty:
             print(f"  [skip] Empty data for {Scrip}")
@@ -931,7 +936,9 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None):
         OBVdf = OBV(Indicatordf)                          # On Balance Volume
         Indicatordf["OBV"] = OBVdf["obv"]
         Indicatordf["Daily_Ret"] = OBVdf['daily_ret']
-        Indicatordf["Log_Ret"] = np.log(1 + OBVdf['daily_ret'])  # Log returns for stats
+        # Series that can print negative (e.g. WTI in Apr 2020) make 1+r <= 0
+        _daily_ret = OBVdf['daily_ret']
+        Indicatordf["Log_Ret"] = np.log(_daily_ret.where(_daily_ret > -1) + 1)
 
         # --- Beta via talib (optional) ---
         if HAS_TALIB:
@@ -955,6 +962,14 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None):
         # ── Plot ──────────────────────────────────────────────────────
         display_bars = min(25, len(Indicatordf))
         plot_chart(Indicatordf, display_bars, Scrip, 0, pdf_pages=pdf_pages)
+
+        # ── Appended statistical comparison ───────────────────────────
+        if compare_with:
+            try:
+                compare_series(Scrip, compare_with, days=days,
+                               pdf_pages=pdf_pages)
+            except (ValueError, FileNotFoundError) as e:
+                print(f"  [comparison skipped] {e}")
 
     if pdf_pages:
         pdf_pages.close()
@@ -1405,6 +1420,46 @@ def build_comparison_table(results):
         rows, columns=["Measure", "Value", "Reading", "What it tells you"])
 
 
+def load_analysis_frame(token):
+    """Return an OHLCV frame for `token`, from any downloaded source.
+
+    Equity/index/derivative sources already carry real OHLC bars.  Single-value
+    sources (FRED, Yahoo, computed ratios) are expanded into flat bars so the
+    same indicator stack applies; Volume is zero there, which the volume-based
+    panels already guard against.
+
+    Returns:
+        (DataFrame with Date/Open/High/Low/Close/Volume, description)
+    """
+    frame, source = _comp_load_symbol(token)
+
+    if frame is not None and {'Open', 'High', 'Low', 'Close'}.issubset(frame.columns):
+        ohlc = frame.copy()
+        dates = pd.to_datetime(ohlc['Date'], errors='coerce')
+        if dates.dt.tz is not None:
+            dates = dates.dt.tz_localize(None)
+        ohlc['Date'] = dates.dt.normalize()
+        ohlc = ohlc[ohlc['Date'].notna()]
+        for column in ('Open', 'High', 'Low', 'Close', 'Volume'):
+            if column in ohlc.columns:
+                ohlc[column] = pd.to_numeric(ohlc[column], errors='coerce')
+        if 'Volume' not in ohlc.columns:
+            ohlc['Volume'] = 0.0
+        ohlc = ohlc.dropna(subset=['Close']).sort_values('Date')
+        return ohlc.reset_index(drop=True), f"{source} [OHLC]"
+
+    series, _, description = resolve_comp_series(token)
+    flat = pd.DataFrame({
+        'Date': series.index,
+        'Open': series.to_numpy(dtype=float),
+        'High': series.to_numpy(dtype=float),
+        'Low': series.to_numpy(dtype=float),
+        'Close': series.to_numpy(dtype=float),
+        'Volume': 0.0,
+    })
+    return flat.sort_values('Date').reset_index(drop=True), description
+
+
 def _comp_window_note(results):
     """Short ' | last N days' suffix when a window was requested."""
     if not results.get('days_requested'):
@@ -1426,7 +1481,7 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
     ax_table = figure.add_axes((0.04, 0.06, 0.93, 0.24))
     ax_table.axis('off')
 
-    figure.suptitle(f"COMP   {label_a}   vs   {label_b}{_comp_window_note(results)}",
+    figure.suptitle(f"{label_a}   vs   {label_b}{_comp_window_note(results)}",
                     fontsize=34, fontweight='bold', y=0.975)
 
     # --- Raw levels on twin axes (units rarely match) ---
@@ -1550,16 +1605,20 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
         plt.show()
 
 
-def compare_series(token_a, token_b, days=None, pdf_path=None):
-    """COMP entry point: resolve, align, measure, and render two series."""
-    if pdf_path:
+def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None):
+    """Resolve, align, measure, and render a comparison of two series.
+
+    Pass `pdf_pages` to append the comparison onto a report that is already
+    open; the caller keeps ownership and closes it.
+    """
+    if pdf_path and pdf_pages is None:
         matplotlib.use('Agg')
 
     series_a, label_a, desc_a = resolve_comp_series(token_a)
     series_b, label_b, desc_b = resolve_comp_series(token_b)
 
     print(f"\n{'='*78}")
-    print(f"  COMP  {label_a}  vs  {label_b}")
+    print(f"  Comparison:  {label_a}  vs  {label_b}")
     print(f"{'='*78}")
     print(f"  {label_a:<22} {desc_a:<34} "
           f"{series_a.index.min():%Y-%m-%d} to {series_a.index.max():%Y-%m-%d} "
@@ -1586,15 +1645,16 @@ def compare_series(token_a, token_b, days=None, pdf_path=None):
         print(table.to_string(index=False))
     print()
 
-    pdf_pages = None
-    if pdf_path:
+    owns_pdf = False
+    if pdf_pages is None and pdf_path:
         from pathlib import Path
         Path(pdf_path).parent.mkdir(parents=True, exist_ok=True)
         pdf_pages = PdfPages(pdf_path)
+        owns_pdf = True
 
     plot_comparison(results, table, desc_a, desc_b, pdf_pages=pdf_pages)
 
-    if pdf_pages:
+    if owns_pdf:
         pdf_pages.close()
         print(f"  PDF saved: {pdf_path}\n")
 
@@ -1609,14 +1669,14 @@ def main():
     """CLI entry point.
 
     Usage:
-        python Option-OGN.py                    # interactive, all FnO
-        python Option-OGN.py RELIANCE             # interactive, single symbol
-        python Option-OGN.py --pdf                # PDF, all FnO → charts/FnO_Analysis.pdf
-        python Option-OGN.py --pdf RELIANCE       # PDF, single → charts/RELIANCE_Analysis.pdf
-        python Option-OGN.py --pdf output.pdf     # PDF, all FnO → output.pdf
-        python Option-OGN.py COMP GLD SLV         # compare two series interactively
-        python Option-OGN.py COMP GLD SLV 250     # compare over the last 250 days
-        python Option-OGN.py --pdf COMP GLD SLV   # comparison → charts/COMP_GLD_vs_SLV.pdf
+        python Option-OGN.py                          # interactive, all FnO
+        python Option-OGN.py WTI                      # full analysis, one symbol
+        python Option-OGN.py WTI US02Y__US10Y         # ... plus a comparison
+        python Option-OGN.py WTI US02Y__US10Y 250     # ... over the last 250 days
+        python Option-OGN.py --pdf                    # all FnO -> charts/FnO_Analysis.pdf
+        python Option-OGN.py --pdf WTI                # -> charts/WTI_Analysis.pdf
+        python Option-OGN.py --pdf WTI US02Y__US10Y   # -> charts/WTI_vs_US02Y__US10Y_Analysis.pdf
+        python Option-OGN.py --pdf output.pdf         # custom output file
     """
     args = sys.argv[1:]
     use_pdf = '--pdf' in args
@@ -1627,65 +1687,53 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    if args and args[0].upper() == 'COMP':
-        pdf_path = None
-        tokens = []
-        for arg in args[1:]:
-            if arg.lower().endswith('.pdf'):
-                pdf_path = arg
-            else:
-                tokens.append(arg)
-
-        days = None
-        if len(tokens) == 3:
-            try:
-                days = int(tokens[2])
-            except ValueError:
-                print(f"  [error] days must be a whole number, got '{tokens[2]}'.")
-                return
-            if days <= 0:
-                print(f"  [error] days must be positive, got {days}.")
-                return
-            tokens = tokens[:2]
-
-        if len(tokens) != 2:
-            print("Usage: python Option-OGN.py [--pdf] COMP <symbol1> <symbol2> [days]")
-            print("  Symbols may be any downloaded series (GLD, NIFTY, US10Y, "
-                  "RELIANCE, ...)")
-            print(f"  or a ratio written as NUM{RATIO_OPERATOR}DEN "
-                  f"(e.g. US02Y{RATIO_OPERATOR}US10Y).")
-            print("  days  optional - analyse only the most recent N days.")
-            print("        Omitted: use the full overlap of the two series.")
-            return
-
-        if use_pdf and not pdf_path:
-            suffix = f"_{days}d" if days else ""
-            pdf_path = (f"charts/COMP_{tokens[0].upper()}_vs_"
-                        f"{tokens[1].upper()}{suffix}.pdf")
-
-        try:
-            compare_series(tokens[0], tokens[1], days=days,
-                           pdf_path=pdf_path if use_pdf else None)
-        except (ValueError, FileNotFoundError) as e:
-            print(f"  [error] {e}")
-        return
-
-    symbol = None
     pdf_path = None
-
+    tokens = []
     for arg in args:
         if arg.lower().endswith('.pdf'):
             pdf_path = arg
         else:
-            symbol = arg.upper()
+            tokens.append(arg)
+
+    days = None
+    if tokens and tokens[-1].lstrip('+-').isdigit():
+        days = int(tokens.pop())
+        if days <= 0:
+            print(f"  [error] days must be positive, got {days}.")
+            return
+
+    if len(tokens) > 2:
+        print("Usage: python Option-OGN.py [--pdf] [symbol] [compare_symbol] [days]")
+        print("  symbol          full technical analysis for this series")
+        print("  compare_symbol  optional - append a statistical comparison")
+        print(f"  days            optional - restrict the comparison to the last N days")
+        print(f"  Symbols may come from any downloaded source, or be a ratio")
+        print(f"  written as NUM{RATIO_OPERATOR}DEN (e.g. US02Y{RATIO_OPERATOR}US10Y).")
+        return
+
+    symbol = tokens[0].upper() if len(tokens) >= 1 else None
+    compare_with = tokens[1].upper() if len(tokens) == 2 else None
+
+    if days and not compare_with:
+        print("  [error] days only applies when a second symbol is given.")
+        return
 
     if use_pdf and not pdf_path:
-        if symbol:
+        if symbol and compare_with:
+            suffix = f"_{days}d" if days else ""
+            pdf_path = f"charts/{symbol}_vs_{compare_with}{suffix}_Analysis.pdf"
+        elif symbol:
             pdf_path = f"charts/{symbol}_Analysis.pdf"
         else:
             pdf_path = "charts/FnO_Analysis.pdf"
 
-    FnOAnalysis(single_scrip=symbol, pdf_path=pdf_path if use_pdf else None)
+    try:
+        FnOAnalysis(single_scrip=symbol,
+                    pdf_path=pdf_path if use_pdf else None,
+                    compare_with=compare_with,
+                    days=days)
+    except (ValueError, FileNotFoundError) as e:
+        print(f"  [error] {e}")
 
 
 if __name__ == "__main__":
