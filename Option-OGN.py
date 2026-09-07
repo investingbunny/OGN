@@ -9,7 +9,10 @@ multi-panel technical analysis charts including:
   - Max Pain analysis (options)
   - Futures fair-value vs settle-price overlay
   - Renko charts
-  - Support / resistance trendlines (optional, requires trendln)
+  - Support / resistance regression trendlines (scipy pivots + numpy polyfit)
+
+Report pages, in order: technical -> trendlines -> volatility -> comparison.
+Edit REPORT_SECTIONS to drop any of them.
 
 Usage:
     python Option-OGN.py                          # analyse all FnO symbols (interactive)
@@ -17,6 +20,10 @@ Usage:
     python Option-OGN.py WTI US02Y__US10Y          # ... plus a statistical comparison
     python Option-OGN.py WTI US02Y__US10Y 250      # ... over the last 250 days
     python Option-OGN.py --estimator Raw WTI       # pick the volatility estimator
+    python Option-OGN.py --trend-bars 250 GLD      # widen the trendline lookback
+    python Option-OGN.py --trend-distance 20 GLD   # demand 20 bars between pivots
+    python Option-OGN.py --trend-prominence 5 GLD  # absolute prominence, in price units
+    python Option-OGN.py --trend-prominence-pct 5 GLD  # auto-scale off 5% of the range
     python Option-OGN.py --pdf                     # all FnO symbols -> charts/FnO_Analysis.pdf
     python Option-OGN.py --pdf WTI                 # single symbol -> charts/WTI_Analysis.pdf
     python Option-OGN.py --pdf output.pdf          # custom output file
@@ -45,13 +52,7 @@ import seaborn as sns
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import coint, grangercausalitytests
 from scipy.stats import norm
-
-# Optional: trendln for support/resistance trendlines
-try:
-    import trendln
-    HAS_TRENDLN = True
-except ImportError:
-    HAS_TRENDLN = False
+from scipy.signal import find_peaks
 
 # Optional: stocktrends for Renko (pip install stocktrends)
 try:
@@ -138,9 +139,17 @@ RiskFreeRate = 0.065  # ~6.5% annualised (adjust as needed)
 # Comment out any line to drop that section from the generated report.
 REPORT_SECTIONS = [
     'technical',    # multi-panel indicator chart for the first symbol
+    'trendlines',   # candlestick page with support / resistance regression lines
     'volatility',   # volatility cone / rolling / histogram page
     'comparison',   # statistical comparison, only when a second symbol is given
 ]
+
+# ── Trendline page defaults (override on the CLI) ─────────────────────────
+TREND_BARS = 180              # Trailing bars fed to the pivot search
+TREND_DISTANCE = 12           # Minimum bars between two pivots of the same kind
+TREND_PROMINENCE_PCT = 0.02   # Pivot must clear 2% of the window's high-low range
+TREND_RESISTANCE_COLOUR = '#ef5350'
+TREND_SUPPORT_COLOUR = '#26a69a'
 
 # Comment out any line to drop that panel from the volatility page.
 VOLATILITY_PANELS = [
@@ -886,23 +895,250 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     else:
         plt.show()
 
-    # ── Trendlines (optional) ─────────────────────────────────────────
-    if HAS_TRENDLN:
-        try:
-            tl_data = data.copy()
-            mins, maxs = trendln.calc_support_resistance(
-                (tl_data['Low'], tl_data['High']))
-            fig3 = trendln.plot_sup_res_date(
-                (tl_data['Low'], tl_data['High']), tl_data.index)
-            fig3.set_size_inches((16, 9))
-            if pdf_pages:
-                pdf_pages.savefig(fig3)
-                plt.close(fig3)
-            else:
-                plt.show()
-            plt.clf()
-        except Exception as e:
-            print(f"  [warn] trendln failed: {e}")
+
+# ---------------------------------------------------------------------------
+# Support / resistance trendlines (scipy pivots + OLS regression)
+# ---------------------------------------------------------------------------
+
+def find_pivots(highs, lows, distance=TREND_DISTANCE, prominence=None,
+                prominence_pct=TREND_PROMINENCE_PCT):
+    """Locate resistance peaks and support valleys with scipy.signal.find_peaks.
+
+    Support valleys are found by running the same peak search over the negated
+    lows.  `prominence` is taken as an absolute price move when supplied;
+    otherwise it is derived from the window's own high-low range so one setting
+    works on a 25,000-point index and on a 0.5 yield ratio alike.
+
+    Returns:
+        (resistance_idx, support_idx, prominence_used)
+    """
+    span = float(np.nanmax(highs) - np.nanmin(lows))
+    if prominence is None:
+        prominence = span * prominence_pct
+    # A dead-flat window has no span to scale off, and find_peaks rejects 0.
+    if not np.isfinite(prominence) or prominence <= 0:
+        prominence = None
+
+    resistance_idx, _ = find_peaks(highs, distance=distance, prominence=prominence)
+    support_idx, _ = find_peaks(-lows, distance=distance, prominence=prominence)
+    return resistance_idx, support_idx, prominence
+
+
+def fit_pivot_line(x, y, pivot_idx, fallback):
+    """Least-squares line through the pivots, or a flat line if there are <2.
+
+    x is the sequential bar number, never the date, so the fit is immune to
+    calendar gaps and to matplotlib's date scaling.
+
+    Returns:
+        (slope, intercept, fitted)
+    """
+    if len(pivot_idx) >= 2:
+        slope_, intercept_ = np.polyfit(x[pivot_idx], y[pivot_idx], 1)
+        return float(slope_), float(intercept_), True
+    return 0.0, float(fallback), False
+
+
+def compute_trendlines(price_data, bars=TREND_BARS, distance=TREND_DISTANCE,
+                       prominence=None, prominence_pct=TREND_PROMINENCE_PCT):
+    """Fit support and resistance regression lines over the last `bars` rows.
+
+    Args:
+        price_data:     Date-indexed frame carrying Open/High/Low/Close.
+        bars:           Trailing bars to fit over; None or 0 uses all history.
+        distance:       Minimum bars between two pivots of the same kind.
+        prominence:     Absolute prominence in price units; None auto-scales.
+        prominence_pct: Fraction of the window range used when auto-scaling.
+
+    Returns:
+        dict holding the window, pivot indices, line coefficients, the
+        mplfinance `alines` payload and the derived channel statistics.
+    """
+    frame = price_data.copy()
+    missing = {'Open', 'High', 'Low', 'Close'} - set(frame.columns)
+    if missing:
+        raise ValueError(f"missing OHLC columns: {', '.join(sorted(missing))}")
+
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        frame.index = pd.DatetimeIndex(pd.to_datetime(frame.index, errors='coerce'))
+    frame = frame[frame.index.notna()].sort_index()
+
+    for column in ('Open', 'High', 'Low', 'Close'):
+        frame[column] = pd.to_numeric(frame[column], errors='coerce')
+    frame = frame.dropna(subset=['Open', 'High', 'Low', 'Close'])
+    if 'Volume' in frame.columns:
+        frame['Volume'] = pd.to_numeric(frame['Volume'], errors='coerce').fillna(0.0)
+    else:
+        frame['Volume'] = 0.0
+
+    window = frame.tail(bars) if bars else frame
+    minimum = 2 * distance + 1
+    if len(window) < minimum:
+        raise ValueError(
+            f"only {len(window)} usable bars - need at least {minimum} to fit "
+            f"two pivots {distance} bars apart.")
+
+    highs = window['High'].to_numpy(dtype=float)
+    lows = window['Low'].to_numpy(dtype=float)
+    x = np.arange(len(window))
+
+    resistance_idx, support_idx, prominence_used = find_pivots(
+        highs, lows, distance, prominence, prominence_pct)
+
+    slope_res, intercept_res, fitted_res = fit_pivot_line(
+        x, highs, resistance_idx, highs.mean())
+    slope_sup, intercept_sup, fitted_sup = fit_pivot_line(
+        x, lows, support_idx, lows.mean())
+
+    last = len(window) - 1
+    res_start, res_end = intercept_res, slope_res * last + intercept_res
+    sup_start, sup_end = intercept_sup, slope_sup * last + intercept_sup
+
+    start_date, end_date = window.index[0], window.index[-1]
+    alines = [
+        [(start_date, res_start), (end_date, res_end)],
+        [(start_date, sup_start), (end_date, sup_end)],
+    ]
+
+    width_start, width_end = res_start - sup_start, res_end - sup_end
+    if width_start > 0 and width_end > 0:
+        ratio = width_end / width_start
+        channel = ('widening' if ratio > 1.05
+                   else 'narrowing' if ratio < 0.95 else 'parallel')
+    else:
+        channel = 'crossed'  # the fitted lines intersect inside the window
+
+    return {
+        'window': window,
+        'bars': len(window),
+        'resistance_idx': resistance_idx,
+        'support_idx': support_idx,
+        'prominence': prominence_used,
+        'prominence_pct': None if prominence is not None else prominence_pct,
+        'resistance': {'slope': slope_res, 'intercept': intercept_res,
+                       'start': res_start, 'end': res_end, 'fitted': fitted_res},
+        'support': {'slope': slope_sup, 'intercept': intercept_sup,
+                    'start': sup_start, 'end': sup_end, 'fitted': fitted_sup},
+        'alines': alines,
+        'channel': channel,
+        'width_start': width_start,
+        'width_end': width_end,
+    }
+
+
+def _trend_line_summary(line):
+    """One monospaced stats row describing a fitted trendline."""
+    if not line['fitted']:
+        return "           flat fallback - too few pivots to fit"
+    move = line['end'] - line['start']
+    if line['start'] != 0:
+        change = f"{move / abs(line['start']) * 100:+.1f}% over window"
+    else:
+        change = f"{move:+.4g} over window"
+    return f"           slope {line['slope']:+.4g}/bar   {change}"
+
+
+def plot_trendlines(profile, ticker, pdf_pages=None):
+    """Render the price page with the two regression trendlines overlaid."""
+    window = profile['window']
+    resistance_idx = profile['resistance_idx']
+    support_idx = profile['support_idx']
+
+    style = mpf.make_mpf_style(base_mpf_style='charles', gridstyle='',
+                               rc={'font.size': 15})
+
+    # An all-NaN addplot upsets mplfinance, so only mark pivots that exist.
+    addplots = []
+    for idx, source, marker, colour in (
+            (resistance_idx, 'High', 'v', TREND_RESISTANCE_COLOUR),
+            (support_idx, 'Low', '^', TREND_SUPPORT_COLOUR)):
+        if len(idx) == 0:
+            continue
+        marks = pd.Series(np.nan, index=window.index)
+        marks.iloc[idx] = window[source].to_numpy(dtype=float)[idx]
+        addplots.append(mpf.make_addplot(
+            marks, type='scatter', marker=marker, markersize=90, color=colour))
+
+    # Flat-bar sources (macro, ratios) collapse candles to invisible dots.
+    flat = not _has_intraday_range(window)
+
+    title = (f"\n{ticker}   Regression Trendlines   |   "
+             f"{window.index[0]:%d-%b-%Y} \u2192 {window.index[-1]:%d-%b-%Y}   |   "
+             f"{profile['bars']:,} bars"
+             + ("   |   flat bars: line view" if flat else ""))
+
+    # Flat-bar sources carry Volume 0, so the volume axis gets a zero-height
+    # ylim; keep the panel, drop matplotlib's complaint about it.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            'ignore', message='Attempting to set identical low and high ylims')
+        figure, axes = mpf.plot(
+            window,
+            type='line' if flat else 'candle',
+            style=style,
+            volume=True,
+            alines=dict(alines=profile['alines'],
+                        colors=[TREND_RESISTANCE_COLOUR, TREND_SUPPORT_COLOUR],
+                        linewidths=2.5,
+                        alpha=0.85),
+            addplot=addplots if addplots else None,
+            figsize=(30, 17),
+            title=dict(title=title, fontsize=30, fontweight='bold'),
+            ylabel='Price',
+            ylabel_lower='Volume',
+            returnfig=True,
+        )
+
+    if profile['prominence'] is None:
+        prominence_row = "Prominence n/a - flat window, every local high accepted"
+    elif profile['prominence_pct'] is None:
+        prominence_row = f"Prominence {profile['prominence']:.4g}  (absolute)"
+    else:
+        prominence_row = (f"Prominence {profile['prominence']:.4g}  "
+                          f"({profile['prominence_pct'] * 100:.1f}% of range)")
+
+    lines = [
+        f"Resistance {len(resistance_idx)} pivots",
+        _trend_line_summary(profile['resistance']),
+        f"Support    {len(support_idx)} pivots",
+        _trend_line_summary(profile['support']),
+        f"Channel    {profile['channel']} "
+        f"({profile['width_start']:.4g} \u2192 {profile['width_end']:.4g})",
+        prominence_row,
+    ]
+    # A rising trend leaves the top-left corner empty, a falling one the right.
+    rising = profile['resistance']['slope'] >= 0
+    box_x, box_align = (0.012, 'left') if rising else (0.988, 'right')
+    axes[0].text(
+        box_x, 0.97, "\n".join(lines), transform=axes[0].transAxes,
+        va='top', ha=box_align, ma='left', fontsize=15, family='monospace',
+        bbox=dict(boxstyle='round,pad=0.6', facecolor='white', alpha=0.85,
+                  edgecolor='#cccccc'))
+
+    if pdf_pages:
+        pdf_pages.savefig(figure)
+        plt.close(figure)
+    else:
+        plt.show()
+
+
+def trendline_analysis(price_data, ticker, bars=TREND_BARS,
+                       distance=TREND_DISTANCE, prominence=None,
+                       prominence_pct=TREND_PROMINENCE_PCT, pdf_pages=None):
+    """Compute and render the trendline page for one symbol."""
+    profile = compute_trendlines(price_data, bars=bars, distance=distance,
+                                 prominence=prominence,
+                                 prominence_pct=prominence_pct)
+
+    used = profile['prominence']
+    print(f"  [trendlines] {profile['bars']} bars, "
+          f"{len(profile['resistance_idx'])} resistance / "
+          f"{len(profile['support_idx'])} support pivots, "
+          f"prominence {'none' if used is None else format(used, '.4g')}, "
+          f"channel {profile['channel']}")
+
+    plot_trendlines(profile, ticker, pdf_pages=pdf_pages)
+    return profile
 
 
 # ---------------------------------------------------------------------------
@@ -910,19 +1146,27 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
 # ---------------------------------------------------------------------------
 
 def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
-                compare_with=None, days=None, estimator=DEFAULT_ESTIMATOR):
+                compare_with=None, days=None, estimator=DEFAULT_ESTIMATOR,
+                trend_bars=TREND_BARS, trend_distance=TREND_DISTANCE,
+                trend_prominence=None,
+                trend_prominence_pct=TREND_PROMINENCE_PCT):
     """Run technical analysis for each symbol in the list.
 
     Sections are driven by REPORT_SECTIONS, so any of them can be commented out.
 
     Args:
-        scrip_list:   List of symbols to analyse (default: NSEFnOList)
-        single_scrip: If set, analyse only this one symbol
-        pdf_path:     If set, save all charts to this PDF file
-        compare_with: If set, append a statistical comparison of the analysed
-                      symbol against this second series
-        days:         Window (in observations) for that comparison
-        estimator:    Volatility estimator name (see ESTIMATORS)
+        scrip_list:           List of symbols to analyse (default: NSEFnOList)
+        single_scrip:         If set, analyse only this one symbol
+        pdf_path:             If set, save all charts to this PDF file
+        compare_with:         If set, append a statistical comparison of the
+                              analysed symbol against this second series
+        days:                 Window (in observations) for that comparison
+        estimator:            Volatility estimator name (see ESTIMATORS)
+        trend_bars:           Trailing bars used by the trendline page
+        trend_distance:       Minimum bars between two trendline pivots
+        trend_prominence:     Absolute pivot prominence; None auto-scales
+        trend_prominence_pct: Fraction of the window range used when
+                              auto-scaling the prominence
     """
     if single_scrip:
         symbols = [single_scrip]
@@ -1018,6 +1262,17 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         if 'technical' in REPORT_SECTIONS:
             display_bars = min(25, len(Indicatordf))
             plot_chart(Indicatordf, display_bars, Scrip, 0, pdf_pages=pdf_pages)
+
+        # ── Support / resistance trendlines ───────────────────────────
+        if 'trendlines' in REPORT_SECTIONS:
+            try:
+                trendline_analysis(OHLCdf.set_index('Date'), Scrip,
+                                   bars=trend_bars, distance=trend_distance,
+                                   prominence=trend_prominence,
+                                   prominence_pct=trend_prominence_pct,
+                                   pdf_pages=pdf_pages)
+            except (ValueError, KeyError) as e:
+                print(f"  [trendlines skipped] {e}")
 
         # ── Volatility profile ────────────────────────────────────────
         if 'volatility' in REPORT_SECTIONS:
@@ -1970,6 +2225,29 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _take_flag_value(args, flag):
+    """Pop `--flag value` out of args in place; returns the value or None."""
+    if flag not in args:
+        return None
+    position = args.index(flag)
+    if position + 1 >= len(args):
+        raise ValueError(f"{flag} needs a value.")
+    value = args[position + 1]
+    del args[position:position + 2]
+    return value
+
+
+def _positive_number(text, flag, cast):
+    """Parse and range-check one numeric CLI value."""
+    try:
+        value = cast(text)
+    except ValueError:
+        raise ValueError(f"{flag} expects a number, got '{text}'.")
+    if value <= 0:
+        raise ValueError(f"{flag} must be positive, got {text}.")
+    return value
+
+
 def main():
     """CLI entry point.
 
@@ -1979,6 +2257,10 @@ def main():
         python Option-OGN.py WTI US02Y__US10Y         # ... plus a comparison
         python Option-OGN.py WTI US02Y__US10Y 250     # ... over the last 250 days
         python Option-OGN.py --estimator Raw WTI      # choose the volatility estimator
+        python Option-OGN.py --trend-bars 250 GLD     # widen the trendline lookback
+        python Option-OGN.py --trend-distance 20 GLD  # demand 20 bars between pivots
+        python Option-OGN.py --trend-prominence 5 GLD # absolute prominence, price units
+        python Option-OGN.py --trend-prominence-pct 5 GLD  # auto-scale off 5% of range
         python Option-OGN.py --pdf                    # all FnO -> charts/FnO_Analysis.pdf
         python Option-OGN.py --pdf WTI                # -> charts/WTI_Analysis.pdf
         python Option-OGN.py --pdf WTI US02Y__US10Y   # -> charts/WTI_vs_US02Y__US10Y_Analysis.pdf
@@ -1988,6 +2270,35 @@ def main():
     use_pdf = '--pdf' in args
     if use_pdf:
         args.remove('--pdf')
+
+    try:
+        raw_bars = _take_flag_value(args, '--trend-bars')
+        raw_distance = _take_flag_value(args, '--trend-distance')
+        raw_prominence = _take_flag_value(args, '--trend-prominence')
+        raw_prominence_pct = _take_flag_value(args, '--trend-prominence-pct')
+        if raw_prominence is not None and raw_prominence_pct is not None:
+            raise ValueError("--trend-prominence and --trend-prominence-pct are "
+                             "mutually exclusive; the absolute value would win.")
+        trend_bars = (TREND_BARS if raw_bars is None
+                      else _positive_number(raw_bars, '--trend-bars', int))
+        trend_distance = (TREND_DISTANCE if raw_distance is None
+                          else _positive_number(raw_distance, '--trend-distance', int))
+        trend_prominence = (None if raw_prominence is None
+                            else _positive_number(raw_prominence,
+                                                  '--trend-prominence', float))
+        trend_prominence_pct = (
+            TREND_PROMINENCE_PCT if raw_prominence_pct is None
+            else _positive_number(raw_prominence_pct,
+                                  '--trend-prominence-pct', float) / 100.0)
+    except ValueError as e:
+        print(f"  [error] {e}")
+        return
+
+    if trend_bars < 2 * trend_distance + 1:
+        print(f"  [error] --trend-bars {trend_bars} cannot hold two pivots "
+              f"{trend_distance} bars apart; needs at least "
+              f"{2 * trend_distance + 1}.")
+        return
 
     estimator = DEFAULT_ESTIMATOR
     if '--estimator' in args:
@@ -2026,12 +2337,18 @@ def main():
 
     if len(tokens) > 2:
         print("Usage: python Option-OGN.py [--pdf] [--estimator NAME] "
+              "[--trend-bars N] [--trend-distance N] [--trend-prominence X] "
               "[symbol] [compare_symbol] [days]")
-        print("  symbol          full technical analysis for this series")
-        print("  compare_symbol  optional - append a statistical comparison")
-        print("  days            optional - restrict the comparison to the last N days")
-        print(f"  --estimator     optional - default {DEFAULT_ESTIMATOR}; one of: "
+        print("  symbol            full technical analysis for this series")
+        print("  compare_symbol    optional - append a statistical comparison")
+        print("  days              optional - restrict the comparison to the last N days")
+        print(f"  --estimator       optional - default {DEFAULT_ESTIMATOR}; one of: "
               f"{', '.join(ESTIMATORS)}")
+        print(f"  --trend-bars      optional - default {TREND_BARS}; trendline lookback")
+        print(f"  --trend-distance  optional - default {TREND_DISTANCE}; min bars between pivots")
+        print(f"  --trend-prominence     optional - absolute pivot prominence, price units")
+        print(f"  --trend-prominence-pct optional - default "
+              f"{TREND_PROMINENCE_PCT * 100:.0f}; percent of the window range")
         print(f"  Symbols may come from any downloaded source, or be a ratio")
         print(f"  written as NUM{RATIO_OPERATOR}DEN (e.g. US02Y{RATIO_OPERATOR}US10Y).")
         return
@@ -2057,7 +2374,11 @@ def main():
                     pdf_path=pdf_path if use_pdf else None,
                     compare_with=compare_with,
                     days=days,
-                    estimator=estimator)
+                    estimator=estimator,
+                    trend_bars=trend_bars,
+                    trend_distance=trend_distance,
+                    trend_prominence=trend_prominence,
+                    trend_prominence_pct=trend_prominence_pct)
     except (ValueError, FileNotFoundError) as e:
         print(f"  [error] {e}")
 
