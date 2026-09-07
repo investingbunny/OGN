@@ -12,7 +12,9 @@ def get_estimator(price_data, window=30, trading_periods=252, clean=True):
     rs = log_ho * (log_ho - log_co) + log_lo * (log_lo - log_co)
 
     def f(v):
-        return trading_periods * v.mean()**0.5
+        # Annualise by sqrt(trading_periods); multiplying by the period count
+        # itself overstated the result by sqrt(252).
+        return math.sqrt(trading_periods * v.mean())
     
     result = rs.rolling(
         window=window,
