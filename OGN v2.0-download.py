@@ -83,9 +83,18 @@ WDM_PROCESSED = DATA_ROOT / "WDM" / "Processed"
 MACRO_PROCESSED = DATA_ROOT / "Macro" / "Processed"
 
 # Shared schema for every file in Macro/Processed.
-MACRO_COLUMNS = ['Date', 'Symbol', 'Value', 'Series', 'Name', 'Unit', 'Source']
+MACRO_COLUMNS = [
+    'Date', 'Symbol', 'Value', 'Series', 'Name', 'Unit', 'Source',
+    'Frequency', 'Description',
+]
+MACRO_STRING_COLUMNS = (
+    'Symbol', 'Series', 'Name', 'Unit', 'Source', 'Frequency', 'Description',
+)
 MACRO_MAX_HISTORY_YEARS = 50   # First-run lookback when no stored history exists
-MACRO_REFRESH_OVERLAP_DAYS = 10  # Trailing window re-fetched to pick up revisions
+MACRO_REFRESH_OVERLAP_DAYS = 10
+FRED_REVISION_OVERLAP_DAYS = 400
+# World Bank restates annual series for several years after first publication.
+WORLDBANK_REVISION_OVERLAP_DAYS = 1825
 
 # Comment out any line below to skip that FRED series.
 # Format: (stored symbol, FRED series ID, display name, unit)
@@ -105,7 +114,120 @@ FRED_SERIES = [
     ("WTI", "DCOILWTICO", "Crude Oil Prices: West Texas Intermediate", "USD per Barrel"),
     ("EURUSD", "DEXUSEU", "US Dollar to Euro Spot Exchange Rate", "USD per EUR"),
     ("STLFSI", "STLFSI4", "St. Louis Fed Financial Stress Index", "Index"),
+    ("USGDP", "GDPC1", "Real Gross Domestic Product (Quarterly)", "Billions of Chained 2017 USD"),
+    ("PAYEMS", "PAYEMS", "Total Nonfarm Payrolls (Monthly)", "Thousands of Persons"),
+    ("UNRATE", "UNRATE", "Unemployment Rate (Monthly)", "Percent"),
+    ("USCPI", "CPIAUCSL", "Consumer Price Index for All Urban Consumers: All Items (Monthly)", "Index 1982-1984=100"),
+    ("USPCE", "PCEPI", "Personal Consumption Expenditures Price Index (Monthly)", "Index 2017=100"),
+    ("FEDFUNDS", "FEDFUNDS", "Effective Federal Funds Rate (Monthly)", "Percent"),
+    ("US10YM", "GS10", "10-Year Treasury Constant Maturity Rate (Monthly Average)", "Percent"),
+    ("HOUST", "HOUST", "Housing Starts: New Privately Owned Housing Units Started (Monthly)", "Thousands of Units"),
+    ("INDPRO", "INDPRO", "Industrial Production Index (Monthly)", "Index 2017=100"),
+    ("USRETAIL", "RSXFS", "Advance Retail Sales: Retail and Food Services (Monthly)", "Millions of USD"),
+    # India. Only series that still return data are listed; NSE/RBI/MoSPI
+    # publish no machine-readable feed this pipeline can consume directly.
+    ("INTRADEBAL", "XTNTVA01INM667S", "India Merchandise Trade Balance (Monthly)", "USD"),
+    ("INCPI", "INDCPIALLMINMEI", "India Consumer Price Index: All Items (Monthly)", "Index 2015=100"),
+    ("INPOLRATE", "INTDSRINM193N", "India Central Bank Policy/Discount Rate (Monthly)", "Percent"),
 ]
+
+FRED_SERIES_METADATA = {
+    "GDPC1": (
+        "Quarterly",
+        "The ultimate headline measure of overall economic output adjusted for inflation. "
+        "It aggregates total consumer spending, business investment, government spending, "
+        "and net exports.",
+    ),
+    "PAYEMS": (
+        "Monthly",
+        "A cornerstone employment metric tracking the total number of paid U.S. workers "
+        "excluding farm workers and private household employees. It serves as a real-time "
+        "health check for business hiring momentum.",
+    ),
+    "UNRATE": (
+        "Monthly",
+        "Measures the percentage of the labor force that is jobless and actively seeking "
+        "employment. It is a primary lagging indicator watched closely by central banks "
+        "for labor market slack.",
+    ),
+    "CPIAUCSL": (
+        "Monthly",
+        "The most widely cited gauge of headline consumer inflation, measuring average "
+        "price changes across a standard basket of consumer goods and services.",
+    ),
+    "PCEPI": (
+        "Monthly",
+        "The Federal Reserve's preferred measure of inflation. It accounts for consumer "
+        "substitution across products better than the CPI, making it critical for monetary "
+        "policy tracking.",
+    ),
+    "FEDFUNDS": (
+        "Monthly",
+        "The foundational benchmark interest rate set by the Federal Reserve, which heavily "
+        "dictates broader borrowing costs across the entire financial system.",
+    ),
+    "GS10": (
+        "Monthly",
+        "The benchmark for long-term debt, driving mortgage rates, corporate bonds, and "
+        "long-term financial forecasting. Its relationship with short-term rates forms "
+        "the yield curve.",
+    ),
+    "HOUST": (
+        "Monthly",
+        "A powerful leading indicator tracking residential construction activity. Housing "
+        "data typically reacts swiftly to shifting interest rates and consumer confidence.",
+    ),
+    "INDPRO": (
+        "Monthly",
+        "Measures real output across the manufacturing, mining, electric, and gas utilities "
+        "sectors. It provides a direct lens into the physical production side of the economy, "
+        "independent of services.",
+    ),
+    "RSXFS": (
+        "Monthly",
+        "Captures shifts in consumer spending across retail and food services.",
+    ),
+    "XTNTVA01INM667S": (
+        "Monthly",
+        "Measures the gap between India's merchandise exports and imports, tracking "
+        "vulnerability to global commodity shocks and capital flows.",
+    ),
+    "INDCPIALLMINMEI": (
+        "Monthly",
+        "The headline retail inflation metric tracking price changes across a standard "
+        "consumer basket; the core anchor for Reserve Bank of India monetary policy. "
+        "The OECD stopped updating this series after March 2025.",
+    ),
+    "INTDSRINM193N": (
+        "Monthly",
+        "The benchmark rate at which the central bank lends short-term funds to commercial "
+        "banks, steering liquidity, credit conditions and systemic borrowing costs. "
+        "The IMF stopped updating this series after July 2022.",
+    ),
+}
+
+# Comment out any line below to skip that World Bank series.
+# Format: (stored symbol, indicator code, ISO3 country, display name, unit)
+WORLDBANK_SERIES = [
+    ("INGDPGR", "NY.GDP.MKTP.KD.ZG", "IND", "India Real GDP Growth Rate (Annual)", "Percent"),
+    ("INUNRATE", "SL.UEM.TOTL.ZS", "IND", "India Unemployment Rate (Annual)", "Percent"),
+]
+
+WORLDBANK_SERIES_METADATA = {
+    "NY.GDP.MKTP.KD.ZG": (
+        "Annual",
+        "The primary headline measure of India's overall economic output adjusted for "
+        "inflation, aggregating performance across agriculture, industry and services. "
+        "MoSPI publishes this quarterly but offers no machine-readable feed, so the "
+        "World Bank annual series is used.",
+    ),
+    "SL.UEM.TOTL.ZS": (
+        "Annual",
+        "Share of the labour force that is jobless and actively seeking work, on the ILO "
+        "modelled estimate. Stands in for the MoSPI Periodic Labour Force Survey, which "
+        "has no machine-readable feed.",
+    ),
+}
 
 # Comment out any line below to skip that Yahoo Finance series.
 # Format: (stored symbol, Yahoo ticker, display name, unit)
@@ -550,69 +672,165 @@ class NSEMarketDataDownloader:
         """Downloads one FRED series from `start_date` onwards.
 
         Tolerates FRED's legacy `DATE` header alongside the current
-        `observation_date`, and any casing of the value column.
+        `observation_date`, and any casing of the value column. HTTP and
+        content/parse failures are retried with exponential backoff.
         """
         url = (f"https://fred.stlouisfed.org/graph/fredgraph.csv"
                f"?id={series_id}&cosd={start_date.isoformat()}")
 
-        content = None
         last_error = None
         for attempt in range(self.MACRO_MAX_RETRIES):
+            retry_delay = float(2 ** attempt)
             try:
                 response = requests.get(url, timeout=30 + attempt * 15)
                 if response.status_code == 404:
                     return None
+                if response.status_code == 429:
+                    try:
+                        retry_delay = max(
+                            retry_delay, float(response.headers.get('Retry-After', 0)))
+                    except (TypeError, ValueError):
+                        pass
                 response.raise_for_status()
                 content = response.content
-                break
-            except requests.exceptions.RequestException as e:
+                if not content.strip():
+                    raise DownloadFailedError(f"Empty FRED response for {series_id}")
+                head = content[:200].lstrip().lower()
+                if head.startswith(b'<!doctype html') or head.startswith(b'<html'):
+                    raise DownloadFailedError(
+                        f"FRED returned an HTML page for {series_id}")
+
+                try:
+                    df = pd.read_csv(
+                        io.BytesIO(content),
+                        na_values=['.', 'NA', 'N/A', 'null', 'NaN'],
+                    )
+                except Exception as e:
+                    raise DownloadFailedError(
+                        f"Could not parse FRED CSV for {series_id}: {e}") from e
+
+                if df.empty:
+                    return None
+                if len(df.columns) < 2:
+                    raise DownloadFailedError(
+                        f"Incomplete FRED CSV for {series_id}: {list(df.columns)}")
+
+                date_col = self._pick_column(
+                    df.columns,
+                    ('observation_date', 'date', 'time_period', 'datetime', 'timestamp'),
+                )
+                if date_col is None:
+                    date_col = df.columns[0]
+
+                value_col = self._pick_column(
+                    df.columns, (series_id.lower(), 'value'))
+                if value_col is None:
+                    remaining = [c for c in df.columns if c != date_col]
+                    if not remaining:
+                        raise DownloadFailedError(
+                            f"No value column in FRED CSV for {series_id}: "
+                            f"{list(df.columns)}")
+                    value_col = remaining[0]
+
+                frequency, description = FRED_SERIES_METADATA.get(
+                    series_id, ('', ''))
+                out = df[[date_col, value_col]].rename(
+                    columns={date_col: 'Date', value_col: 'Value'})
+                out['Symbol'] = symbol
+                out['Series'] = series_id
+                out['Name'] = name
+                out['Unit'] = unit
+                out['Source'] = 'FRED'
+                out['Frequency'] = frequency
+                out['Description'] = description
+
+                out = self._macro_normalize(out)
+                out = out[out['Date'] >= start_date]
+                return out if not out.empty else None
+            except (requests.exceptions.RequestException, DownloadFailedError) as e:
                 last_error = e
                 if attempt < self.MACRO_MAX_RETRIES - 1:
-                    time.sleep(2 ** attempt)
-        if content is None:
-            raise DownloadFailedError(
-                f"FRED download failed for {series_id}: {last_error}")
+                    print(f"  [{symbol}] FRED attempt {attempt + 1}/"
+                          f"{self.MACRO_MAX_RETRIES} failed: {e}. "
+                          f"Retrying in {retry_delay:.0f}s.", flush=True)
+                    time.sleep(retry_delay)
 
-        if not content.strip():
-            raise DownloadFailedError(f"Empty FRED response for {series_id}")
-        head = content[:200].lstrip().lower()
-        if head.startswith(b'<!doctype html') or head.startswith(b'<html'):
-            raise DownloadFailedError(f"FRED returned an HTML page for {series_id}")
+        raise DownloadFailedError(
+            f"FRED download failed for {series_id} after "
+            f"{self.MACRO_MAX_RETRIES} attempts: {last_error}")
 
-        try:
-            df = pd.read_csv(io.BytesIO(content),
-                             na_values=['.', 'NA', 'N/A', 'null', 'NaN'])
-        except Exception as e:
-            raise DownloadFailedError(
-                f"Could not parse FRED CSV for {series_id}: {e}") from e
+    WORLDBANK_BASE_URL = "https://api.worldbank.org/v2"
 
-        if df.empty or len(df.columns) < 2:
-            return None
+    def download_worldbank_series(self, symbol: str, indicator: str, country: str,
+                                  name: str, unit: str,
+                                  start_date: datetime.date) -> Optional[pd.DataFrame]:
+        """Downloads one World Bank indicator for `country` from `start_date`.
 
-        date_col = self._pick_column(
-            df.columns, ('observation_date', 'date', 'time_period', 'datetime', 'timestamp'))
-        if date_col is None:
-            date_col = df.columns[0]
+        The v2 API answers with [paging_metadata, observations]; annual points
+        carry a bare year in `date`, which normalises to 1 January of that year.
+        """
+        end_year = datetime.date.today().year
+        url = (f"{self.WORLDBANK_BASE_URL}/country/{country}/indicator/{indicator}"
+               f"?format=json&per_page=1000&date={start_date.year}:{end_year}")
 
-        value_col = self._pick_column(df.columns, (series_id.lower(), 'value'))
-        if value_col is None:
-            remaining = [c for c in df.columns if c != date_col]
-            if not remaining:
-                raise DownloadFailedError(
-                    f"No value column in FRED CSV for {series_id}: {list(df.columns)}")
-            value_col = remaining[0]
+        last_error = None
+        for attempt in range(self.MACRO_MAX_RETRIES):
+            retry_delay = float(2 ** attempt)
+            try:
+                response = requests.get(url, timeout=30 + attempt * 15)
+                if response.status_code == 404:
+                    return None
+                if response.status_code == 429:
+                    try:
+                        retry_delay = max(
+                            retry_delay, float(response.headers.get('Retry-After', 0)))
+                    except (TypeError, ValueError):
+                        pass
+                response.raise_for_status()
 
-        out = df[[date_col, value_col]].rename(
-            columns={date_col: 'Date', value_col: 'Value'})
-        out['Symbol'] = symbol
-        out['Series'] = series_id
-        out['Name'] = name
-        out['Unit'] = unit
-        out['Source'] = 'FRED'
+                try:
+                    payload = response.json()
+                except ValueError as e:
+                    raise DownloadFailedError(
+                        f"World Bank returned non-JSON for {indicator}: {e}") from e
 
-        out = self._macro_normalize(out)
-        out = out[out['Date'] >= start_date]
-        return out if not out.empty else None
+                # The API reports its own errors inside an HTTP 200 body.
+                if not isinstance(payload, list) or not payload:
+                    raise DownloadFailedError(
+                        f"World Bank error for {indicator}: {str(payload)[:160]}")
+                if len(payload) < 2 or payload[1] is None:
+                    return None
+
+                rows = [(o.get('date'), o.get('value')) for o in payload[1]
+                        if isinstance(o, dict) and o.get('value') is not None]
+                if not rows:
+                    return None
+
+                frequency, description = WORLDBANK_SERIES_METADATA.get(
+                    indicator, ('', ''))
+                out = pd.DataFrame(rows, columns=['Date', 'Value'])
+                out['Symbol'] = symbol
+                out['Series'] = indicator
+                out['Name'] = name
+                out['Unit'] = unit
+                out['Source'] = 'World Bank'
+                out['Frequency'] = frequency
+                out['Description'] = description
+
+                out = self._macro_normalize(out)
+                out = out[out['Date'] >= start_date]
+                return out if not out.empty else None
+            except (requests.exceptions.RequestException, DownloadFailedError) as e:
+                last_error = e
+                if attempt < self.MACRO_MAX_RETRIES - 1:
+                    print(f"  [{symbol}] World Bank attempt {attempt + 1}/"
+                          f"{self.MACRO_MAX_RETRIES} failed: {e}. "
+                          f"Retrying in {retry_delay:.0f}s.", flush=True)
+                    time.sleep(retry_delay)
+
+        raise DownloadFailedError(
+            f"World Bank download failed for {indicator} after "
+            f"{self.MACRO_MAX_RETRIES} attempts: {last_error}")
 
     def download_yahoo_series(self, symbol: str, ticker: str, name: str, unit: str,
                               start_date: Optional[datetime.date]) -> Optional[pd.DataFrame]:
@@ -675,6 +893,8 @@ class NSEMarketDataDownloader:
             out['Name'] = name
             out['Unit'] = unit
             out['Source'] = 'Yahoo'
+            out['Frequency'] = 'Daily'
+            out['Description'] = ''
 
             out = self._macro_normalize(out)
             if start_date is not None:
@@ -1978,7 +2198,8 @@ class NSEMarketDataDownloader:
         """Coerces any macro frame to MACRO_COLUMNS with date/float typing.
 
         Guards the ratio join, where a datetime64 'Date' in one file and a
-        python-date 'Date' in another would silently match nothing.
+        python-date 'Date' in another would silently match nothing. Metadata
+        is normalized to single-line Python strings for parquet and charts.
         """
         if df is None or df.empty:
             return pd.DataFrame(columns=MACRO_COLUMNS)
@@ -1989,9 +2210,11 @@ class NSEMarketDataDownloader:
                 out[col] = pd.NA
         out = out[MACRO_COLUMNS]
 
-        out['Date'] = pd.to_datetime(out['Date'], errors='coerce')
+        dates = pd.to_datetime(out['Date'], errors='coerce', utc=True)
+        out['Date'] = dates.dt.tz_convert(None).dt.normalize()
         values = out['Value']
-        if values.dtype == object:
+        if (pd.api.types.is_object_dtype(values.dtype)
+                or pd.api.types.is_string_dtype(values.dtype)):
             values = values.astype(str).str.replace(',', '', regex=False).str.strip()
         out['Value'] = pd.to_numeric(values, errors='coerce')
 
@@ -2000,8 +2223,14 @@ class NSEMarketDataDownloader:
             return pd.DataFrame(columns=MACRO_COLUMNS)
 
         out['Date'] = out['Date'].dt.date
-        for col in ('Symbol', 'Series', 'Name', 'Unit', 'Source'):
-            out[col] = out[col].astype(str)
+        for col in MACRO_STRING_COLUMNS:
+            text = out[col].astype('string').fillna('')
+            out[col] = (text.str.normalize('NFKC')
+                             .str.replace(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]',
+                                          ' ', regex=True)
+                             .str.replace(r'\s+', ' ', regex=True)
+                             .str.strip()
+                             .astype(object))
         return (out.drop_duplicates(subset=['Date'], keep='last')
                    .sort_values('Date')
                    .reset_index(drop=True))
@@ -2020,12 +2249,14 @@ class NSEMarketDataDownloader:
         return normalized if not normalized.empty else None
 
     @staticmethod
-    def _macro_incremental_start(existing: Optional[pd.DataFrame]) -> Optional[datetime.date]:
+    def _macro_incremental_start(
+            existing: Optional[pd.DataFrame],
+            overlap_days: int = MACRO_REFRESH_OVERLAP_DAYS) -> Optional[datetime.date]:
         """Start date for an incremental refresh, or None when no history exists."""
         if existing is None or existing.empty or 'Date' not in existing.columns:
             return None
         last = pd.Timestamp(existing['Date'].max())
-        return (last - pd.Timedelta(days=MACRO_REFRESH_OVERLAP_DAYS)).date()
+        return (last - pd.Timedelta(days=overlap_days)).date()
 
     def _macro_write(self, symbol: str, new_df: pd.DataFrame,
                      existing: Optional[pd.DataFrame]) -> pd.DataFrame:
@@ -2037,6 +2268,11 @@ class NSEMarketDataDownloader:
                 pd.concat([self._macro_normalize(existing), combined], ignore_index=True))
         if combined.empty:
             raise DownloadFailedError(f"No usable rows to write for {symbol}")
+
+        for col in MACRO_STRING_COLUMNS:
+            populated = combined.loc[combined[col] != '', col]
+            if not populated.empty:
+                combined.loc[combined[col] == '', col] = populated.iloc[-1]
 
         target = MACRO_PROCESSED / f"{symbol}.parquet"
         temp_target = target.with_suffix('.parquet.tmp')
@@ -2057,7 +2293,12 @@ class NSEMarketDataDownloader:
         for symbol, series_id, name, unit in FRED_SERIES:
             try:
                 existing = self._macro_read(symbol)
-                start = self._macro_incremental_start(existing)
+                overlap_days = (
+                    FRED_REVISION_OVERLAP_DAYS
+                    if series_id in FRED_SERIES_METADATA
+                    else MACRO_REFRESH_OVERLAP_DAYS
+                )
+                start = self._macro_incremental_start(existing, overlap_days)
                 if start is None:
                     start = (pd.Timestamp(datetime.date.today())
                              - pd.DateOffset(years=MACRO_MAX_HISTORY_YEARS)).date()
@@ -2073,11 +2314,37 @@ class NSEMarketDataDownloader:
             except Exception as e:
                 print(f"  [{symbol}] Update failed: {type(e).__name__}: {e}", flush=True)
 
+    def update_worldbank_series(self):
+        """Incrementally refreshes all enabled series in WORLDBANK_SERIES."""
+        if not WORLDBANK_SERIES:
+            return
+
+        print("\n--- World Bank Macro Series ---", flush=True)
+        for symbol, indicator, country, name, unit in WORLDBANK_SERIES:
+            try:
+                existing = self._macro_read(symbol)
+                start = self._macro_incremental_start(
+                    existing, WORLDBANK_REVISION_OVERLAP_DAYS)
+                if start is None:
+                    start = (pd.Timestamp(datetime.date.today())
+                             - pd.DateOffset(years=MACRO_MAX_HISTORY_YEARS)).date()
+
+                df = self.download_worldbank_series(
+                    symbol, indicator, country, name, unit, start)
+                if df is None or df.empty:
+                    print(f"  [{symbol}] No new data since {start}.", flush=True)
+                    continue
+
+                combined = self._macro_write(symbol, df, existing)
+                print(f"  [{symbol}] +{len(df):,} rows from {start} -> {len(combined):,} total "
+                      f"({combined['Date'].min()} to {combined['Date'].max()}).", flush=True)
+            except Exception as e:
+                print(f"  [{symbol}] Update failed: {type(e).__name__}: {e}", flush=True)
+
     def update_yahoo_series(self):
         """Incrementally refreshes all enabled series in YAHOO_SERIES."""
         if not YAHOO_SERIES:
             return
-
         print("\n--- Yahoo Finance Series ---", flush=True)
         for symbol, ticker, name, unit in YAHOO_SERIES:
             try:
@@ -2133,6 +2400,9 @@ class NSEMarketDataDownloader:
                     'Name': name,
                     'Unit': 'Ratio',
                     'Source': 'Derived',
+                    'Frequency': numerator['Frequency'].iloc[-1],
+                    'Description': f"Ratio of {num_symbol} to {den_symbol}, "
+                                   f"computed on their common dates.",
                 })[MACRO_COLUMNS]
 
                 combined = self._macro_write(symbol, df, existing)
@@ -2416,6 +2686,7 @@ class NSEMarketDataDownloader:
         all_days = self.get_trading_days(DEFAULT_START_DATE, today)
 
         self.update_fred_series()
+        self.update_worldbank_series()
         self.update_yahoo_series()
         self.update_macro_ratios()
 
