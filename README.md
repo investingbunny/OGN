@@ -13,6 +13,7 @@ End-to-end pipeline for downloading, storing, and analysing NSE (National Stock 
 | **Option-OGN.py** | Technical analysis & charting — generates multi-panel charts (MACD, RSI, ADX, Bollinger Bands, Fibonacci, Max Pain, Futures Fair Value, Renko), a volatility-cone page from the standalone estimator models, and an optional statistical comparison against a second symbol. Supports interactive display and PDF export. |
 | [schiller_macro.py](schiller_macro.py) | US-only Schiller valuations: Robert Shiller's CAPE/real-price/earnings workbook and Multpl valuation histories. |
 | [nifty_macro.py](nifty_macro.py) | Separate India Schiller group: NIFTY valuations, calculated Indian-only CAPE, and explicitly unverified IIM/RBI/index-price-sales sources. |
+| [option_overlay.py](option_overlay.py) | Volume-ranked CE/PE implied-volatility overlays, matched-futures Black-76 IV estimates, and robust same-expiry smile diagnostics. |
 | **models.py** + `GarmanKlass.py`, `HodgesTompkins.py`, `Kurtosis.py`, `Parkinson.py`, `Raw.py`, `RogersSatchell.py`, `Skew.py`, `YangZhang.py` | Volatility estimators. One module per model, each exposing `get_estimator(price_data, window, clean)`. |
 
 ---
@@ -441,7 +442,7 @@ Volatility estimators are annualised (252 trading periods) and shown as percenta
 
 | Panel | Shows |
 |---|---|
-| `cone` | Max / 75th / median / 25th / min of the estimator across rolling windows, with the latest realized value overlaid |
+| `cone` | Max / 75th / median / mean / 25th / min across rolling windows, with latest realized volatility and eligible latest-date option IV overlaid |
 | `box` | Box-and-whisker of the same per-window distributions |
 | `rolling` | The rolling estimator through time with quantile bands |
 | `histogram` | Distribution of estimator values, normal fit, and latest value marked |
@@ -461,6 +462,113 @@ VOLATILITY_QUANTILES = [0.25, 0.75]
 DEFAULT_ESTIMATOR = 'YangZhang'
 ```
 
+### CE/PE Implied-Volatility Overlays
+
+When the selected underlying ticker has stored derivatives, the volatility page can
+overlay its **five highest-volume eligible calls and five puts per expiry and trading
+date**. This applies to the first analysed symbol, not the comparison symbol.
+
+- **Green dots:** CE implied volatility. **Red dots:** PE implied volatility.
+- **Dot height:** annualized IV, not strike or premium. Each dot is labeled with its
+  strike and expiry, for example `(24500, 22 Sep)`, with leader lines where needed.
+- **Cone overlay:** observations from the latest underlying date only, located at
+  the remaining weekday tenor. Matching realized-estimator windows are added when
+  enough history exists. Older option observations are never shown as current.
+- **Date-series pages:** separate CE/PE panels for each expiry, following the volatility
+  page. Up to five trading dates fit on each page; longer windows are paginated.
+- **Latest-contract table:** traded contracts, IV, reported/estimated source, realized
+  mean, IV-minus-mean in percentage points, smile MAD score, and selection reason.
+- **Black outlines:** qualifying smile outliers, including any already among the
+  volume leaders. Up to two additional contracts per side/expiry/date can be included;
+  no outlier is invented just to fill that quota.
+
+```powershell
+python Option-OGN.py --pdf NIFTY
+python Option-OGN.py --pdf BANKNIFTY --option-dates 10 --option-min-contracts 50
+python Option-OGN.py --pdf NIFTY --option-outliers 0
+python Option-OGN.py --pdf NIFTY --option-rate 0.055 --option-iv-unit percent
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--option-dates N` | `5` | Last N underlying observation dates, not N calendar days or N nonempty option snapshots |
+| `--option-min-contracts N` | `10` | Minimum traded contracts per option/date; ranking uses `Contracts`, not open interest or turnover |
+| `--option-outliers N` | `2` | Maximum extra MAD outliers per side/expiry/date: `0`, `1`, or `2`; `0` disables outlier scoring |
+| `--option-rate R` | `0.065` | Fixed continuously compounded annual decimal rate for Black-76; `0.055` means 5.5% |
+| `--option-iv-unit UNIT` | `percent` | Units of source-reported IV: `percent` or `decimal`; these are never inferred from magnitude |
+
+Remove `option_overlay` from `REPORT_SECTIONS` to disable this feature. The `volatility`
+section must also be enabled. Existing historical charts remain usable when derivatives
+or valid IV are unavailable. Skew/Kurtosis are distribution moments, so IV is not plotted
+on those axes. Monthly/quarterly macro data, duplicate underlying dates, and range-based
+estimators applied to flat bars are also excluded from option overlays.
+
+### Option Data and IV Estimation
+
+The overlay reads the selected ticker's existing processed derivatives through
+`load_derivatives`, including **all expiries**, rather than the nearest-expiry-only
+options loader. It performs no downloads or writes to market-data files. Required
+columns are `Date`, `Expiry`, `Symbol`, `Option type`, `Strike Price`, and `Contracts`.
+Only unexpired CE/PE contracts with finite positive strikes and sufficient traded volume
+are eligible; expiry-day contracts are excluded because intraday time remaining is unknown.
+Duplicate date/expiry/side/strike observations keep the last row. Ties in volume use
+ascending strike for reproducibility. Fewer than five dots are shown if fewer qualify.
+
+Valid reported IV from `Implied Volatility` (preferred) or `IV` takes precedence.
+In percent mode, `20` and `20%` both mean 20%; in decimal mode, `0.20` means 20%,
+and a percent suffix is rejected as a unit conflict.
+
+For missing IV, `vollib` performs Black-76 inversion using **the same ticker, date,
+and expiry's futures price**. Legacy futures codes and UDiFF `IDF`/`STF` are supported.
+Both option and future use settlement prices, falling back to both close prices when
+settlement inputs are missing/nonpositive. Price bases are not mixed. Prices outside
+discounted intrinsic/upper bounds, ambiguous futures matches, and solver failures are
+skipped. An invalid settlement quote is not silently replaced after failing price bounds.
+Reported IV can still be used without a matching future or IV solver.
+
+Black-76 uses ACT/365 calendar time to expiry and the explicit fixed rate above.
+Realized volatility uses 252 observations/year and a matching **weekday** lookback;
+the tenor count omits weekends, not exchange-specific holidays. Daily prices do not
+guarantee synchronous quotes, and no historical yield curve, bid/ask spread, or intraday
+expiry time is inferred. These model estimates assume European-style options and are
+diagnostic, not executable prices. In particular, a weekly expiry without a matching
+future **and** without reported IV is unavailable; a different expiry is not substituted.
+
+### Historical Mean and Outliers
+
+The historical reference is the selected realized-volatility estimator at each option's
+remaining weekday tenor, calculated only from underlying observations **through that
+option date**. Its mean and standard deviation use the available valid rolling history,
+with at least 30 estimator observations and a tenor of at least two sessions. A missing
+reference remains unavailable. The shaded mean +/- 1 SD range is descriptive, not a
+confidence interval; the date-series dots can represent different volume leaders daily.
+
+Outliers use a separate **cross-sectional robust smile test**, not a raw IV-minus-realized
+threshold. On each date, expiry, and CE/PE side independently:
+
+1. Fit a Huber robust quadratic to IV against centered/scaled log strike across the
+   entire eligible chain, not only the top five. Require at least 12 distinct strikes.
+2. Subtract the fitted smile IV and center the residuals on their median.
+3. Scale by the normally adjusted median absolute deviation, with a floor of `0.005`
+   annualized IV (0.5 volatility percentage points).
+4. Flag absolute scores of at least `3.5`. The two lowest and two highest strikes are
+   not outlier candidates because they lack sufficient two-sided strike support.
+5. Add at most the requested number of largest absolute-score outliers beyond the
+   volume leaders. Sparse, degenerate, or nonconvergent fits add none.
+
+MAD was selected over mean/standard-deviation z-scores because extreme quotes can
+inflate the latter's scale. IQR fences are another robust choice, but neither raw-IQR
+nor raw-z-score comparisons account for normal volatility-smile differences. This
+implementation uses smile-adjusted MAD only; `--option-outliers 0` turns it off.
+The liquidity screen checks traded contracts only, not quote freshness or spreads.
+An outlier can be a bad quote or model-fit issue; an IV-minus-realized gap can reflect
+a normal risk premium. Neither establishes mispricing, arbitrage, or a trade signal.
+
+Focused checks: `python -m unittest test_option_overlay -v`.
+Option pricing and dense chart layouts are validated with explicitly synthetic fixtures;
+the local processed derivatives folder is empty, so no live option-chain validation or
+market outlier claim has been made.
+
 ---
 
 ## Report Modularity
@@ -474,6 +582,7 @@ REPORT_SECTIONS = [
     'technical',    # multi-panel indicator chart for the first symbol
   'trendlines',   # price with regression support/resistance
     'volatility',   # volatility cone / rolling / histogram page
+    'option_overlay',  # IV dots and per-expiry pages when derivatives exist
     'comparison',   # statistical comparison, only when a second symbol is given
   'japan_macro',  # Japan appendix once per PDF
     'schiller_macro',  # US-only valuations
@@ -686,7 +795,9 @@ ADX, Fibonacci retracements, Bollinger Bands & OBV, Renko, and the technical aud
 
 **2. The regression trendline page of the first symbol**, followed by its **volatility
 profile**: cone, per-window box plots, rolling
-estimator with quantile bands, distribution histogram, and a summary table.
+estimator with quantile bands, distribution histogram, and a summary table. Eligible
+option IV is overlaid on the cone, with per-expiry CE/PE date-series pages immediately
+afterwards when `option_overlay` is enabled.
 
 **3. The comparison page**, containing:
 
@@ -704,7 +815,7 @@ unavailable, the other report pages remain and the
 reason is printed. This frequency handling applies to the comparison; the first symbol's
 technical and volatility pages still use their existing observation-based windows.
 
-Regression checks: `python -m unittest test_comparison test_japan_macro -v`.
+Regression checks: `python -m unittest test_option_overlay test_comparison test_japan_macro test_valuation_macro -v`.
 
 ---
 
@@ -716,4 +827,6 @@ Regression checks: `python -m unittest test_comparison test_japan_macro -v`.
 - `statsmodels`, `scikit-learn` and `dtaidistance` are required for the statistical
   comparison
 - `scipy` is required for the volatility histogram's normal fit
+- `vollib>=1.0.11` supplies Black-76 implied-volatility inversion; `adjustText` places
+  option labels, and `statsmodels` supplies the robust smile fit
 - Optional: TA-Lib (C library + Python wrapper), trendln, stocktrends
