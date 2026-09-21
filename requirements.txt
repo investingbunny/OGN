@@ -2,6 +2,8 @@
 pandas>=2.0
 numpy
 pyarrow                  # parquet read/write engine
+openpyxl>=3.1
+xlrd>=2.0.1
 statsmodels              # OLS, cointegration, Granger causality
 scipy
 scikit-learn             # mutual information (k-NN estimator) for COMP

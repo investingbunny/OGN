@@ -11,14 +11,18 @@ multi-panel technical analysis charts including:
   - Renko charts
   - Support / resistance regression trendlines (scipy pivots + numpy polyfit)
 
-Report pages, in order: technical -> trendlines -> volatility -> comparison.
+Report pages: technical -> trendlines -> volatility -> comparison, then separate
+Japan, US Schiller and India Schiller appendices once per PDF.
 Edit REPORT_SECTIONS to drop any of them.
 
 Usage:
     python Option-OGN.py                          # analyse all FnO symbols (interactive)
     python Option-OGN.py WTI                       # full analysis for one series
     python Option-OGN.py WTI US02Y__US10Y          # ... plus a statistical comparison
-    python Option-OGN.py WTI US02Y__US10Y 250      # ... over the last 250 days
+    python Option-OGN.py WTI US02Y__US10Y 250      # ... over the last 250 observations
+    python Option-OGN.py --pdf WTI JP10Y 120      # last 120 aligned months
+    python Option-OGN.py --pdf WTI JP10Y --compare-aggregation last
+    python Option-OGN.py --pdf WTI JP10Y --compare-frequency quarterly
     python Option-OGN.py --estimator Raw WTI       # pick the volatility estimator
     python Option-OGN.py --trend-bars 250 GLD      # widen the trendline lookback
     python Option-OGN.py --trend-distance 20 GLD   # demand 20 bars between pivots
@@ -37,22 +41,26 @@ import math
 import datetime
 import warnings
 import contextlib
+import textwrap
 from functools import reduce
 
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.patches
 from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.dates import date2num
+from matplotlib.dates import date2num, AutoDateLocator, ConciseDateFormatter
 from matplotlib.ticker import FuncFormatter
 import mplfinance as mpf
 import pandas as pd
 import numpy as np
 import seaborn as sns
 import statsmodels.api as sm
-from statsmodels.tsa.stattools import coint, grangercausalitytests
+from statsmodels.tsa.stattools import adfuller, coint, grangercausalitytests
 from scipy.stats import norm
 from scipy.signal import find_peaks
+import japan_macro
+import nifty_macro
+import schiller_macro
 
 # Optional: stocktrends for Renko (pip install stocktrends)
 try:
@@ -142,6 +150,9 @@ REPORT_SECTIONS = [
     'trendlines',   # candlestick page with support / resistance regression lines
     'volatility',   # volatility cone / rolling / histogram page
     'comparison',   # statistical comparison, only when a second symbol is given
+    'japan_macro',
+    'schiller_macro',
+    'india_schiller',
 ]
 
 # ── Trendline page defaults (override on the CLI) ─────────────────────────
@@ -1149,7 +1160,8 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
                 compare_with=None, days=None, estimator=DEFAULT_ESTIMATOR,
                 trend_bars=TREND_BARS, trend_distance=TREND_DISTANCE,
                 trend_prominence=None,
-                trend_prominence_pct=TREND_PROMINENCE_PCT):
+                trend_prominence_pct=TREND_PROMINENCE_PCT,
+                comparison_frequency='auto', comparison_aggregation='auto'):
     """Run technical analysis for each symbol in the list.
 
     Sections are driven by REPORT_SECTIONS, so any of them can be commented out.
@@ -1160,13 +1172,15 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         pdf_path:             If set, save all charts to this PDF file
         compare_with:         If set, append a statistical comparison of the
                               analysed symbol against this second series
-        days:                 Window (in observations) for that comparison
+        days:                 Window in aligned observations (legacy parameter name)
         estimator:            Volatility estimator name (see ESTIMATORS)
         trend_bars:           Trailing bars used by the trendline page
         trend_distance:       Minimum bars between two trendline pivots
         trend_prominence:     Absolute pivot prominence; None auto-scales
         trend_prominence_pct: Fraction of the window range used when
                               auto-scaling the prominence
+        comparison_frequency: auto chooses the slower native cadence
+        comparison_aggregation: auto, mean, last or sum for downsampled series
     """
     if single_scrip:
         symbols = [single_scrip]
@@ -1286,12 +1300,21 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         if compare_with and 'comparison' in REPORT_SECTIONS:
             try:
                 compare_series(Scrip, compare_with, days=days,
-                               pdf_pages=pdf_pages)
+                               pdf_pages=pdf_pages, frequency=comparison_frequency,
+                               aggregation=comparison_aggregation)
             except (ValueError, FileNotFoundError) as e:
                 print(f"  [comparison skipped] {e}")
 
     if pdf_pages:
-        pdf_pages.close()
+        try:
+            if 'japan_macro' in REPORT_SECTIONS:
+                plot_japan_macro(pdf_pages=pdf_pages)
+            if 'schiller_macro' in REPORT_SECTIONS:
+                plot_schiller_macro(pdf_pages=pdf_pages)
+            if 'india_schiller' in REPORT_SECTIONS:
+                plot_india_schiller(pdf_pages=pdf_pages)
+        finally:
+            pdf_pages.close()
         print(f"\n  PDF saved: {pdf_path}")
 
 
@@ -1330,6 +1353,147 @@ _COMP_VALUE_COLUMNS = [
 _COMP_SKIP_COLUMNS = {'Date', 'Strike Price', 'Sr No', 'Open Int',
                       'Change in OI', 'Record Type'}
 
+COMP_FREQUENCIES = ('daily', 'weekly', 'monthly', 'quarterly', 'annual')
+COMP_PERIOD_RULES = {'daily': 'D', 'weekly': 'W-FRI', 'monthly': 'M',
+                     'quarterly': 'Q-DEC', 'annual': 'Y-DEC'}
+COMP_LAG_UNITS = {'daily': 'observations', 'weekly': 'weeks', 'monthly': 'months',
+                  'quarterly': 'quarters', 'annual': 'years'}
+COMP_MIN_PERIOD_COVERAGE = 0.8
+_COMP_FLOW_SYMBOLS = {'INTRADEBAL', 'JPCURRENT', 'USRETAIL'}
+_COMP_STOCK_SYMBOLS = {'FEDASSETS', 'PAYEMS', 'JPXBYEN', 'JPFOREIGN', 'JPCOTSHORT', 'SCHBV'}
+_COMP_FLOW_COLUMNS = {'Volume', 'Deliverable Qty', 'Qty Short Sold', 'Traded Value'}
+
+
+def _comp_native_frequency(series):
+    """Prefer declared frequency; infer cadence only for legacy data without it."""
+    declared = str(series.attrs.get('frequency', '')).strip().lower()
+    if declared:
+        if declared in ('yearly', 'annually'):
+            declared = 'annual'
+        if declared not in COMP_FREQUENCIES:
+            raise ValueError(f"Unsupported frequency metadata: '{declared}'.")
+        return declared, 'metadata'
+    if len(series) < 3:
+        raise ValueError('At least three dates or Frequency metadata are needed to infer cadence.')
+    spacing = series.index.to_series().diff().dt.total_seconds().dropna() / 86400.0
+    typical_gap = spacing.median()
+    for frequency, lower, upper in [('daily', 0, 3), ('weekly', 4, 10),
+                                     ('monthly', 20, 45), ('quarterly', 60, 110),
+                                     ('annual', 300, 400)]:
+        if lower < typical_gap <= upper:
+            return frequency, 'inferred'
+    raise ValueError('Irregular or unsupported cadence; provide accurate Frequency metadata.')
+
+
+def align_comparison_series(series_a, series_b, label_a, label_b,
+                            frequency='auto', aggregation='auto'):
+    """Align at the slower cadence, without upsampling or filling missing periods."""
+    if frequency not in ('auto', *COMP_FREQUENCIES):
+        raise ValueError(f'Unknown comparison frequency: {frequency}')
+    if aggregation not in ('auto', 'mean', 'last', 'sum'):
+        raise ValueError(f'Unknown comparison aggregation: {aggregation}')
+    cleaned = []
+    native_frequencies = []
+    frequency_sources = []
+    for original in (series_a, series_b):
+        series = pd.Series(pd.to_numeric(original, errors='coerce').to_numpy(),
+                           index=pd.to_datetime(original.index, errors='coerce'))
+        if series.index.tz is not None:
+            series.index = series.index.tz_localize(None)
+        series.index = series.index.normalize()
+        series = series[series.index.notna() & np.isfinite(series)]
+        series = series.groupby(level=0).mean().sort_index()
+        series.attrs = dict(original.attrs)
+        if series.empty:
+            raise ValueError('No finite dated observations available for comparison.')
+        native, origin = _comp_native_frequency(series)
+        cleaned.append(series)
+        native_frequencies.append(native)
+        frequency_sources.append(origin)
+    slowest = max(native_frequencies, key=COMP_FREQUENCIES.index)
+    target = slowest if frequency == 'auto' else frequency
+    if COMP_FREQUENCIES.index(target) < COMP_FREQUENCIES.index(slowest):
+        raise ValueError(f'Cannot upsample {slowest} data to {target}; choose {slowest} or slower.')
+
+    aggregated = []
+    methods = []
+    open_periods = []
+    incomplete_periods = []
+    consolidated_weeks = []
+    today = pd.Timestamp(datetime.date.today())
+    for series, native in zip(cleaned, native_frequencies):
+        method = series.attrs.get('aggregation', 'mean') if aggregation == 'auto' else aggregation
+        repeated_weeks = 0
+        if native == 'weekly':
+            weeks = series.index.to_period(COMP_PERIOD_RULES['weekly'])
+            repeated_weeks = int(weeks.duplicated().sum())
+            series = series[~weeks.duplicated(keep='last')]
+        consolidated_weeks.append(repeated_weeks)
+        if target == native:
+            method = 'last'
+        if target == 'daily':
+            grouped = series[series.index <= today]
+            open_periods.append(0)
+            incomplete_periods.append(0)
+        else:
+            periods = series.index.to_period(COMP_PERIOD_RULES[target])
+            if native == target and periods.duplicated().any():
+                raise ValueError(f'Multiple {native} observations in one period; check Frequency metadata.')
+            grouped = series.groupby(periods).agg(method)
+            closed = grouped.index.to_timestamp(how='end').normalize() < today
+            open_periods.append(int((~closed).sum()))
+            grouped = grouped[closed]
+            sufficient = pd.Series(True, index=grouped.index)
+            if native == 'daily':
+                weekdays = series.index.dayofweek < 5
+                counts = series[weekdays].groupby(periods[weekdays]).size()
+                starts = grouped.index.to_timestamp().to_numpy().astype('datetime64[D]')
+                ends = (grouped.index + 1).to_timestamp().to_numpy().astype('datetime64[D]')
+                expected = np.busday_count(starts, ends)
+                sufficient = counts.reindex(grouped.index, fill_value=0) >= expected * COMP_MIN_PERIOD_COVERAGE
+            elif native in ('monthly', 'quarterly') and native != target:
+                expected = {'monthly': {'quarterly': 3, 'annual': 12},
+                            'quarterly': {'annual': 4}}[native][target]
+                native_periods = series.index.to_period(COMP_PERIOD_RULES[native])
+                if native_periods.duplicated().any():
+                    raise ValueError(f'Multiple {native} observations in one period.')
+                counts = series.groupby(periods).size()
+                sufficient = counts.reindex(grouped.index, fill_value=0) == expected
+            elif native == 'weekly' and native != target:
+                starts = grouped.index.to_timestamp().to_numpy().astype('datetime64[D]')
+                ends = (grouped.index + 1).to_timestamp().to_numpy().astype('datetime64[D]')
+                expected = np.busday_count(starts, ends, weekmask='Fri')
+                counts = series.groupby(periods).size()
+                sufficient = counts.reindex(grouped.index, fill_value=0) >= expected * COMP_MIN_PERIOD_COVERAGE
+            incomplete_periods.append(int((~sufficient).sum()))
+            grouped = grouped[sufficient]
+        aggregated.append(grouped)
+        methods.append('native' if target == native else method)
+
+    aligned = pd.concat([aggregated[0].rename(label_a), aggregated[1].rename(label_b)],
+                        axis=1, join='inner').dropna().sort_index()
+    if aligned.empty:
+        raise ValueError(f'No overlapping closed {target} periods between {label_a} and {label_b}.')
+    dropped_for_gaps = 0
+    if target != 'daily':
+        breaks = np.flatnonzero(np.diff(aligned.index.asi8) > 1)
+        if len(breaks):
+            dropped_for_gaps = int(breaks[-1] + 1)
+            aligned = aligned.iloc[dropped_for_gaps:]
+        aligned.index = aligned.index.to_timestamp(how='end').normalize()
+    details = {
+        'frequency': target,
+        'native_frequencies': native_frequencies,
+        'frequency_sources': frequency_sources,
+        'aggregation': methods,
+        'lag_unit': COMP_LAG_UNITS[target],
+        'dropped_for_gaps': dropped_for_gaps,
+        'dropped_open_periods': open_periods,
+        'dropped_incomplete_periods': incomplete_periods,
+        'consolidated_weekly_observations': consolidated_weeks,
+    }
+    return aligned, details
+
 
 def _comp_pick_value_column(df):
     """Choose the numeric column that best represents a source frame."""
@@ -1343,7 +1507,7 @@ def _comp_pick_value_column(df):
 
 
 def _comp_to_daily_series(df, label):
-    """Collapse a processed frame to one numeric observation per calendar day.
+    """Extract dated numeric observations, preserving their native cadence metadata.
 
     Sources differ in timestamp type (python date, datetime64, tz-aware) and
     in row granularity, so dates are stripped to tz-naive midnight and rows
@@ -1383,7 +1547,22 @@ def _comp_to_daily_series(df, label):
     if out.empty:
         raise ValueError(f"'{label}' has no usable numeric data.")
 
-    return out.groupby('Date')['Value'].mean().sort_index(), column
+    series = out.groupby('Date')['Value'].mean().sort_index()
+    for source_column, attribute in [('Frequency', 'frequency'), ('Unit', 'unit')]:
+        if source_column in frame.columns:
+            populated = frame[source_column].dropna().astype(str).str.strip()
+            populated = populated[~populated.str.lower().isin(['', 'nan', '<na>', 'none'])]
+            if not populated.empty:
+                if source_column == 'Frequency' and populated.str.lower().nunique() > 1:
+                    raise ValueError(f"'{label}' has conflicting Frequency metadata.")
+                series.attrs[attribute] = populated.iloc[-1]
+    if label in _COMP_FLOW_SYMBOLS or column in _COMP_FLOW_COLUMNS:
+        series.attrs['aggregation'] = 'sum'
+    elif label in _COMP_STOCK_SYMBOLS:
+        series.attrs['aggregation'] = 'last'
+    else:
+        series.attrs['aggregation'] = 'mean'
+    return series, column
 
 
 def _comp_load_symbol(symbol):
@@ -1431,14 +1610,18 @@ def resolve_comp_series(token):
 
         num_series, _ = _comp_to_daily_series(num_frame, num_name)
         den_series, _ = _comp_to_daily_series(den_frame, den_name)
-        joined = pd.concat([num_series.rename('num'), den_series.rename('den')],
-                           axis=1, join='inner').dropna()
+        joined, alignment = align_comparison_series(num_series, den_series, 'num', 'den')
         joined = joined[joined['den'] != 0]
         if joined.empty:
             raise ValueError(
                 f"'{token}': {num_name} and {den_name} share no overlapping dates.")
         ratio = (joined['num'] / joined['den']).sort_index()
-        return ratio, token, f"ratio {num_name}/{den_name} (computed)"
+        ratio = ratio[np.isfinite(ratio)]
+        if ratio.empty:
+            raise ValueError(f"'{token}' has no finite ratio observations.")
+        ratio.attrs = {'frequency': alignment['frequency'], 'unit': 'Ratio',
+                       'aggregation': 'mean'}
+        return ratio, token, f"ratio {num_name}/{den_name} ({alignment['frequency']}, computed)"
 
     raise ValueError(
         f"Unknown symbol '{token}' - not found in any processed data directory. "
@@ -1538,60 +1721,90 @@ def granger_min_pvalue(cause, effect, max_lag=COMP_MAX_LAG):
 
 
 def compute_comparison(series_a, series_b, label_a, label_b,
-                       max_lag=COMP_MAX_LAG, days=None):
-    """Run all five measures over the two series' overlapping horizon.
+                       max_lag=COMP_MAX_LAG, days=None,
+                       frequency='auto', aggregation='auto'):
+    """Compare native series on a shared cadence before calculating changes.
 
-    `days` trims to the most recent N observations *after* aligning, so the
-    sample size is exactly N rather than whatever the two calendars happen to
-    share.  When omitted the full overlap (the shorter series' horizon) is used.
-
-    Cointegration needs the non-stationary levels; the remaining measures run
-    on stationary returns, since Granger tests on raw levels are spurious.
+    The legacy `days` parameter counts aligned observations, not calendar days.
+    Short samples retain descriptive charts but not significance tests.
     """
-    aligned = pd.concat([series_a.rename(label_a), series_b.rename(label_b)],
-                        axis=1, join='inner').dropna()
+    if label_a == label_b:
+        raise ValueError('Choose two different series for a comparison.')
+    if max_lag < 1:
+        raise ValueError('max_lag must be positive.')
+    aligned, alignment = align_comparison_series(
+        series_a, series_b, label_a, label_b, frequency=frequency, aggregation=aggregation)
     total_overlap = len(aligned)
 
     if days is not None:
-        if days < COMP_MIN_OBS:
-            raise ValueError(
-                f"days={days} is below the {COMP_MIN_OBS}-observation minimum "
-                f"needed by these estimators.")
+        if days < 3:
+            raise ValueError('The comparison window needs at least 3 aligned observations.')
         aligned = aligned.tail(days)
 
-    if len(aligned) < COMP_MIN_OBS:
+    if len(aligned) < 3:
         raise ValueError(
             f"Only {len(aligned)} overlapping observations between {label_a} and "
-            f"{label_b} - need at least {COMP_MIN_OBS}.")
+            f"{label_b} - need at least 3 for descriptive charts.")
 
     levels_a = aligned[label_a].to_numpy(dtype=float)
     levels_b = aligned[label_b].to_numpy(dtype=float)
-
-    # Log returns need strictly positive levels; spreads such as T10Y2Y can be
-    # zero or negative, so those fall back to first differences.
-    if bool((aligned > 0).all().all()):
-        changes = np.log(aligned).diff().dropna()
-        change_kind = "log returns"
-    else:
-        changes = aligned.diff().dropna()
-        change_kind = "first differences"
+    changes = pd.DataFrame(index=aligned.index)
+    transforms = {}
+    units = {}
+    for label, original in [(label_a, series_a), (label_b, series_b)]:
+        units[label] = str(original.attrs.get('unit', ''))
+        if 'percent' in units[label].lower() or units[label] == '%':
+            changes[label] = aligned[label].diff()
+            transforms[label] = 'percentage-point changes'
+        elif (aligned[label] > 0).all():
+            changes[label] = np.log(aligned[label]).diff()
+            transforms[label] = 'log changes'
+        else:
+            changes[label] = aligned[label].diff()
+            transforms[label] = 'first differences'
+    changes = changes.dropna()
+    kinds = set(transforms.values())
+    change_kind = next(iter(kinds)) if len(kinds) == 1 else 'mixed changes'
 
     returns_a = changes[label_a].to_numpy(dtype=float)
     returns_b = changes[label_b].to_numpy(dtype=float)
+    cadence_limit = {'daily': 10, 'weekly': 10, 'monthly': 10, 'quarterly': 4, 'annual': 2}
+    effective_lag = min(max_lag, cadence_limit[alignment['frequency']],
+                        max(0, (len(changes) - 1) // 5))
+    enough_history = len(aligned) >= COMP_MIN_OBS
+    inference_note = f'Needs {COMP_MIN_OBS} aligned observations; only {len(aligned)} available'
 
     results = {
         'aligned': aligned,
         'changes': changes,
         'change_kind': change_kind,
+        'transforms': transforms,
+        'units': units,
+        'alignment': alignment,
+        'frequency': alignment['frequency'],
+        'lag_unit': alignment['lag_unit'],
         'label_a': label_a,
         'label_b': label_b,
-        'max_lag': max_lag,
+        'max_lag': effective_lag,
         'days_requested': days,
         'total_overlap': total_overlap,
+        'inference_note': '' if enough_history else inference_note,
     }
 
     # --- Cointegration (on levels) ---
     try:
+        if not enough_history:
+            raise ValueError(inference_note)
+        diagnostics = {}
+        for label, levels in [(label_a, levels_a), (label_b, levels_b)]:
+            diagnostics[label] = {
+                'level_p': float(adfuller(levels, autolag='AIC')[1]),
+                'difference_p': float(adfuller(np.diff(levels), autolag='AIC')[1]),
+            }
+        results['stationarity'] = diagnostics
+        if not all(check['level_p'] >= 0.05 and check['difference_p'] < 0.05
+                   for check in diagnostics.values()):
+            raise ValueError('ADF checks do not support two I(1) series')
         t_stat, p_value, _ = coint(levels_a, levels_b)
         results['coint'] = {'stat': t_stat, 'p': p_value}
     except Exception as e:
@@ -1614,14 +1827,21 @@ def compute_comparison(series_a, series_b, label_a, label_b,
             ('granger_ab', returns_a, returns_b, (label_a, label_b)),
             ('granger_ba', returns_b, returns_a, (label_b, label_a))):
         try:
-            p_value, lag = granger_min_pvalue(cause, effect, max_lag)
-            results[key] = {'p': p_value, 'lag': lag, 'names': names}
+            if not enough_history:
+                raise ValueError(inference_note)
+            if not all(adfuller(values, autolag='AIC')[1] < 0.05 for values in (cause, effect)):
+                raise ValueError('ADF does not support stationary comparison changes')
+            p_value, lag = granger_min_pvalue(cause, effect, effective_lag)
+            results[key] = {'p': min(1.0, p_value * effective_lag), 'raw_p': p_value,
+                            'lag': lag, 'names': names}
         except Exception as e:
             results[key] = {'error': str(e), 'names': names}
 
     # --- Cross-correlation (on changes) ---
     try:
-        pairs = cross_correlation(returns_a, returns_b, max_lag)
+        if np.std(returns_a) == 0 or np.std(returns_b) == 0:
+            raise ValueError('Constant changes: correlation is undefined')
+        pairs = cross_correlation(returns_a, returns_b, effective_lag)
         valid = [(k, c) for k, c in pairs if c is not None and not math.isnan(c)]
         results['ccf'] = pairs
         if valid:
@@ -1643,6 +1863,8 @@ def compute_comparison(series_a, series_b, label_a, label_b,
 
     # --- Mutual information (on changes) ---
     try:
+        if not enough_history:
+            raise ValueError(inference_note)
         results['mi'] = mutual_information(returns_a, returns_b)
     except Exception as e:
         results['mi'] = float('nan')
@@ -1655,42 +1877,43 @@ def build_comparison_table(results):
     """Turn raw measure output into the on-screen / PDF summary table."""
     label_a = results['label_a']
     label_b = results['label_b']
+    lag_unit = results.get('lag_unit', 'observations')
     rows = []
 
     coint_result = results.get('coint', {})
     if 'error' in coint_result:
-        value, reading = "n/a", f"failed: {coint_result['error'][:40]}"
+        value, reading = "n/a", coint_result['error']
     else:
         p_value = coint_result['p']
         value = f"p = {p_value:.4f}"
         if p_value < 0.01:
-            reading = "Strongly cointegrated - tradeable spread"
+            reading = "Evidence of cointegration at 1%"
         elif p_value < 0.05:
-            reading = "Cointegrated at 5% - spread mean-reverts"
+            reading = "Evidence of cointegration at 5%"
         elif p_value < 0.10:
             reading = "Weak evidence at 10% only"
         else:
-            reading = "Not cointegrated - do not trade the spread"
+              reading = "No evidence of cointegration at 10%"
     rows.append(["Cointegration", value, reading,
-                 "Stable mean-reverting spread; the basis for pairs trading."])
+                  "Engle-Granger on levels after ADF checks; not proof of a profitable spread."])
 
     for key in ('granger_ab', 'granger_ba'):
         result = results.get(key, {})
         cause, effect = result.get('names', (label_a, label_b))
         name = f"Granger {cause} -> {effect}"
         if 'error' in result:
-            value, reading = "n/a", f"failed: {result['error'][:40]}"
+            value, reading = "n/a", result['error']
         else:
             p_value, lag = result['p'], result['lag']
-            value = f"p = {p_value:.4f} (lag {lag})"
+            value = f"p(adj)={p_value:.4f}\nlag {lag} {lag_unit}"
             if p_value < 0.01:
-                reading = f"{cause} strongly leads {effect}"
+                reading = f"{cause} predicts {effect} in-sample at 1%"
             elif p_value < 0.05:
-                reading = f"{cause} leads {effect} at 5%"
+                reading = f"{cause} predicts {effect} in-sample at 5%"
             else:
-                reading = f"No predictive power from {cause}"
+                 reading = f"No predictive evidence from {cause} at 5%"
         rows.append([name, value, reading,
-                     "Past values of one series forecast the other; drives lead-lag trades."])
+                     "Changes; p adjusted for lag search per direction. Not causal or release-time evidence."])
 
     best = results.get('ccf_best', {})
     if 'error' in best:
@@ -1699,13 +1922,13 @@ def build_comparison_table(results):
         lag, corr = best['lag'], best['corr']
         value = f"r = {corr:+.3f} @ lag {lag:+d}"
         if lag == 0:
-            reading = "Strongest link is same-day - no exploitable delay"
+            reading = "Strongest association is within the same period"
         elif lag > 0:
-            reading = f"{label_a} leads {label_b} by {lag} day(s)"
+            reading = f"{label_a} leads {label_b} by {lag} {lag_unit}"
         else:
-            reading = f"{label_b} leads {label_a} by {abs(lag)} day(s)"
+              reading = f"{label_b} leads {label_a} by {abs(lag)} {lag_unit}"
     rows.append(["Cross-Correlation", value, reading,
-                 "Correlation across time lags; pinpoints the trigger-to-response delay."])
+                  "Descriptive lag association, not an actionable delay; macro dates are observation periods."])
 
     dtw_value = results.get('dtw', float('nan'))
     if math.isnan(dtw_value):
@@ -1723,7 +1946,7 @@ def build_comparison_table(results):
 
     mi_value = results.get('mi', float('nan'))
     if math.isnan(mi_value):
-        value, reading = "n/a", "could not be computed"
+        value, reading = "n/a", results.get('mi_error', 'could not be computed')
     else:
         value = f"{mi_value:.4f} bits"
         if mi_value < 0.02:
@@ -1780,10 +2003,23 @@ def load_analysis_frame(token):
 
 
 def _comp_window_note(results):
-    """Short ' | last N days' suffix when a window was requested."""
+    """Label a requested window in aligned periods rather than calendar days."""
     if not results.get('days_requested'):
         return ""
-    return f"   |   last {len(results['aligned']):,} days"
+    return f"   |   last {len(results['aligned']):,} {results.get('lag_unit', 'observations')}"
+
+
+def _comp_alignment_note(results):
+    """Describe the actual sampling and aggregation decisions for both legs."""
+    details = results['alignment']
+    notes = [f"{results['frequency'].title()} comparison"]
+    for label, native, origin, method in zip(
+            [results['label_a'], results['label_b']], details['native_frequencies'],
+            details['frequency_sources'], details['aggregation']):
+        notes.append(f'{label}: {native} ({origin}), {method}')
+    if results['frequency'] == 'weekly':
+        notes.append('Friday-ending weeks')
+    return ' | '.join(notes)
 
 
 def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
@@ -1791,49 +2027,60 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
     aligned = results['aligned']
     label_a = results['label_a']
     label_b = results['label_b']
+    lag_unit = results.get('lag_unit', 'observations')
 
     figure = plt.figure(figsize=(30, 17))
-    ax_raw = figure.add_axes((0.05, 0.70, 0.41, 0.21))
-    ax_norm = figure.add_axes((0.56, 0.70, 0.41, 0.21))
+    ax_raw = figure.add_axes((0.05, 0.70, 0.41, 0.18))
+    ax_norm = figure.add_axes((0.56, 0.70, 0.41, 0.18))
     ax_spread = figure.add_axes((0.05, 0.40, 0.41, 0.21))
     ax_ccf = figure.add_axes((0.56, 0.40, 0.41, 0.21))
     ax_table = figure.add_axes((0.04, 0.06, 0.93, 0.24))
     ax_table.axis('off')
 
     figure.suptitle(f"{label_a}   vs   {label_b}{_comp_window_note(results)}",
-                    fontsize=34, fontweight='bold', y=0.975)
+                    fontsize=30, fontweight='bold', y=0.978)
+    figure.text(0.05, 0.944, _comp_alignment_note(results), fontsize=13, va='top')
+    transforms = results['transforms']
+    figure.text(0.05, 0.922,
+                f"Changes: {label_a} = {transforms[label_a]}; {label_b} = {transforms[label_b]}",
+                fontsize=12, color='#555555', va='top')
 
     # --- Raw levels on twin axes (units rarely match) ---
     ax_raw.plot(aligned.index, aligned[label_a], color='tab:blue', linewidth=1.8,
                 label=f"{label_a}  ({desc_a})")
-    ax_raw.set_ylabel(label_a, fontsize=16, color='tab:blue')
+    unit_a = results['units'].get(label_a, '')
+    unit_b = results['units'].get(label_b, '')
+    ax_raw.set_ylabel(f"{label_a} ({unit_a})" if unit_a else label_a,
+                      fontsize=14, color='tab:blue')
     ax_raw.tick_params(axis='y', labelcolor='tab:blue', labelsize=13)
     ax_raw.tick_params(axis='x', labelsize=13)
     ax_raw_twin = ax_raw.twinx()
     ax_raw_twin.plot(aligned.index, aligned[label_b], color='tab:red', linewidth=1.8,
                      label=f"{label_b}  ({desc_b})")
-    ax_raw_twin.set_ylabel(label_b, fontsize=16, color='tab:red')
+    ax_raw_twin.set_ylabel(f"{label_b} ({unit_b})" if unit_b else label_b,
+                           fontsize=14, color='tab:red')
     ax_raw_twin.tick_params(axis='y', labelcolor='tab:red', labelsize=13)
     ax_raw_twin.grid(visible=False)
     ax_raw.grid(True, alpha=0.3)
     ax_raw.set_title(
         f"Levels  |  {aligned.index.min():%d-%b-%Y} to {aligned.index.max():%d-%b-%Y}"
-        f"  |  {len(aligned):,} common days",
+        f"  |  {len(aligned):,} aligned observations",
         fontsize=20, fontweight='bold', pad=8)
     handles = ax_raw.get_lines() + ax_raw_twin.get_lines()
     ax_raw.legend(handles, [h.get_label() for h in handles], fontsize=13, loc='best')
 
     # --- Rebased overlay so the two shapes are directly comparable ---
+    positive_levels = bool((aligned > 0).all().all())
     for column, colour in ((label_a, 'tab:blue'), (label_b, 'tab:red')):
         values = aligned[column]
-        base = values.iloc[0]
-        rebased = (values / base * 100.0) if base not in (0, np.nan) else _comp_zscore(values)
+        rebased = values / values.iloc[0] * 100.0 if positive_levels else _comp_zscore(values)
         ax_norm.plot(aligned.index, rebased, color=colour, linewidth=1.8, label=column)
-    ax_norm.axhline(100, color='grey', linestyle='--', linewidth=1)
+    ax_norm.axhline(100 if positive_levels else 0, color='grey', linestyle='--', linewidth=1)
     ax_norm.legend(fontsize=14)
     ax_norm.grid(True, alpha=0.3)
     ax_norm.tick_params(labelsize=13)
-    ax_norm.set_title('Rebased to 100 at common start', fontsize=20,
+    ax_norm.set_title('Rebased to 100 at common start' if positive_levels
+                      else 'Standardized levels (zero or negative observations)', fontsize=20,
                       fontweight='bold', pad=8)
 
     # --- Cointegration spread ---
@@ -1851,7 +2098,7 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
         ax_spread.legend(fontsize=13)
         beta = results.get('beta', float('nan'))
         ax_spread.set_title(
-            f"Cointegration spread   {label_b} - ({beta:.4f} x {label_a})",
+            f"OLS residual   {label_b} on {label_a}   |   beta {beta:.4f}",
             fontsize=20, fontweight='bold', pad=8)
     else:
         ax_spread.text(0.5, 0.5, 'Spread unavailable', transform=ax_spread.transAxes,
@@ -1869,7 +2116,7 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
         colours = ['tab:orange' if k == best.get('lag') else 'tab:blue' for k in lags]
         ax_ccf.bar(lags, corrs, color=colours)
         ax_ccf.axhline(0, color='black', linewidth=1)
-        ax_ccf.set_xlabel(f"Lag (days)   -  positive = {label_a} leads {label_b}",
+        ax_ccf.set_xlabel(f"Lag ({lag_unit})   -  positive = {label_a} leads {label_b}",
                           fontsize=15)
         ax_ccf.set_ylabel('Correlation', fontsize=15)
         ax_ccf.set_title(f"Cross-correlation of {results['change_kind']}",
@@ -1895,27 +2142,40 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
             tint = '#ffeb9c'
         cell_colours.append(['#f2f2f2', tint, tint, '#f2f2f2'])
 
+    display_table = table.copy()
+    for column, width in zip(display_table.columns, [29, 28, 57, 72]):
+        display_table[column] = display_table[column].map(
+            lambda value: '\n'.join(textwrap.fill(line, width) for line in str(value).splitlines()))
     tbl = ax_table.table(
-        cellText=table.values,
+        cellText=display_table.values,
         colLabels=table.columns,
         cellColours=cell_colours,
         colColours=['#4472c4'] * len(table.columns),
         cellLoc='left',
         colWidths=[0.20, 0.16, 0.29, 0.35],
-        loc='upper center',
+        bbox=(0, 0, 1, 1),
     )
     tbl.auto_set_font_size(False)
-    tbl.set_fontsize(15)
-    tbl.scale(1.0, 3.4)
+    tbl.set_fontsize(13)
     for (row_idx, _), cell in tbl.get_celld().items():
         cell.set_edgecolor('#cccccc')
         if row_idx == 0:
             cell.set_text_props(color='white', fontweight='bold')
     ax_table.set_title(
-        f"Statistical comparison  |  cointegration on levels, "
-        f"everything else on {results['change_kind']}  |  max lag "
-        f"{results['max_lag']} days",
-        fontsize=22, fontweight='bold', pad=14)
+        f"Cointegration / DTW on levels; Granger / correlation / MI on changes"
+        f"  |  max lag {results['max_lag']} {lag_unit}",
+        fontsize=18, fontweight='bold', pad=14)
+    details = results['alignment']
+    exclusions = (f"Excluded open periods: {sum(details['dropped_open_periods'])}; "
+                  f"low coverage: {sum(details['dropped_incomplete_periods'])}; "
+                  f"older periods before gaps: {details['dropped_for_gaps']}; "
+                  f"extra weekly observations: {sum(details['consolidated_weekly_observations'])}.")
+    figure.text(0.05, 0.037, exclusions + ' ' + results.get('inference_note', ''),
+                fontsize=11, color='#555555')
+    figure.text(0.05, 0.018,
+                'Exploratory observation-period analysis, not a release-time backtest. '
+                'Macro releases lag their periods and histories are revised; lags do not establish causation.',
+                fontsize=11, color='#555555')
 
     if pdf_pages:
         pdf_pages.savefig(figure)
@@ -1924,7 +2184,8 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
         plt.show()
 
 
-def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None):
+def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None,
+                    frequency='auto', aggregation='auto'):
     """Resolve, align, measure, and render a comparison of two series.
 
     Pass `pdf_pages` to append the comparison onto a report that is already
@@ -1946,18 +2207,30 @@ def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None):
           f"{series_b.index.min():%Y-%m-%d} to {series_b.index.max():%Y-%m-%d} "
           f"({len(series_b):,} obs)")
 
-    results = compute_comparison(series_a, series_b, label_a, label_b, days=days)
+    results = compute_comparison(series_a, series_b, label_a, label_b, days=days,
+                                 frequency=frequency, aggregation=aggregation)
     aligned = results['aligned']
     overlap = results['total_overlap']
     if days and len(aligned) < days:
-        scope = f"{len(aligned):,} days - all that overlap, fewer than the {days:,} asked for"
+        scope = f"{len(aligned):,} observations - fewer than the {days:,} requested"
     elif days:
-        scope = f"last {len(aligned):,} of {overlap:,} overlapping days"
+        scope = f"last {len(aligned):,} of {overlap:,} aligned observations"
     else:
-        scope = f"{len(aligned):,} overlapping days, full common horizon"
+        scope = f"{len(aligned):,} aligned observations in the latest contiguous overlap"
+    print(f"\n  {_comp_alignment_note(results)}")
+    print(f"  Excluded periods by source: open {results['alignment']['dropped_open_periods']}, "
+          f"incomplete {results['alignment']['dropped_incomplete_periods']}; "
+          f"older rows before gaps {results['alignment']['dropped_for_gaps']}.")
+    if any(results['alignment']['consolidated_weekly_observations']):
+        print('  Multiple weekly observations: retained the latest within each Friday-ending week.')
     print(f"\n  Analysis window: {aligned.index.min():%Y-%m-%d} to "
           f"{aligned.index.max():%Y-%m-%d}  ({scope})")
-    print(f"  Stationary transform: {results['change_kind']}\n")
+    for label, transform in results['transforms'].items():
+        print(f'  {label}: {transform}')
+    print(f"  Lag unit: {results['lag_unit']}; maximum lag: {results['max_lag']}.")
+    if results['inference_note']:
+        print(f"  [limited history] {results['inference_note']}.")
+    print('  Exploratory observation-period analysis, not a release-time backtest.\n')
 
     table = build_comparison_table(results)
     with pd.option_context('display.max_colwidth', 60, 'display.width', 200):
@@ -2221,6 +2494,138 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
     return profile
 
 
+def _plot_macro_group_pages(group_label, registry, report_groups, subtitle, footer, pdf_pages=None):
+    """Render a macro group using the shared metadata and missing-data layout."""
+    today = pd.Timestamp(datetime.date.today())
+    cutoff = today - pd.DateOffset(years=5)
+    summaries = {}
+    colours = ['#236b8e', '#237a62', '#b54446']
+    for page_number, (group_name, symbols) in enumerate(report_groups, 1):
+        figure = plt.figure(figsize=(30, 17), facecolor='white')
+        figure.text(0.055, 0.962, f'{group_label} | {group_name}', fontsize=30,
+                    fontweight='bold', color='#24282b', va='top')
+        figure.text(0.055, 0.922,
+                    f'{subtitle} | Past 5 years | Report date {today:%Y-%m-%d}',
+                    fontsize=14, color='#555b60', va='top')
+        rows = math.ceil(len(symbols) / 2)
+        row_height = 0.82 / rows
+        for position, symbol in enumerate(symbols):
+            definition = registry[symbol]
+            left = 0.055 + (position % 2) * 0.48
+            top = 0.875 - (position // 2) * row_height
+            figure.text(left, top, f"{symbol} | {definition['name']}", fontsize=19,
+                        fontweight='bold', color='#24282b', va='top')
+            source_label = (f"{definition['source']} | {definition['series']} | "
+                            f"{definition['frequency']}")
+            figure.text(left, top - 0.026, textwrap.fill(source_label, 130),
+                        fontsize=10.5, color='#555b60', va='top')
+            figure.text(left, top - 0.050, textwrap.fill(definition['description'], 116),
+                        fontsize=12, color='#373d41', va='top')
+            bottom = top - row_height + 0.051
+            axes = figure.add_axes((left + 0.025, bottom, 0.385, row_height - 0.15))
+            frame = pd.DataFrame(columns=['Date', 'Value'])
+            status = definition.get('unavailable', 'No stored observations.')
+            last_date = None
+            path = MACRO_PROCESSED / f'{symbol}.parquet'
+            if path.exists():
+                try:
+                    stored = _load_parquet(MACRO_PROCESSED, symbol)
+                    if not {'Date', 'Value', 'Unit', 'Series'}.issubset(stored.columns):
+                        raise ValueError('Missing macro columns')
+                    if (not stored['Unit'].eq(definition['unit']).all()
+                            or not stored['Series'].eq(definition['series']).all()):
+                        raise ValueError('Stored series or units differ from this definition')
+                    frame = stored[['Date', 'Value']].copy()
+                    frame['Date'] = pd.to_datetime(frame['Date'], errors='coerce', utc=True).dt.tz_convert(None)
+                    frame['Value'] = pd.to_numeric(frame['Value'], errors='coerce')
+                    frame = frame.dropna()
+                    frame = frame[np.isfinite(frame['Value']) & (frame['Date'] <= today)]
+                    frame = frame.drop_duplicates('Date', keep='last').sort_values('Date')
+                    last_date = frame['Date'].max() if not frame.empty else None
+                    frame = frame[frame['Date'] >= cutoff]
+                    status = 'No observations in the past 5 years.' if last_date is not None else 'No usable stored values.'
+                except Exception as error:
+                    frame = pd.DataFrame(columns=['Date', 'Value'])
+                    status = f'Stored data unavailable: {error}'
+            if frame.empty:
+                axes.set_axis_off()
+                axes.text(0.5, 0.65, 'Data unavailable', transform=axes.transAxes,
+                          ha='center', va='center', fontsize=19, color='#a34542')
+                axes.text(0.5, 0.36, textwrap.fill(status, 91), transform=axes.transAxes,
+                          ha='center', va='center', fontsize=13, color='#555b60')
+                latest_label = f"Unit: {definition['unit']} | No values plotted"
+                if last_date is not None:
+                    latest_label += f' | Last stored observation {last_date:%Y-%m-%d}'
+                summaries[symbol] = 'unavailable'
+            else:
+                colour = colours[(page_number - 1) % len(colours)]
+                if symbol == 'JPPOLRATE':
+                    axes.step(frame['Date'], frame['Value'], where='post', color=colour, linewidth=1.6)
+                else:
+                    axes.plot(frame['Date'], frame['Value'], color=colour, linewidth=1.6)
+                latest = frame.iloc[-1]
+                axes.scatter([latest['Date']], [latest['Value']], color=colour, s=30, zorder=3)
+                axes.grid(axis='y', color='#d5dadd', alpha=0.6)
+                axes.spines[['top', 'right']].set_visible(False)
+                axes.spines[['left', 'bottom']].set_color('#bcc3c7')
+                locator = AutoDateLocator(minticks=3, maxticks=6)
+                axes.xaxis.set_major_locator(locator)
+                axes.xaxis.set_major_formatter(ConciseDateFormatter(locator))
+                axes.yaxis.set_major_formatter(FuncFormatter(
+                    lambda value, position: f'{value:,.2f}' if abs(value) < 10 else f'{value:,.0f}'))
+                axes.tick_params(labelsize=10)
+                if frame['Value'].min() < 0 < frame['Value'].max():
+                    axes.axhline(0, color='#777777', linewidth=0.7, linestyle='--')
+                age = (today - latest['Date']).days
+                latest_label = (f"Latest: {latest['Value']:,.3f} {definition['unit']} | "
+                                f"Observed {latest['Date']:%Y-%m-%d} | {age} days old")
+                summaries[symbol] = 'plotted'
+            figure.text(left + 0.025, bottom - 0.034, latest_label, fontsize=11,
+                        color='#454c50', va='top')
+        figure.text(0.055, 0.025, footer,
+                    fontsize=11, color='#555b60')
+        figure.text(0.945, 0.025, f'{group_label} {page_number}/{len(report_groups)}',
+                    fontsize=11, color='#555b60', ha='right')
+        if pdf_pages is not None:
+            try:
+                pdf_pages.savefig(figure)
+            finally:
+                plt.close(figure)
+        else:
+            plt.show()
+    return summaries
+
+
+def plot_japan_macro(pdf_pages=None):
+    """Render cached Japan indicators with definitions, dates and explicit gaps."""
+    return _plot_macro_group_pages(
+        'Japan', japan_macro.JAPAN_SERIES, japan_macro.JAPAN_REPORT_GROUPS,
+        'Macro and carry-trade indicators',
+        'Dates are observation periods, not publication timestamps. CFTC contracts are not '
+        'the proprietary MacroMicro COT index; that index has no verified public feed.',
+        pdf_pages=pdf_pages)
+
+
+def plot_schiller_macro(pdf_pages=None):
+    """Render the US-only Schiller valuation group from cached history."""
+    return _plot_macro_group_pages(
+        'US Schiller', schiller_macro.SCHILLER_SERIES, schiller_macro.SCHILLER_REPORT_GROUPS,
+        'US equity valuation | Robert Shiller, S&P and Multpl',
+        'Observation periods, not release dates. Sources may revise estimates. '
+        'US prices, earnings and inflation remain separate from Indian valuations.',
+        pdf_pages=pdf_pages)
+
+
+def plot_india_schiller(pdf_pages=None):
+    """Render Indian-only valuations, distinguishing published CAPE from estimates."""
+    return _plot_macro_group_pages(
+        'India Schiller', nifty_macro.NIFTY_SERIES, nifty_macro.NIFTY_REPORT_GROUPS,
+        'Indian market valuation | NSE NIFTY, Indian inflation and requested research sources',
+        'Indian inputs only. NIFTYCAPE is an estimate, not IIM/NSE published CAPE. '
+        'CPI ends March 2025; index and earnings-methodology changes affect comparability.',
+        pdf_pages=pdf_pages)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -2255,7 +2660,9 @@ def main():
         python Option-OGN.py                          # interactive, all FnO
         python Option-OGN.py WTI                      # full analysis, one symbol
         python Option-OGN.py WTI US02Y__US10Y         # ... plus a comparison
-        python Option-OGN.py WTI US02Y__US10Y 250     # ... over the last 250 days
+        python Option-OGN.py WTI US02Y__US10Y 250     # ... over the last 250 observations
+        python Option-OGN.py --pdf WTI JP10Y --periods 120  # monthly alignment
+        python Option-OGN.py --pdf WTI JP10Y --compare-frequency quarterly
         python Option-OGN.py --estimator Raw WTI      # choose the volatility estimator
         python Option-OGN.py --trend-bars 250 GLD     # widen the trendline lookback
         python Option-OGN.py --trend-distance 20 GLD  # demand 20 bars between pivots
@@ -2272,6 +2679,14 @@ def main():
         args.remove('--pdf')
 
     try:
+        comparison_frequency = (_take_flag_value(args, '--compare-frequency') or 'auto').lower()
+        comparison_aggregation = (_take_flag_value(args, '--compare-aggregation') or 'auto').lower()
+        raw_periods = _take_flag_value(args, '--periods')
+        requested_periods = None if raw_periods is None else _positive_number(raw_periods, '--periods', int)
+        if comparison_frequency not in ('auto', *COMP_FREQUENCIES):
+            raise ValueError('--compare-frequency must be auto, daily, weekly, monthly, quarterly or annual.')
+        if comparison_aggregation not in ('auto', 'mean', 'last', 'sum'):
+            raise ValueError('--compare-aggregation must be auto, mean, last or sum.')
         raw_bars = _take_flag_value(args, '--trend-bars')
         raw_distance = _take_flag_value(args, '--trend-distance')
         raw_prominence = _take_flag_value(args, '--trend-prominence')
@@ -2328,20 +2743,26 @@ def main():
         else:
             tokens.append(arg)
 
-    days = None
+    days = requested_periods
     if tokens and tokens[-1].lstrip('+-').isdigit():
+        if requested_periods is not None:
+            print('  [error] Use --periods or the trailing window, not both.')
+            return
         days = int(tokens.pop())
         if days <= 0:
-            print(f"  [error] days must be positive, got {days}.")
+            print(f"  [error] observations must be positive, got {days}.")
             return
 
     if len(tokens) > 2:
         print("Usage: python Option-OGN.py [--pdf] [--estimator NAME] "
               "[--trend-bars N] [--trend-distance N] [--trend-prominence X] "
-              "[symbol] [compare_symbol] [days]")
+              "[--compare-frequency FREQ] [--compare-aggregation METHOD] "
+              "[symbol] [compare_symbol] [observations]")
         print("  symbol            full technical analysis for this series")
         print("  compare_symbol    optional - append a statistical comparison")
-        print("  days              optional - restrict the comparison to the last N days")
+        print("  observations      optional - last N aligned observations; also --periods N")
+        print("  --compare-frequency   auto (slower source), daily, weekly, monthly, quarterly, annual")
+        print("  --compare-aggregation auto (series-specific), mean, last, sum")
         print(f"  --estimator       optional - default {DEFAULT_ESTIMATOR}; one of: "
               f"{', '.join(ESTIMATORS)}")
         print(f"  --trend-bars      optional - default {TREND_BARS}; trendline lookback")
@@ -2356,13 +2777,17 @@ def main():
     symbol = tokens[0].upper() if len(tokens) >= 1 else None
     compare_with = tokens[1].upper() if len(tokens) == 2 else None
 
-    if days and not compare_with:
-        print("  [error] days only applies when a second symbol is given.")
+    if not compare_with and (days or comparison_frequency != 'auto' or comparison_aggregation != 'auto'):
+        print('  [error] Comparison options require a second symbol.')
         return
 
     if use_pdf and not pdf_path:
         if symbol and compare_with:
-            suffix = f"_{days}d" if days else ""
+            suffix = f"_{days}obs" if days else ""
+            if comparison_frequency != 'auto':
+                suffix += f'_{comparison_frequency}'
+            if comparison_aggregation != 'auto':
+                suffix += f'_{comparison_aggregation}'
             pdf_path = f"charts/{symbol}_vs_{compare_with}{suffix}_Analysis.pdf"
         elif symbol:
             pdf_path = f"charts/{symbol}_Analysis.pdf"
@@ -2378,7 +2803,9 @@ def main():
                     trend_bars=trend_bars,
                     trend_distance=trend_distance,
                     trend_prominence=trend_prominence,
-                    trend_prominence_pct=trend_prominence_pct)
+                    trend_prominence_pct=trend_prominence_pct,
+                    comparison_frequency=comparison_frequency,
+                    comparison_aggregation=comparison_aggregation)
     except (ValueError, FileNotFoundError) as e:
         print(f"  [error] {e}")
 
