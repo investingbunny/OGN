@@ -61,6 +61,7 @@ from scipy.signal import find_peaks
 import japan_macro
 import nifty_macro
 import schiller_macro
+import option_overlay
 
 # Optional: stocktrends for Renko (pip install stocktrends)
 try:
@@ -114,6 +115,7 @@ from OGN import (
     load_equity,
     load_full_futures,
     load_monthly_options,
+    load_derivatives,
     load_index,
     NSEFnOList,
     WATCHLIST,
@@ -149,6 +151,7 @@ REPORT_SECTIONS = [
     'technical',    # multi-panel indicator chart for the first symbol
     'trendlines',   # candlestick page with support / resistance regression lines
     'volatility',   # volatility cone / rolling / histogram page
+    'option_overlay',
     'comparison',   # statistical comparison, only when a second symbol is given
     'japan_macro',
     'schiller_macro',
@@ -1161,7 +1164,11 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
                 trend_bars=TREND_BARS, trend_distance=TREND_DISTANCE,
                 trend_prominence=None,
                 trend_prominence_pct=TREND_PROMINENCE_PCT,
-                comparison_frequency='auto', comparison_aggregation='auto'):
+                comparison_frequency='auto', comparison_aggregation='auto',
+                option_dates=option_overlay.OPTION_HISTORY_DATES,
+                option_min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
+                option_outliers=option_overlay.OPTION_OUTLIER_COUNT,
+                option_rate=RiskFreeRate, option_iv_unit='percent'):
     """Run technical analysis for each symbol in the list.
 
     Sections are driven by REPORT_SECTIONS, so any of them can be commented out.
@@ -1181,6 +1188,11 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
                               auto-scaling the prominence
         comparison_frequency: auto chooses the slower native cadence
         comparison_aggregation: auto, mean, last or sum for downsampled series
+        option_dates:         Recent underlying trading dates for option IV overlays
+        option_min_contracts: Minimum traded contracts for eligible option observations
+        option_outliers:      Additional qualifying MAD outliers per side/expiry/date
+        option_rate:          Annual decimal rate for Black-76 IV estimates
+        option_iv_unit:       Unit of source-reported IV: percent or decimal
     """
     if single_scrip:
         symbols = [single_scrip]
@@ -1292,7 +1304,10 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         if 'volatility' in REPORT_SECTIONS:
             try:
                 volatility_analysis(OHLCdf.set_index('Date'), Scrip,
-                                    estimator=estimator, pdf_pages=pdf_pages)
+                                    estimator=estimator, pdf_pages=pdf_pages,
+                                    option_dates=option_dates, option_min_contracts=option_min_contracts,
+                                    option_outliers=option_outliers, option_rate=option_rate,
+                                    option_iv_unit=option_iv_unit)
             except (ValueError, KeyError) as e:
                 print(f"  [volatility skipped] {e}")
 
@@ -2257,6 +2272,66 @@ def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None,
 # Volatility estimators (cone, rolling, distribution)
 # ---------------------------------------------------------------------------
 
+def build_volatility_option_overlay(price_data, ticker, estimator,
+                                     date_count=option_overlay.OPTION_HISTORY_DATES,
+                                     min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
+                                     outlier_count=option_overlay.OPTION_OUTLIER_COUNT,
+                                     rate=RiskFreeRate, reported_iv_unit='percent'):
+    """Load all expiries for one underlying and build an as-of IV overlay."""
+    if date_count < 1 or min_contracts < 1 or not 0 <= outlier_count <= 2:
+        raise ValueError('Option dates and minimum contracts must be positive; outliers must be 0, 1 or 2')
+    if estimator in MOMENT_ESTIMATORS:
+        print(f'  [options] IV overlays do not apply to the {estimator} moment estimator.')
+        return None
+    if estimator in RANGE_ESTIMATORS and not _has_intraday_range(price_data):
+        print(f'  [options] {estimator} needs actual underlying high/low ranges for an IV comparison.')
+        return None
+    history = price_data.copy()
+    history.index = pd.DatetimeIndex(pd.to_datetime(history.index, errors='coerce'))
+    if history.index.tz is not None:
+        history.index = history.index.tz_localize(None)
+    history.index = history.index.normalize()
+    history = history[history.index.notna() & (history.index <= pd.Timestamp(datetime.date.today()))].sort_index()
+    if history.empty or history.index.duplicated().any():
+        print('  [options] A unique daily underlying price history is required.')
+        return None
+    frequency, _ = _comp_native_frequency(history['Close'])
+    if frequency != 'daily':
+        print('  [options] Option IV overlays require daily underlying prices, not monthly/quarterly macro observations.')
+        return None
+    dates = history.index[-date_count:]
+    try:
+        derivatives = load_derivatives(ticker, start=f'{dates[0]:%Y-%m-%d}', end=f'{dates[-1]:%Y-%m-%d}')
+    except FileNotFoundError:
+        print(f'  [options] No stored derivatives for {ticker}; historical-volatility charts remain unchanged.')
+        return None
+    if derivatives.empty:
+        print(f'  [options] No option observations for {ticker} in the selected date window.')
+        return None
+    chain, diagnostics = option_overlay.prepare_option_iv(
+        derivatives, ticker, dates, rate=rate, reported_iv_unit=reported_iv_unit,
+        min_contracts=min_contracts)
+    points = option_overlay.select_option_points(chain, outlier_count=outlier_count,
+                                                 min_contracts=min_contracts)
+    if points.empty:
+        print(f"  [options] No valid IV points: {diagnostics['eligible_contracts']} eligible contracts, "
+              f"{diagnostics['missing_forward']} missing exact-expiry futures, "
+              f"{diagnostics['invalid_premium']} invalid premiums, "
+              f"{diagnostics['solver_failures']} solver failures.")
+        if diagnostics['solver_unavailable']:
+            print('  [options] Install vollib to estimate missing IV; reported IV can be used directly.')
+        return None
+    points = option_overlay.attach_realized_benchmarks(
+        points, history, lambda available, tenor: get_volatility_estimator(available, estimator, tenor))
+    print(f"  [options] {len(points)} selected points across {points['Expiry'].nunique()} expiries and "
+          f"{points['Date'].nunique()} dates; {diagnostics['reported_iv']} reported IV, "
+          f"{diagnostics['estimated_iv']} Black-76 estimates. Rate {rate:.2%}, ACT/365.")
+    return {'points': points, 'diagnostics': diagnostics, 'as_of': dates[-1],
+            'estimator': estimator, 'top_count': option_overlay.OPTION_TOP_COUNT,
+            'outlier_count': outlier_count, 'min_contracts': min_contracts, 'rate': rate,
+            'reported_iv_unit': reported_iv_unit}
+
+
 def get_volatility_estimator(price_data, estimator=DEFAULT_ESTIMATOR,
                              window=VOLATILITY_WINDOW, clean=True):
     """Rolling estimator series from the standalone model modules.
@@ -2298,7 +2373,7 @@ def compute_volatility_profile(price_data, estimator=DEFAULT_ESTIMATOR,
     if not usable:
         return None
 
-    cone = {'windows': [], 'max': [], 'top_q': [], 'median': [],
+    cone = {'windows': [], 'max': [], 'top_q': [], 'median': [], 'mean': [],
             'bottom_q': [], 'min': [], 'realized': [], 'series': []}
 
     for w in usable:
@@ -2310,6 +2385,7 @@ def compute_volatility_profile(price_data, estimator=DEFAULT_ESTIMATOR,
         cone['max'].append(series.max())
         cone['top_q'].append(series.quantile(quantiles[1]))
         cone['median'].append(series.median())
+        cone['mean'].append(series.mean())
         cone['bottom_q'].append(series.quantile(quantiles[0]))
         cone['min'].append(series.min())
         cone['realized'].append(series.iloc[-1])
@@ -2347,6 +2423,7 @@ def plot_volatility(profile, ticker, pdf_pages=None):
     rolling = profile['rolling']
     label = _volatility_formatter(profile)
     lower, upper = profile['quantiles']
+    options = profile.get('option_overlay')
 
     figure = plt.figure(figsize=(30, 17))
     figure.suptitle(
@@ -2363,6 +2440,8 @@ def plot_volatility(profile, ticker, pdf_pages=None):
         ax_cone.plot(cone['windows'], cone['top_q'], marker='o',
                      label=f"{int(upper * 100)}th Prctl")
         ax_cone.plot(cone['windows'], cone['median'], marker='o', label='Median')
+        ax_cone.plot(cone['windows'], cone['mean'], color='#555555', linestyle='--',
+                 linewidth=1.8, label='Historical mean')
         ax_cone.plot(cone['windows'], cone['bottom_q'], marker='o',
                      label=f"{int(lower * 100)}th Prctl")
         ax_cone.plot(cone['windows'], cone['min'], marker='o', label='Min')
@@ -2376,6 +2455,13 @@ def plot_volatility(profile, ticker, pdf_pages=None):
         ax_cone.tick_params(labelsize=13)
         ax_cone.legend(fontsize=13)
         ax_cone.set_title('Volatility Cone', fontsize=20, fontweight='bold', pad=8)
+        if options is not None:
+            latest = options['points'][options['points']['Date'].eq(options['as_of'])]
+            if not latest.empty:
+                option_overlay.plot_option_markers(ax_cone, latest, 'Tenor sessions', fontsize=9)
+                ax_cone.set_xlabel('Lookback / expiry tenor (weekday sessions)', fontsize=13)
+                ax_cone.set_title(f"Volatility Cone + Option IV | {options['as_of']:%d %b %Y}",
+                                  fontsize=18, fontweight='bold', pad=8)
 
     # --- Box plot of the same per-window distributions ---
     if has('box'):
@@ -2461,6 +2547,11 @@ def plot_volatility(profile, ticker, pdf_pages=None):
                 cell.set_text_props(fontweight='bold')
         ax_table.set_title('Summary', fontsize=20, fontweight='bold', pad=8)
 
+    if options is not None:
+        figure.text(0.05, 0.017,
+                    f"Option IV: CE green, PE red; (strike, expiry) labels; outlined smile-MAD outliers. "
+                    f"Black-76 estimates use {options['rate']:.2%} ACT/365; realized volatility uses 252/year. "
+                    'Date-series pages follow by expiry.', fontsize=11, color='#555555')
     if pdf_pages:
         pdf_pages.savefig(figure)
         plt.close(figure)
@@ -2469,14 +2560,30 @@ def plot_volatility(profile, ticker, pdf_pages=None):
 
 
 def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
-                        pdf_pages=None):
+                        pdf_pages=None, option_dates=option_overlay.OPTION_HISTORY_DATES,
+                        option_min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
+                        option_outliers=option_overlay.OPTION_OUTLIER_COUNT,
+                        option_rate=RiskFreeRate, option_iv_unit='percent'):
     """Compute and render the volatility page for one symbol."""
     if estimator in RANGE_ESTIMATORS and not _has_intraday_range(price_data):
         print(f"  [volatility] {estimator} needs an intraday high/low range, but "
               f"{ticker} has flat bars - it will read zero.")
         print(f"  [volatility] Use Raw, HodgesTompkins or YangZhang for this series.")
 
-    profile = compute_volatility_profile(price_data, estimator=estimator)
+    options = None
+    if 'option_overlay' in REPORT_SECTIONS:
+        try:
+            options = build_volatility_option_overlay(
+                price_data, ticker, estimator, date_count=option_dates,
+                min_contracts=option_min_contracts, outlier_count=option_outliers,
+                rate=option_rate, reported_iv_unit=option_iv_unit)
+        except Exception as error:
+            print(f'  [options unavailable] {type(error).__name__}: {error}')
+    windows = list(VOLATILITY_WINDOWS)
+    if options is not None:
+        latest = options['points'][options['points']['Date'].eq(options['as_of'])]
+        windows = sorted(set(windows) | set(latest.loc[latest['RV count'] > 0, 'Tenor sessions'].astype(int)))
+    profile = compute_volatility_profile(price_data, estimator=estimator, windows=windows)
     if profile is None:
         print(f"  [volatility] Not enough history for {ticker} "
               f"(need more than {min(VOLATILITY_WINDOWS) + 1} rows).")
@@ -2490,7 +2597,10 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
               f"median {label(rolling.median())}, "
               f"range {label(rolling.min())} to {label(rolling.max())}")
 
+    profile['option_overlay'] = options
     plot_volatility(profile, ticker, pdf_pages=pdf_pages)
+    if options is not None:
+        option_overlay.plot_option_history(options, ticker, pdf_pages=pdf_pages)
     return profile
 
 
@@ -2679,6 +2789,23 @@ def main():
         args.remove('--pdf')
 
     try:
+        raw_option_dates = _take_flag_value(args, '--option-dates')
+        raw_option_contracts = _take_flag_value(args, '--option-min-contracts')
+        raw_option_outliers = _take_flag_value(args, '--option-outliers')
+        raw_option_rate = _take_flag_value(args, '--option-rate')
+        option_iv_unit = (_take_flag_value(args, '--option-iv-unit') or 'percent').lower()
+        option_dates = (option_overlay.OPTION_HISTORY_DATES if raw_option_dates is None
+                        else _positive_number(raw_option_dates, '--option-dates', int))
+        option_min_contracts = (option_overlay.OPTION_MIN_CONTRACTS if raw_option_contracts is None
+                                else _positive_number(raw_option_contracts, '--option-min-contracts', int))
+        option_outliers = option_overlay.OPTION_OUTLIER_COUNT if raw_option_outliers is None else int(raw_option_outliers)
+        option_rate = RiskFreeRate if raw_option_rate is None else float(raw_option_rate)
+        if option_outliers not in (0, 1, 2):
+            raise ValueError('--option-outliers must be 0, 1 or 2.')
+        if option_iv_unit not in ('percent', 'decimal'):
+            raise ValueError('--option-iv-unit must be percent or decimal.')
+        if not np.isfinite(option_rate) or not -1 < option_rate < 1:
+            raise ValueError('--option-rate must be a finite annual decimal between -1 and 1.')
         comparison_frequency = (_take_flag_value(args, '--compare-frequency') or 'auto').lower()
         comparison_aggregation = (_take_flag_value(args, '--compare-aggregation') or 'auto').lower()
         raw_periods = _take_flag_value(args, '--periods')
@@ -2763,6 +2890,11 @@ def main():
         print("  observations      optional - last N aligned observations; also --periods N")
         print("  --compare-frequency   auto (slower source), daily, weekly, monthly, quarterly, annual")
         print("  --compare-aggregation auto (series-specific), mean, last, sum")
+        print('  --option-dates N          recent trading dates for IV overlays (default 5)')
+        print('  --option-min-contracts N  minimum daily traded contracts (default 10)')
+        print('  --option-outliers N       extra smile-MAD outliers per side/expiry/date (0, 1, 2)')
+        print('  --option-rate R           annual decimal rate for Black-76 (default 0.065)')
+        print('  --option-iv-unit UNIT     source IV units: percent (default) or decimal')
         print(f"  --estimator       optional - default {DEFAULT_ESTIMATOR}; one of: "
               f"{', '.join(ESTIMATORS)}")
         print(f"  --trend-bars      optional - default {TREND_BARS}; trendline lookback")
@@ -2805,7 +2937,10 @@ def main():
                     trend_prominence=trend_prominence,
                     trend_prominence_pct=trend_prominence_pct,
                     comparison_frequency=comparison_frequency,
-                    comparison_aggregation=comparison_aggregation)
+                    comparison_aggregation=comparison_aggregation,
+                    option_dates=option_dates, option_min_contracts=option_min_contracts,
+                    option_outliers=option_outliers, option_rate=option_rate,
+                    option_iv_unit=option_iv_unit)
     except (ValueError, FileNotFoundError) as e:
         print(f"  [error] {e}")
 
