@@ -11,6 +11,8 @@ End-to-end pipeline for downloading, storing, and analysing NSE (National Stock 
 | **OGN v2.0-download.py** | Downloads daily market data from NSE across 11 categories (Equity, Derivatives, Indices, Short Selling, Volatility, Market Activity, Price Band, PE Ratio, Corporate Bonds, Delivery Positions, WDM Daily), plus a 12th **Macro** category sourced from FRED and Yahoo Finance. Handles incremental updates, raw→processed merge, deduplication, and error recovery. |
 | **OGN.py** | Data loader module — provides Python functions to read processed Parquet data. Use `from OGN import load_equity, load_futures, load_options, load_index, load_macro` etc. in your own scripts or notebooks. |
 | **Option-OGN.py** | Technical analysis & charting — generates multi-panel charts (MACD, RSI, ADX, Bollinger Bands, Fibonacci, Max Pain, Futures Fair Value, Renko), a volatility-cone page from the standalone estimator models, and an optional statistical comparison against a second symbol. Supports interactive display and PDF export. |
+| [schiller_macro.py](schiller_macro.py) | US-only Schiller valuations: Robert Shiller's CAPE/real-price/earnings workbook and Multpl valuation histories. |
+| [nifty_macro.py](nifty_macro.py) | Separate India Schiller group: NIFTY valuations, calculated Indian-only CAPE, and explicitly unverified IIM/RBI/index-price-sales sources. |
 | **models.py** + `GarmanKlass.py`, `HodgesTompkins.py`, `Kurtosis.py`, `Parkinson.py`, `Raw.py`, `RogersSatchell.py`, `Skew.py`, `YangZhang.py` | Volatility estimators. One module per model, each exposing `get_estimator(price_data, window, clean)`. |
 
 ---
@@ -139,10 +141,13 @@ gold_silver = load_macro("GLD_SLV")
 Categories 1–11 are day-file downloads from NSE. The **Macro** category is different: each
 series is a single full-history file refreshed in place, and every file shares one schema:
 
-`Date, Symbol, Value, Series, Name, Unit, Source`
+`Date, Symbol, Value, Series, Name, Unit, Source, Frequency, Description`
 
-All three registries live at the top of `OGN v2.0-download.py`. **Comment out any line to
-skip that series.**
+The FRED, World Bank, Yahoo and ratio registries live at the top of
+`OGN v2.0-download.py`. **Comment out any line to skip that series.** Japan uses
+`JAPAN_SERIES` in [japan_macro.py](japan_macro.py); US Schiller uses `SCHILLER_SERIES`
+in [schiller_macro.py](schiller_macro.py); India Schiller uses `NIFTY_SERIES` in
+[nifty_macro.py](nifty_macro.py). The downloaders and PDF pages share these definitions.
 
 ### FRED (`FRED_SERIES`)
 
@@ -188,13 +193,204 @@ Requires `yfinance`. The first run pulls the full available history (`period="ma
 Computed from the stored legs over their overlapping dates, then written as a normal
 Macro file. To add one, append a `(symbol, numerator, denominator, name)` tuple.
 
+### Japan Macro and Carry Trade
+
+Japan refreshes automatically during the normal download run. To update Japan only,
+without contacting NSE, and generate an analysis PDF with the Japan appendix:
+
+```powershell
+.\.venv\Scripts\python.exe "OGN v2.0-download.py" --japan-only
+.\.venv\Scripts\python.exe Option-OGN.py --pdf JPUSDJPY
+```
+
+Each series is stored under `MarketData_Parquet/Macro/Processed/{symbol}.parquet`.
+The existing FRED `USDJPY` file is unchanged; `JPUSDJPY` uses Yahoo's `USDJPY=X`.
+Every analysis PDF includes three Japan pages once per report: funding/carry trade;
+growth/inflation/wages; positioning/capital flows. Each panel includes the stored
+ticker, source identifier, definition, frequency, units, and latest observation date.
+Charts read local data only and show the past five years. Remove `japan_macro` from
+`REPORT_SECTIONS` in [Option-OGN.py](Option-OGN.py) to disable this appendix.
+
+Verified public downloads:
+
+| Ticker | Source Identifier | Frequency | Definition / Unit |
+|---|---|---|---|
+| `JPUSDJPY` | Yahoo `USDJPY=X` | Daily | Yen per USD; a decline means yen appreciation. Not a streaming quote service. |
+| `JP10Y` | FRED/OECD `IRLTLT01JPM156N` | Monthly | Japanese 10-year government bond yield, percent; not real-time. |
+| `JPPOLRATE` | BIS `WS_CBPOL/D.JP` | Daily | BOJ policy-rate history, percent; changes follow policy decisions, with historical regime changes and gaps. |
+| `JPCOTSHORT` | CFTC `6dca-aqww`, contract `097741` | Weekly | CME yen futures-only noncommercial shorts minus longs, contracts. Positive = net short yen. |
+| `JPLEADING` | Cabinet Office/ESRI, CI Leading | Monthly | Official composite leading index, 2020=100; not the OECD CLI or a diffusion index. |
+| `JPTOKYOCORE` | Statistics Dashboard `0703010601010030010`, region `13100` | Monthly | Tokyo ku-area CPI excluding fresh food, published percent YoY; energy remains included. |
+| `JPCORECPI` | Statistics Dashboard `0703010601010030010`, region `00000` | Monthly | National CPI excluding fresh food, published percent YoY. BOJ's 2% target is formally all-items CPI. |
+| `JPWAGES` | Statistics Dashboard `0302020000000030000`, region `00000` | Monthly | Nominal total cash earnings growth, percent YoY; includes bonuses and overtime. Latest releases may be preliminary. |
+| `JPCURRENT` | MOF `6s-1-4`, current account | Monthly | Current-account balance, not seasonally adjusted, billions of JPY; converted from 100 million yen. |
+| `JPXBYEN` | BIS `WS_LBS_D_PUB/Q.S.C.G.JPY.A.5J.A.5A.A.5J.N` | Quarterly | Cross-border yen loans/deposits of all reporting banks, millions of USD equivalent; not a direct carry-trade size estimate. |
+| `JPFOREIGN` | BIS `WS_CBS_PUB/Q.S.JP.4R.F.C.A.A.TO1.A.5J` | Quarterly | Japanese banks' consolidated foreign claims, immediate-counterparty basis, millions of USD; excludes domestic positions, includes non-loan claims. |
+
+The report also reserves these exact indicators and displays an explicit gap until
+their required data is configured. It does not generate empty/fake Parquet histories
+or replace them with different measures:
+
+| Ticker | Indicator | Current Limitation |
+|---|---|---|
+| `JPTANKAN` | BOJ Tankan large manufacturers' actual business-conditions DI, quarterly | BOJ access was unavailable during verification; no exact public history adapter configured. |
+| `JPPMI` | S&P Global / au Jibun Bank Japan Composite Output PMI, monthly | No verified public historical feed configured; provider access is needed. |
+| `JPCOTINDEX` | MacroMicro JPY positioning COT index, weekly | No verified public feed or exact normalization methodology; `JPCOTSHORT` is a different measure. |
+| `JPJPYIV` | USD/JPY one-month ATM implied volatility, daily annualized percent | No verified public history configured. Realized volatility is not substituted. |
+| `JPCARRY` | Carry-to-risk ratio | Requires `FEDTARU`, `JPPOLRATE`, and `JPJPYIV` on the same date. |
+
+`JPCARRY = (FEDTARU - JPPOLRATE) / JPJPYIV`, using annualized percent for both rates
+and volatility. This explicitly uses the Fed target upper limit and BOJ policy rate;
+it is not claimed to reproduce MacroMicro's methodology. Missing dates are not
+forward-filled, zero/negative/nonfinite volatility is excluded, and revisions to any
+input are recomputed over their full stored overlap. The Japan-only command uses an
+already-stored `FEDTARU`; the normal update refreshes that US dependency first.
+
+Source dates are observation periods, **not publication timestamps**. CFTC data
+normally reports Tuesday positions on Friday, and monthly/quarterly releases arrive
+later than their period dates. Histories are revised, not point-in-time backtest data.
+Both CPI series use the official 2025-base published YoY history, not a calculated
+YoY change across incompatible index bases. Dashboard updates may lag preliminary
+Tokyo releases. BIS bank exposures include business unrelated to carry trades.
+
+Japan daily Yahoo data re-fetches 10 days; other regular sources re-fetch 400 days;
+BIS banking series re-fetch five years. ESRI, MOF and CPI refresh their available
+history to capture longer revisions/rebasing. Existing files survive failed requests;
+new values use the shared atomic merge. ESRI workbooks require `openpyxl>=3.1`.
+
+Official references: [CFTC](https://publicreporting.cftc.gov/),
+[BIS](https://data.bis.org/), [ESRI](https://www.esri.cao.go.jp/en/stat/di/di-e.html),
+[MOF](https://www.mof.go.jp/english/policy/international_policy/reference/balance_of_payments/ebpnet.htm),
+[Statistics Dashboard API](https://dashboard.e-stat.go.jp/en/static/api).
+This service uses the Statistics Dashboard API, but its contents are not guaranteed
+by the Government of Japan.
+
+Offline regression checks: `python -m unittest test_japan_macro -v`.
+
+### US Schiller Valuation
+
+The requested "Schiller" group is labeled **US Schiller** to distinguish it from
+**India Schiller**. The underlying US data is attributed to **Robert Shiller**,
+S&P Dow Jones Indices and Multpl. No Indian inputs enter this group.
+
+```powershell
+.\.venv\Scripts\python.exe "OGN v2.0-download.py" --schiller-only
+.\.venv\Scripts\python.exe Option-OGN.py --pdf WTI SCHCAPE --periods 120
+```
+
+| Ticker | Metric / Source | Native Frequency | Verified Available History |
+|---|---|---|---|
+| `SCHCAPE` | Conventional PE10 / Robert Shiller workbook CAPE column | Monthly | Jan 1881 - latest workbook |
+| `SCHREAL` | Inflation-adjusted US stock composite / published Real Price | Monthly | Jan 1871 - latest workbook |
+| `SCHEARN` | Nominal trailing annual earnings / workbook E column | Monthly, source-interpolated | Jan 1871 - latest available earnings |
+| `SCHEPS` | Single-quarter as-reported S&P 500 EPS / S&P DJI | Quarterly | **Unavailable:** official workbook returned HTTP 403; exact parser not configured |
+| `SCHPE` | Trailing P/E / Multpl | Monthly | Jan 1871 - latest table |
+| `SCHEY` | Trailing earnings yield, percent / Multpl | Monthly | Jan 1871 - latest table |
+| `SCHPS` | S&P 500 price/sales / Multpl | Quarterly | Dec 2000 - latest reported/estimated quarter |
+| `SCHPB` | S&P 500 price/book / Multpl | Quarterly | Dec 1999 - latest reported/estimated quarter |
+| `SCHBV` | S&P 500 book value per index share / Multpl | Quarterly | Dec 1999 - latest reported quarter |
+
+The official [Shiller data page](https://shillerdata.com/) links the current
+`ie_data.xls` workbook. Its published historical composite is not the modern S&P 500
+throughout the nineteenth century. `SCHEARN` contains source-interpolated trailing
+annual earnings; it is **not substituted for quarterly reported EPS**. `SCHREAL` is a
+real price index, not a total-return index. The current workbook can contain estimated
+CPI or preliminary current-month prices. The conventional CAPE column is not the
+alternative total-return CAPE column.
+
+Multpl historical tables supply [P/E](https://www.multpl.com/s-p-500-pe-ratio/table/by-month),
+[earnings yield](https://www.multpl.com/s-p-500-earnings-yield/table/by-month),
+[P/S](https://www.multpl.com/s-p-500-price-to-sales/table/by-quarter),
+[P/B](https://www.multpl.com/s-p-500-price-to-book/table/by-quarter), and
+[book value](https://www.multpl.com/s-p-500-book-value/table/by-quarter).
+The extra live-date quote is excluded rather than relabeled as a monthly or quarterly
+observation. Historical estimates are marked in each stored row's `Description`.
+GuruFocus is not needed for the publicly verified Multpl tables; no paid export is bypassed.
+
+First runs retain the full available history from 1871, not the general 50-year macro
+lookback. Later Multpl updates merge a 400-day revision overlap using the existing atomic
+Parquet writer. The small Shiller workbook is fetched once per group refresh and its
+complete histories are revalidated. **All real-price history is rewritten together** so
+new US CPI-base values are not appended onto a different old base; a response truncating
+stored date coverage is rejected. HTTP, rate-limit and parse failures are retried, and
+failed series leave existing files intact without blocking independent sources.
+Reading legacy XLS requires `xlrd>=2.0.1` from [requirements.txt](requirements.txt).
+
+### India Schiller / NIFTY
+
+This is a separate **Indian-market-only group**, including every metric in the supplied
+India matrix. Its registry, calculations, tickers and chart pages are separate from US
+Schiller. Missing Indian history is **never** replaced with US P/E, US CPI, US CAPE,
+Sensex valuations or company-screener averages.
+
+```powershell
+.\.venv\Scripts\python.exe "OGN v2.0-download.py" --india-schiller-only
+```
+
+This command refreshes the verified Indian `INCPI` history and computes NIFTY metrics
+from the existing [OGN v2.0-download.py](OGN%20v2.0-download.py) NSE index pipeline's
+`MarketData_Parquet/Indices/Processed/NIFTY.parquet`. The normal full download also runs
+this group **after** the NSE index merge, so new index data is available to calculations.
+The group-only command does not backfill NSE day files or require an NSE session.
+
+| Ticker | Metric / Requested Primary Source | Implementation / Availability |
+|---|---|---|
+| `INIIMCAPE` | Published India CAPE / IIM Ahmedabad | **Unverified:** exact dataset/paper link, index universe, frequency and claimed 2004-present range need confirmation. Not filled with a local estimate. |
+| `NIFTYCAPE` | Additional calculated NIFTY CAPE estimate | Uses Indian NIFTY price/P/E-implied earnings and Indian CPI only; requires 120 consecutive complete months. Not official NSE or IIM CAPE. |
+| `NIFTYPE` | NIFTY 50 trailing P/E / NSE Indices | Last available observation of each closed month from stored NSE history. |
+| `NIFTYPB` | NIFTY 50 price/book / NSE Indices | Published P/B, sampled monthly; not inferred from US or company data. |
+| `NIFTYEPS` | NIFTY 50 earnings / NSE data | Explicitly **implied trailing earnings**: same-date NIFTY Close / P/E. Not audited quarterly EPS. |
+| `NIFTYDY` | NIFTY 50 dividend yield / NSE Indices | Published DY in percent, sampled monthly. |
+| `NIFTYEY` | NIFTY earnings yield / calculated from NSE | `100 / PE` in percent, equivalent to `1 / PE` as a fraction. P/E 20 means yield 5%, not 0.05%. |
+| `INRBICPI` | Indian CPI / RBI DBIE | **Unverified export adapter:** separate requested CPI Combined series; not relabeled OECD or US CPI. |
+| `INRBIWPI` | Indian WPI / RBI DBIE | **Unverified export adapter:** separate all-commodities wholesale price series, never spliced into CPI. |
+| `NIFTYPS` | Indian index price/sales / BSE, Trendlyne, Screener | **Unverified:** an aggregate NIFTY 50 historical series is required. Company and Sensex P/S values are not substitutes. |
+| `INCPI` | Additional Indian CPI deflator / OECD via FRED | Verified Indian all-items index, 2015=100, ending March 2025. Used only for the explicitly labeled NIFTY estimate, not presented as RBI DBIE. |
+
+Requested source portals: [IIM Ahmedabad](https://www.iima.ac.in/),
+[NSE Nifty Indices](https://www.niftyindices.com/reports/historical-data),
+[RBI DBIE](https://data.rbi.org.in/#/dbie/dataquery_enhanced),
+[BSE India](https://www.bseindia.com/). The supplied 1999-present and 2004-present
+ranges are source expectations, not guaranteed local coverage. The existing NSE
+day-file downloader starts in 2010 by default. No automated IIM/RBI/NIFTY price-sales
+history is claimed until the exact export and its definition can be verified.
+
+For the estimate, let `P_t` be NIFTY close, `PE_t` the matching NSE P/E and `C_t` Indian CPI:
+
+```text
+E_t = P_t / PE_t
+NIFTYCAPE_t = (P_t / C_t) / mean(E_s / C_s for s = t-119, ..., t)
+```
+
+Monthly inputs use the last observation of a closed month with at least 80% weekday
+coverage. Zero/negative P/E and invalid prices/CPI are excluded. All 120 calendar
+months must exist; missing months or CPI are never filled, and US CPI is explicitly
+rejected by provenance checks. CPI series rebasing must be consistent throughout the
+window. Historical NSE earnings-methodology and index-composition changes limit this
+estimate's comparability; there is no silent adjustment for those breaks.
+
+NIFTY histories are recomputed and merged without duplicate dates so input revisions
+propagate into derived values. No fabricated observations or empty histories are written
+when inputs are missing. With the configured discontinued Indian CPI, the latest possible
+estimate is March 2025, even if NIFTY prices are newer. At verification, the local NIFTY
+index folder was empty; Indian valuation panels therefore correctly show missing data.
+
+Both new groups append **two separate pages each** once per analysis PDF, using the
+same layout as Japan: ticker, source ID, frequency, definition, units, latest observation
+date, and explicit gaps. Disable them independently using `schiller_macro` or
+`india_schiller` in `REPORT_SECTIONS`. Stored monthly/quarterly histories automatically
+participate in the existing mixed-frequency statistical comparison workflow.
+
+Focused tests: `python -m unittest test_valuation_macro -v`.
+
 ### Incremental behaviour
 
 Every Macro series updates incrementally:
 
 1. Read the stored Parquet and find its last date.
-2. Re-fetch from `last_date − 10 days` (`MACRO_REFRESH_OVERLAP_DAYS`) so upstream
-   revisions are picked up.
+2. Re-fetch from `last_date − 10 days` for daily market series; monthly/quarterly
+  FRED series use 400 days and annual World Bank series use five years to capture
+  revisions. Japan-specific windows are described above.
 3. Merge, deduplicate on `Date` keeping the newest row, sort, and write atomically via a
    temp file.
 
@@ -276,8 +472,12 @@ The report is assembled from two commentable registries at the top of
 # Whole sections
 REPORT_SECTIONS = [
     'technical',    # multi-panel indicator chart for the first symbol
+  'trendlines',   # price with regression support/resistance
     'volatility',   # volatility cone / rolling / histogram page
     'comparison',   # statistical comparison, only when a second symbol is given
+  'japan_macro',  # Japan appendix once per PDF
+    'schiller_macro',  # US-only valuations
+    'india_schiller',  # Indian-only valuations and CAPE estimate
 ]
 
 # Individual panels on the volatility page
@@ -290,8 +490,8 @@ VOLATILITY_PANELS = [
 ]
 ```
 
-For example, to produce only the technical chart, comment out `'volatility'` and
-`'comparison'`. Sections that fail (bad estimator, too little history, no overlapping
+For example, to produce only the technical chart, leave only `'technical'` enabled.
+Sections that fail (bad estimator, too little history, no overlapping
 dates) are skipped with a printed reason rather than aborting the run.
 
 ---
@@ -299,12 +499,13 @@ dates) are skipped with a printed reason rather than aborting the run.
 ## Statistical Comparison
 
 Passing a **second symbol** appends a statistical comparison to the report, after the full
-technical analysis of the first. It works across **any two** downloaded series — FRED,
-Yahoo, Equity, Indices, Derivatives, Volatility, PE Ratio and the rest — and reports the
+technical analysis of the first. It works across **any two** downloaded series: US,
+India and Japan macro sources, FRED, World Bank, Yahoo, Equity, Indices, Derivatives,
+Volatility, PE Ratio and the rest. It reports the
 relationship measures used in statistical-arbitrage and lead-lag research.
 
 ```bash
-python Option-OGN.py [--pdf] <symbol> <compare_symbol> [days]
+python Option-OGN.py [--pdf] <symbol> <compare_symbol> [observations]
 ```
 
 ### Symbols
@@ -318,6 +519,8 @@ python Option-OGN.py NIFTY US10Y            # index vs macro
 python Option-OGN.py RELIANCE NIFTY         # equity vs index
 python Option-OGN.py WTI US02Y__US10Y       # macro vs ratio
 python Option-OGN.py GLD__SLV US10Y         # ratio computed on the fly
+python Option-OGN.py --pdf WTI JP10Y 120    # daily WTI vs monthly Japan yield, 120 months
+python Option-OGN.py --pdf WTI JPXBYEN      # daily WTI vs quarterly BIS yen lending
 ```
 
 The double underscore keeps ratios unambiguous against stored names that contain a single
@@ -325,8 +528,10 @@ underscore — `GLD_SLV` loads the stored Parquet file, while `GLD__SLV` compute
 fresh from `GLD` and `SLV`. It is also filename-safe, so it survives in the generated PDF
 name (`charts/WTI_vs_US02Y__US10Y_Analysis.pdf`).
 
-A ratio is built in memory over the two legs' overlapping dates and is never written to
-disk. Exactly one `__` is allowed per argument.
+A ratio is built in memory after its two legs are aligned to their slower native cadence
+with the default aggregation rules below. Division happens after aggregation, zero
+denominators are excluded, and the ratio carries its resulting frequency into the outer
+comparison. It is never written to disk. Exactly one `__` is allowed per argument.
 
 > **Any source can drive the full analysis.** Single-value series (FRED, Yahoo, ratios)
 > have no OHLC bars, so they are expanded into flat bars (`Open = High = Low = Close`,
@@ -334,36 +539,95 @@ disk. Exactly one `__` is allowed per argument.
 > Bollinger, ATR, ADX) remain meaningful; volume-based panels (OBV, the volume audit row)
 > are inert for those series.
 
-### Optional third argument: `days`
+### Comparison Window
 
 ```bash
-python Option-OGN.py GLD SLV 250            # comparison over the last 250 days
-python Option-OGN.py --pdf GLD SLV 250      # → charts/GLD_vs_SLV_250d_Analysis.pdf
+python Option-OGN.py GLD SLV 250            # last 250 common trading observations
+python Option-OGN.py --pdf GLD SLV 250      # charts/GLD_vs_SLV_250obs_Analysis.pdf
+python Option-OGN.py --pdf WTI JP10Y 120    # last 120 monthly observations
+python Option-OGN.py --pdf WTI JP10Y --periods 120  # equivalent named option
 python Option-OGN.py GLD SLV                # omitted → full common horizon
 ```
 
-- **Omitted** — the comparison runs over the entire overlap, i.e. the horizon of whichever
-  series is shorter. Ratios inherit the same rule.
-- **Supplied** — only the most recent N observations are used. Trimming happens *after*
-  alignment, so the sample is exactly N rows rather than whatever the two calendars happen
-  to share in the last N calendar days.
-- Must be at least 60 (`COMP_MIN_OBS`); below that the estimators are not meaningful and
-  the comparison is skipped with a clear message.
+- **Omitted**: use the common history. Weekly and slower comparisons use the latest
+  consecutive run of usable periods, so a missing month is not treated as a one-month lag.
+- **Supplied**: use the latest N observations *after* alignment. N means months for a
+  monthly comparison, quarters for quarterly, years for annual, and common observations
+  for daily. It never means N calendar days. The Python API retains the legacy name `days`.
+- At least 3 aligned observations are needed for descriptive charts. Below 60
+  (`COMP_MIN_OBS`), cointegration, Granger tests and mutual information are marked
+  unavailable; levels, residuals, correlation and DTW remain descriptive, not inferential.
 - If N exceeds the available overlap, everything available is used and the console says so.
 - Only applies to the comparison, not to the technical-analysis chart.
 - The window is echoed on the console, in the chart title, and in the generated PDF name.
+- New filenames use `obs` rather than `d`; explicit frequency/aggregation choices are
+  included in filenames so alternate reports do not overwrite the default report.
 
-### Alignment rules
+### Mixed-Frequency Alignment
 
-- Timestamps are stripped to tz-naive midnight, so sources with different timestamp types
-  and localisations line up on the calendar day.
-- Sources with several rows per day are reduced to one daily print. Derivatives collapse
-  to the **front-month future**; anything still duplicated is averaged.
-- The two series are inner-joined, so the comparison automatically runs over the
-  **shorter** of the two horizons. Ratios inherit the same rule. Pass the optional `days`
-  argument to narrow it further.
-- Minimum 60 overlapping observations, otherwise the comparison is skipped with a clear
-  message.
+**Default: compare at the slower source frequency.** For `WTI` versus `JP10Y`, every
+Japanese monthly yield is matched with the mean of WTI's available daily prices in that
+same calendar month. Month-start and month-end source timestamps identify the same month;
+the chart labels the aligned observation at month-end. February data stamped on a Saturday
+is not lost just because WTI had no observation that day.
+
+| Inputs | Automatic Comparison Grid | Default Faster-Series Treatment |
+|---|---|---|
+| Daily + daily | Exact common observation dates | No resampling or filling |
+| Daily + weekly | Friday-ending calendar weeks | Mean daily levels; latest weekly observation per week |
+| Daily/weekly + monthly | Calendar months | Aggregate higher-frequency observations within each month |
+| Daily/monthly + quarterly | Calendar quarters | Aggregate within each quarter |
+| Monthly/quarterly + annual | Calendar years | Aggregate within each year |
+
+Stored `Frequency` metadata takes precedence. Older files without it use median date
+spacing to infer daily/weekly/monthly/quarterly/annual cadence; reports say whether each
+frequency was declared or inferred. Unsupported irregular cadence is rejected rather
+than silently guessed. Calendar dates are preserved when stripping timezone information.
+Derivatives retain the existing front-month-future selection before temporal aggregation.
+
+Default aggregation is series-specific, applied **only when downsampling**:
+
+- **Mean** for prices, yields, rates, indexes and ratios. This includes annualized-rate
+  series such as housing starts or GDP: do not sum annualized rates across periods.
+- **Last observation** for `FEDASSETS`, `PAYEMS`, `JPXBYEN`, `JPFOREIGN`, and
+  `JPCOTSHORT`, which represent stocks or positions.
+- **Sum** for period-total flows `INTRADEBAL`, `JPCURRENT`, `USRETAIL`, and selected
+  value columns `Volume`, `Deliverable Qty`, `Qty Short Sold`, and `Traded Value`.
+- Native-frequency observations keep their published value. These defaults are explicit
+  in the comparison constants in [Option-OGN.py](Option-OGN.py), not inferred from magnitudes.
+
+For a period-end price question, override the mean with `last`; for a broader horizon,
+request a coarser frequency:
+
+```powershell
+python Option-OGN.py --pdf WTI JP10Y 120 --compare-aggregation last
+python Option-OGN.py --pdf WTI JP10Y --compare-frequency quarterly --periods 60
+python Option-OGN.py --pdf JPWAGES WTI 120
+```
+
+`--compare-frequency`: `auto`, `daily`, `weekly`, `monthly`, `quarterly`, `annual`.
+`--compare-aggregation`: `auto`, `mean`, `last`, `sum`. Overrides apply to downsampled
+legs, not the native-frequency observations; use `sum` only for additive flows.
+Requesting a frequency finer than either source is rejected. Both settings and each
+series' transformation are printed and shown on the comparison page.
+
+**Missing and incomplete periods:** no interpolation, forward-fill or backward-fill.
+Open current weeks/months/quarters/years are excluded. Daily-to-slower aggregation needs
+at least 80% of the period's Monday-Friday dates (`COMP_MIN_PERIOD_COVERAGE`), allowing
+normal holiday gaps without accepting a handful of daily prices as a monthly average.
+Weekly-to-slower aggregation requires at least 80% of expected Friday-ending weeks.
+Monthly-to-quarterly/yearly and quarterly-to-yearly aggregation require every component
+period. The weekday rule is a coverage heuristic, not an exchange-specific holiday calendar.
+After joining, a missing weekly/monthly/quarterly/annual period starts a new contiguous
+segment; only the latest segment is used for lag statistics. Exclusion counts are reported.
+Daily lags remain counts of common observations, not elapsed calendar days.
+
+**This is an observation-period comparison, not a release-time backtest.** A monthly
+CPI timestamp usually describes its reference month, not the day investors learned the
+number. CFTC Tuesday positions and weekly market averages are also different within-week
+observation conventions. Publication delays, intraday close-time differences and revisions
+are not modeled. A trading/backtest workflow needs release timestamps and as-of vintages;
+the current aligned histories must not be presented as information available in real time.
 
 ### Measures reported
 
@@ -371,16 +635,26 @@ python Option-OGN.py GLD SLV                # omitted → full common horizon
 |---|---|---|
 | **Cointegration** | Whether a linear combination forms a stable mean-reverting spread | Pairs trading / statistical arbitrage |
 | **Granger Causality** | Whether past values of A help forecast B (tested both directions) | Lead-lag strategies, leading macro indicators |
-| **Cross-Correlation** | Correlation across lags −10…+10 days | Pinpointing the trigger-to-response delay |
+| **Cross-Correlation** | Correlation across lags in the selected sampling periods | Descriptive lead/lag association |
 | **Dynamic Time Warping** | Shape similarity allowing for speed/phase differences | Matching historic regimes with different cycle speeds |
 | **Mutual Information** | Shared information, linear *and* non-linear | Feature selection for ML alpha models |
 
 ### Methodology notes
 
-- **Cointegration runs on levels** (Engle–Granger); the other four run on **log returns**,
-  since Granger tests on non-stationary levels are spurious. Series that can be zero or
-  negative (spreads such as `T10Y2Y`) fall back to first differences. The transform used
-  is printed and shown on the chart.
+- **Cointegration and DTW run on aligned levels.** Granger, cross-correlation and mutual
+  information use changes calculated *after* alignment. Positive price/index series use
+  log changes; series containing zero or negative levels use first differences. Series
+  whose `Unit` is percent use percentage-point changes, even when every rate is positive.
+  Each leg is transformed independently and its transformation is displayed.
+- **Cointegration** is only attempted with at least 60 observations and ADF evidence
+  consistent with both levels being I(1): the level test does not reject a unit root at
+  5%, while the first-difference test does. These are imperfect diagnostic screens, not
+  proof of integration order, cointegration stability or profitability.
+- **Granger** needs at least 60 aligned observations and ADF rejection of a unit root in
+  both transformed series. The lag search is capped at 10 periods (4 quarterly or 2 annual),
+  and further limited by sample size. The displayed p-value is Bonferroni-adjusted for
+  the number of lags searched **within each direction**; it does not correct for testing
+  many ticker pairs. Results are in-sample, exploratory, and do not establish causation.
 - **Cross-correlation sign convention:** a *positive* lag means `symbol1` leads `symbol2`.
 - **DTW** uses `dtaidistance` with a Sakoe-Chiba band on z-normalised series, resampled to
   at most 1000 points so multi-decade histories stay fast. The distance is
@@ -410,20 +684,27 @@ contains, in order:
 **1. The full technical analysis of the first symbol** \u2014 EMA/SMA crossovers, MACD, RSI &
 ADX, Fibonacci retracements, Bollinger Bands & OBV, Renko, and the technical audit table.
 
-**2. The volatility profile of the first symbol** — cone, per-window box plots, rolling
+**2. The regression trendline page of the first symbol**, followed by its **volatility
+profile**: cone, per-window box plots, rolling
 estimator with quantile bands, distribution histogram, and a summary table.
 
 **3. The comparison page**, containing:
 
 1. Both series as levels on twin axes
-2. Both rebased to 100 at the common start date
-3. The cointegration spread with mean and \u00b12\u03c3 bands
+2. Both rebased to 100, or both standardized when either has zero/negative levels
+3. An OLS residual with mean and two-standard-deviation bands (not automatically cointegrated)
 4. The cross-correlation function, with the strongest lag highlighted
 5. A colour-coded summary table \u2014 measure name, value, a plain-English reading of *this*
    result, and a one-line note on what the measure tells you
 
-The same table is printed to the console. If the comparison fails (for example too few
-overlapping days), the technical analysis is still produced and the reason is printed.
+The same table is printed to the console, with the selected cadence, aggregation,
+transformations, sample window and exclusions. The **three Japan macro pages**, **two US
+Schiller pages** and **two India Schiller pages** follow once per PDF. If comparison is
+unavailable, the other report pages remain and the
+reason is printed. This frequency handling applies to the comparison; the first symbol's
+technical and volatility pages still use their existing observation-based windows.
+
+Regression checks: `python -m unittest test_comparison test_japan_macro -v`.
 
 ---
 

@@ -12,6 +12,7 @@ Data is stored in Parquet format for optimal space and performance.
 import os
 import io
 import json
+import argparse
 import sys
 import time
 import random
@@ -23,6 +24,9 @@ import requests.exceptions
 import urllib.parse
 import pandas as pd
 import numpy as np
+import japan_macro
+import nifty_macro
+import schiller_macro
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -280,7 +284,7 @@ class NSEMarketDataDownloader:
     BATCH_COOLDOWN = 0.5  # Seconds to pause between download batches
     SESSION_REFRESH_AFTER = 150  # Re-init session after this many requests
 
-    def __init__(self):
+    def __init__(self, initialize_nse: bool = True):
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
         self._session_lock = threading.Lock()
@@ -289,7 +293,8 @@ class NSEMarketDataDownloader:
         self._request_count = 0
         self._last_session_init = 0.0
         self._consecutive_failures = 0
-        self._init_session()
+        if initialize_nse:
+            self._init_session()
         self._create_dirs()
 
     def _init_session(self):
@@ -2284,6 +2289,226 @@ class NSEMarketDataDownloader:
             raise
         return combined
 
+    def download_japan_series(self, symbol: str, start_date: datetime.date) -> Optional[pd.DataFrame]:
+        """Fetch an exact Japan indicator without silently substituting a proxy."""
+        definition = japan_macro.JAPAN_SERIES[symbol]
+        provider = definition['provider']
+        if provider == 'FRED':
+            return self.download_fred_series(
+                symbol, definition['series'], definition['name'], definition['unit'], start_date)
+        if provider == 'Yahoo':
+            return self.download_yahoo_series(
+                symbol, definition['series'], definition['name'], definition['unit'], start_date)
+        if provider == 'Derived':
+            inputs = []
+            for dependency, expected_unit in [('FEDTARU', 'Percent'), ('JPPOLRATE', 'Percent'),
+                                               ('JPJPYIV', 'Percent annualized')]:
+                frame = self._macro_read(dependency)
+                if frame is None:
+                    return None
+                if not frame['Unit'].eq(expected_unit).all():
+                    raise DownloadFailedError(f'Unexpected units for {dependency}: expected {expected_unit}')
+                inputs.append(frame)
+            return japan_macro.calculate_carry_to_risk(*inputs)
+        if provider is None:
+            return None
+
+        last_error = None
+        for attempt in range(self.MACRO_MAX_RETRIES):
+            try:
+                if provider == 'BIS':
+                    return japan_macro.download_bis_series(definition, start_date)
+                if provider == 'CFTC':
+                    return japan_macro.download_cftc_jpy(start_date)
+                if provider == 'ESRI':
+                    return japan_macro.download_esri_leading()
+                if provider == 'MOF':
+                    return japan_macro.download_mof_current_account()
+                if provider == 'Dashboard':
+                    return japan_macro.download_dashboard_series(definition, start_date)
+                raise ValueError(f'Unsupported Japan source: {provider}')
+            except (requests.exceptions.RequestException, ValueError, KeyError, zipfile.BadZipFile) as error:
+                last_error = error
+                if attempt < self.MACRO_MAX_RETRIES - 1:
+                    delay = float(2 ** attempt)
+                    response = getattr(error, 'response', None)
+                    if response is not None and response.status_code == 429:
+                        try:
+                            delay = max(delay, float(response.headers.get('Retry-After', 0)))
+                        except (TypeError, ValueError):
+                            pass
+                    print(f"  [{symbol}] {provider} attempt {attempt + 1}/"
+                          f"{self.MACRO_MAX_RETRIES} failed: {error}. Retrying in {delay:.0f}s.",
+                          flush=True)
+                    time.sleep(delay)
+        raise DownloadFailedError(f'Japan download failed for {symbol}: {last_error}')
+
+    def update_japan_series(self):
+        """Refresh the Japan group with common metadata and isolated failures."""
+        print('\n--- Japan Macro and Carry Trade ---', flush=True)
+        for symbol, definition in japan_macro.JAPAN_SERIES.items():
+            if definition['provider'] is None:
+                print(f"  [{symbol}] Unavailable: {definition['unavailable']}", flush=True)
+                continue
+            try:
+                existing = self._macro_read(symbol)
+                overlap = definition.get(
+                    'overlap_days', MACRO_REFRESH_OVERLAP_DAYS
+                    if definition['provider'] == 'Yahoo' else FRED_REVISION_OVERLAP_DAYS)
+                start = self._macro_incremental_start(existing, overlap)
+                if start is None or definition.get('full_refresh') or definition['provider'] == 'Derived':
+                    start = (pd.Timestamp(datetime.date.today())
+                             - pd.DateOffset(years=MACRO_MAX_HISTORY_YEARS)).date()
+                frame = self.download_japan_series(symbol, start)
+                if frame is None or frame.empty:
+                    reason = definition.get('unavailable', f'No new data since {start}.')
+                    print(f'  [{symbol}] {reason}', flush=True)
+                    continue
+                frame = frame.copy()
+                frame['Symbol'] = symbol
+                for column in ['Series', 'Name', 'Unit', 'Source', 'Frequency', 'Description']:
+                    frame[column] = definition[column.lower()]
+                frame = self._macro_normalize(frame)
+                frame = frame[(frame['Date'] >= start) & np.isfinite(frame['Value'])]
+                if frame.empty:
+                    print(f'  [{symbol}] No usable observations since {start}.', flush=True)
+                    continue
+                combined = self._macro_write(symbol, frame, existing)
+                print(f"  [{symbol}] +{len(frame):,} rows -> {len(combined):,} total "
+                      f"({combined['Date'].min()} to {combined['Date'].max()}).", flush=True)
+            except Exception as error:
+                print(f'  [{symbol}] Update failed; stored data retained: '
+                      f'{type(error).__name__}: {error}', flush=True)
+
+    def _write_valuation_series(self, symbol, definition, frame, existing):
+        """Apply the shared schema and atomic write to a market-specific valuation."""
+        if frame is None or frame.empty:
+            print(f"  [{symbol}] {definition.get('unavailable', 'No usable source observations.')}", flush=True)
+            return existing
+        frame = frame.copy()
+        frame['Symbol'] = symbol
+        for column in ['Series', 'Name', 'Unit', 'Source', 'Frequency', 'Description']:
+            frame[column] = definition[column.lower()]
+        if 'Estimated' in frame:
+            frame.loc[frame['Estimated'].eq(True), 'Description'] += ' Source marks this observation as estimated.'
+        frame = self._macro_normalize(frame)
+        frame = frame[np.isfinite(frame['Value']) & (frame['Date'] <= datetime.date.today())]
+        if frame.empty:
+            raise DownloadFailedError(f'No finite historical observations for {symbol}')
+        if definition.get('full_refresh') and existing is not None and not existing.empty:
+            if (frame['Date'].min() > existing['Date'].min()
+                    or frame['Date'].max() < existing['Date'].max()):
+                raise DownloadFailedError(f'Truncated full-history response for {symbol}; stored history retained')
+            existing = None
+        combined = self._macro_write(symbol, frame, existing)
+        print(f"  [{symbol}] +{len(frame):,} rows -> {len(combined):,} total "
+              f"({combined['Date'].min()} to {combined['Date'].max()}).", flush=True)
+        return combined
+
+    def download_schiller_series(self, symbol, start_date, workbook_cache=None):
+        """Fetch US-only valuations, retrying HTTP and parser failures together."""
+        definition = schiller_macro.SCHILLER_SERIES[symbol]
+        if definition['provider'] is None:
+            return None
+        cache = workbook_cache if workbook_cache is not None else {}
+        last_error = None
+        for attempt in range(self.MACRO_MAX_RETRIES):
+            try:
+                if definition['provider'] == 'Shiller':
+                    if 'shiller' not in cache:
+                        cache['shiller'] = schiller_macro.download_shiller_workbook()
+                    frame = cache['shiller'][symbol].copy()
+                elif definition['provider'] == 'Multpl':
+                    frame = schiller_macro.download_multpl_series(definition)
+                else:
+                    raise ValueError('Unsupported US valuation provider')
+                dates = pd.to_datetime(frame['Date'], errors='raise').dt.date
+                return frame[dates >= start_date].copy()
+            except Exception as error:
+                last_error = error
+                if attempt < self.MACRO_MAX_RETRIES - 1:
+                    delay = float(2 ** attempt)
+                    response = getattr(error, 'response', None)
+                    if response is not None and response.status_code == 429:
+                        try:
+                            delay = max(delay, float(response.headers.get('Retry-After', 0)))
+                        except (TypeError, ValueError):
+                            pass
+                    print(f'  [{symbol}] Attempt {attempt + 1}/{self.MACRO_MAX_RETRIES} '
+                          f'failed: {error}. Retrying in {delay:.0f}s.', flush=True)
+                    time.sleep(delay)
+        raise DownloadFailedError(f'US Schiller download failed for {symbol}: {last_error}')
+
+    def update_schiller_series(self):
+        """Refresh the US group without clipping nineteenth-century source history."""
+        print('\n--- US Schiller Valuation ---', flush=True)
+        workbook_cache = {}
+        workbook_failed = False
+        for symbol, definition in schiller_macro.SCHILLER_SERIES.items():
+            if definition['provider'] is None:
+                print(f"  [{symbol}] Unavailable: {definition['unavailable']}", flush=True)
+                continue
+            if definition['provider'] == 'Shiller' and workbook_failed:
+                print(f'  [{symbol}] Workbook unavailable; stored history retained.', flush=True)
+                continue
+            try:
+                existing = self._macro_read(symbol)
+                start = self._macro_incremental_start(existing, FRED_REVISION_OVERLAP_DAYS)
+                if start is None or definition.get('full_refresh'):
+                    start = datetime.date(1871, 1, 1)
+                frame = self.download_schiller_series(symbol, start, workbook_cache)
+                self._write_valuation_series(symbol, definition, frame, existing)
+            except Exception as error:
+                if definition['provider'] == 'Shiller' and 'shiller' not in workbook_cache:
+                    workbook_failed = True
+                print(f'  [{symbol}] Update failed; stored data retained: '
+                      f'{type(error).__name__}: {error}', flush=True)
+
+    def update_india_schiller_series(self):
+        """Update Indian-only valuation outputs; never use US inputs or substitutes."""
+        print('\n--- India Schiller / NIFTY Valuation ---', flush=True)
+        for symbol, definition in nifty_macro.NIFTY_SERIES.items():
+            if definition['provider'] is None:
+                print(f"  [{symbol}] Unavailable: {definition['unavailable']}", flush=True)
+        cpi_symbol = nifty_macro.INDIA_CPI_SYMBOL
+        cpi = self._macro_read(cpi_symbol)
+        try:
+            definition = nifty_macro.NIFTY_SERIES[cpi_symbol]
+            start = self._macro_incremental_start(cpi, FRED_REVISION_OVERLAP_DAYS)
+            if start is None:
+                start = datetime.date(1960, 1, 1)
+            fresh = self.download_fred_series(
+                cpi_symbol, nifty_macro.INDIA_CPI_SERIES, definition['name'],
+                nifty_macro.INDIA_CPI_UNIT, start)
+            if fresh is not None and not fresh.empty:
+                nifty_macro.validate_india_cpi(fresh)
+            cpi = self._write_valuation_series(cpi_symbol, definition, fresh, cpi)
+        except Exception as error:
+            print(f'  [{cpi_symbol}] Refresh failed; using stored Indian CPI only: {error}', flush=True)
+        index_path = INDICES_PROCESSED / 'NIFTY.parquet'
+        if not index_path.exists():
+            print('  [NIFTY] No stored NSE NIFTY index history. Valuation outputs unavailable.', flush=True)
+            return
+        try:
+            index_frame = pd.read_parquet(index_path, engine='pyarrow')
+            monthly = nifty_macro.nifty_monthly_valuation(index_frame)
+            metrics = nifty_macro.calculate_nifty_metrics(monthly)
+        except Exception as error:
+            print(f'  [NIFTY] Invalid Indian index history; existing valuations retained: {error}', flush=True)
+            return
+        try:
+            metrics['NIFTYCAPE'] = nifty_macro.calculate_nifty_cape(monthly, cpi)
+        except Exception as error:
+            print(f'  [NIFTYCAPE] Calculation rejected; stored data retained: {error}', flush=True)
+        for symbol, definition in nifty_macro.NIFTY_SERIES.items():
+            if definition['provider'] not in ('Stored NSE', 'Derived'):
+                continue
+            try:
+                self._write_valuation_series(
+                    symbol, definition, metrics.get(symbol), self._macro_read(symbol))
+            except Exception as error:
+                print(f'  [{symbol}] Update failed; stored data retained: {error}', flush=True)
+
     def update_fred_series(self):
         """Incrementally refreshes all enabled series in FRED_SERIES."""
         if not FRED_SERIES:
@@ -2689,6 +2914,8 @@ class NSEMarketDataDownloader:
         self.update_worldbank_series()
         self.update_yahoo_series()
         self.update_macro_ratios()
+        self.update_japan_series()
+        self.update_schiller_series()
 
         # ── Category list ──────────────────────────────────────────────
         # Comment out any line below to skip that category entirely.
@@ -2731,6 +2958,7 @@ class NSEMarketDataDownloader:
                   f"took {cat_elapsed:.1f}s", flush=True)
             print(f"  {label} update done.", flush=True)
 
+        self.update_india_schiller_series()
         elapsed = time.time() - t0
         print(f"\nUpdate Complete. Total time: {elapsed:.1f}s")
 
@@ -2738,8 +2966,25 @@ def main():
     # Legacy Windows code pages cannot encode this script's Unicode output.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    downloader = NSEMarketDataDownloader()
-    downloader.run_incremental_update()
+    parser = argparse.ArgumentParser(description='Refresh NSE and macro market data.')
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--japan-only', action='store_true',
+                       help='Refresh only Japan macro series, without contacting NSE.')
+    group.add_argument('--schiller-only', action='store_true',
+                       help='Refresh only US Schiller valuation sources.')
+    group.add_argument('--india-schiller-only', action='store_true',
+                       help='Refresh Indian CPI and valuations from stored NSE NIFTY history.')
+    args = parser.parse_args()
+    macro_only = args.japan_only or args.schiller_only or args.india_schiller_only
+    downloader = NSEMarketDataDownloader(initialize_nse=not macro_only)
+    if args.japan_only:
+        downloader.update_japan_series()
+    elif args.schiller_only:
+        downloader.update_schiller_series()
+    elif args.india_schiller_only:
+        downloader.update_india_schiller_series()
+    else:
+        downloader.run_incremental_update()
 
 if __name__ == '__main__':
     main()
