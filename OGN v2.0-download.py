@@ -66,8 +66,8 @@ LEGACY_LAST_DATE = datetime.date(2024, 7, 5)  # Last legacy F&O bhavcopy; an F&O
 UDIFF_FO_INSTRUMENTS = ('IDF', 'IDO', 'STF', 'STO')
 DEFAULT_START_DATE = datetime.date(2010, 1, 1)
 
-# Anchored to this file's folder so data lands in OGN/MarketData_Parquet from any working directory.
-DATA_ROOT = Path(__file__).resolve().parent / "MarketData_Parquet"
+# Fixed data folder, independent of the scripts' folder and the working directory (must match OGN.py).
+DATA_ROOT = Path(r"C:\OGN-OneDrive\OneDrive\Github projects\OGN") / "MarketData_Parquet"
 EQUITY_RAW = DATA_ROOT / "Equity" / "Raw"
 EQUITY_PROCESSED = DATA_ROOT / "Equity" / "Processed"
 DERIVATIVES_RAW = DATA_ROOT / "Derivatives" / "Raw"
@@ -306,9 +306,10 @@ class NSEMarketDataDownloader:
         self._request_count = 0
         self._last_session_init = 0.0
         self._consecutive_failures = 0
+        # First, so a missing data folder stops the run before NSE is contacted.
+        self._create_dirs()
         if initialize_nse:
             self._init_session()
-        self._create_dirs()
 
     def _init_session(self):
         """Initializes the session with NSE cookies (thread-safe)."""
@@ -337,7 +338,18 @@ class NSEMarketDataDownloader:
                 print(f"Warning: Failed to initialize session: {e}")
 
     def _create_dirs(self):
-        """Ensures all necessary directories exist."""
+        """Ensures all category directories exist inside the existing data folder.
+
+        The data folder itself is never created: when it is missing, the store has
+        usually not been moved or synced yet, and a new one would download all
+        history again.
+        """
+        if not DATA_ROOT.is_dir():
+            raise FileNotFoundError(
+                f"Data folder not found: {DATA_ROOT}\n"
+                "Stopped before downloading or creating anything. Move the existing "
+                "MarketData_Parquet folder there and let OneDrive finish syncing, then run again.\n"
+                "To start a new data store instead, create that empty folder first.")
         for path in [EQUITY_RAW, EQUITY_PROCESSED, DERIVATIVES_RAW, DERIVATIVES_PROCESSED,
                      INDICES_RAW, INDICES_PROCESSED, SHORTSELLING_RAW, SHORTSELLING_PROCESSED,
                      VOLATILITY_RAW, VOLATILITY_PROCESSED, MARKETACTIVITY_RAW, MARKETACTIVITY_PROCESSED,
@@ -3152,7 +3164,12 @@ def main():
                        help='Refresh Indian CPI and valuations from stored NSE NIFTY history.')
     args = parser.parse_args()
     macro_only = args.japan_only or args.schiller_only or args.india_schiller_only
-    downloader = NSEMarketDataDownloader(initialize_nse=not macro_only)
+    try:
+        downloader = NSEMarketDataDownloader(initialize_nse=not macro_only)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", flush=True)
+        sys.exit(1)
+    print(f"Data folder: {DATA_ROOT}", flush=True)
     if args.japan_only:
         downloader.update_japan_series()
     elif args.schiller_only:

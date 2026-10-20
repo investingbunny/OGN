@@ -146,8 +146,8 @@ MonthlyOptionsFilePath = "monthly-options"
 
 RiskFreeRate = 0.065  # ~6.5% annualised (adjust as needed)
 
-# Default PDF folder, anchored to the project folder rather than the working directory.
-CHARTS_DIR = Path(__file__).resolve().parent / "charts"
+# Default PDF folder, a fixed location independent of the scripts' folder and the working directory.
+CHARTS_DIR = Path(r"C:\OGN-OneDrive\OneDrive\Github projects\OGN") / "charts"
 
 # ── Report composition ────────────────────────────────────────────────────
 # Comment out any line to drop that section from the generated report.

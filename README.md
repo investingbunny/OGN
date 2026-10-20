@@ -32,11 +32,16 @@ pip install -r requirements.txt
 python "OGN v2.0-download.py"
 ```
 
-This creates the `MarketData_Parquet/` directory tree with raw and processed Parquet files.
-Every script resolves `MarketData_Parquet/`, the legacy `Datastore/` folders and the
-default `charts/` output relative to the project folder itself, not the working directory,
-so the OGN folder can be moved (for example into a OneDrive-synced location) and run from
-anywhere.
+This fills the `MarketData_Parquet/` folder with raw and processed Parquet files.
+`MarketData_Parquet/` and the default `charts/` PDF output live in a fixed folder,
+`C:\OGN-OneDrive\OneDrive\Github projects\OGN`, set by `DATA_ROOT` in `OGN.py`,
+`OGN v2.0-download.py` and `parquet_cleanup.py` and by `CHARTS_DIR` in `Option-OGN.py`;
+update those four lines if the folders move. The legacy `Datastore/` folders still resolve
+relative to the project folder itself, so every script can be run from any working directory.
+
+The downloader prints the data folder it uses at startup. If `MarketData_Parquet/` is
+missing, it prints an error and exits with code 1 before downloading or creating anything,
+so a store that has not been moved or synced yet is never replaced by a fresh download.
 
 ### 3. Check data store status
 
@@ -164,10 +169,11 @@ and drops the legacy one, so no day is stored twice.
 
 ### Existing data stores and fresh installs
 
-The same command works for both: `python "OGN v2.0-download.py"`. A fresh install downloads
-everything from 2010. An existing data store is first repaired once, then only the missing
-days are fetched. The repairs fix data written by earlier versions; no manual steps are
-needed:
+The same command works for both: `python "OGN v2.0-download.py"`. For a fresh install, first
+create the empty `MarketData_Parquet` folder (the downloader stops rather than create it); the
+first run then downloads everything from 2010. An existing data store is first repaired once,
+then only the missing days are fetched. The repairs fix data written by earlier versions; no
+manual steps are needed:
 
 1. **Rows that share a date and symbol** — earlier merges kept one row per date and symbol
    whenever an older day was merged late. That dropped a stock's `EQ` row when it also trades

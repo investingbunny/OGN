@@ -23,10 +23,10 @@ import pandas as pd
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Data store paths (must match OGN v2.0-download.py). Anchored to this file's
-# folder so the store is found from any working directory.
+# Data store paths (must match OGN v2.0-download.py). The store lives in a fixed
+# folder, independent of the scripts' folder and the working directory.
 # ---------------------------------------------------------------------------
-DATA_ROOT = Path(__file__).resolve().parent / "MarketData_Parquet"
+DATA_ROOT = Path(r"C:\OGN-OneDrive\OneDrive\Github projects\OGN") / "MarketData_Parquet"
 
 EQUITY_PROCESSED         = DATA_ROOT / "Equity" / "Processed"
 DERIVATIVES_PROCESSED    = DATA_ROOT / "Derivatives" / "Processed"

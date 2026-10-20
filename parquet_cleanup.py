@@ -22,7 +22,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 HERE = Path(__file__).resolve().parent
-DATA_ROOT = HERE / "MarketData_Parquet"
+# Fixed data folder (must match OGN v2.0-download.py).
+DATA_ROOT = Path(r"C:\OGN-OneDrive\OneDrive\Github projects\OGN") / "MarketData_Parquet"
 MAX_WORKERS = 8
 # Raw-file prefix of each category folder (see the Data Categories table in README.md).
 CATEGORY_PREFIXES = {
