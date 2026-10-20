@@ -641,6 +641,10 @@ Created on Sat Dec 12 16:44:30 2020
         #     feather.write_feather(Setdf, './New NSE site/'+FnOSettleArg+'.ftr')    
 
 
+import os
+OGN_DIR = os.path.dirname(os.path.abspath(__file__))  # data paths below are relative to the OGN folder
+
+
 def RefineNewNSEFutures(DF):
     df = DF.copy()
     
@@ -787,8 +791,8 @@ def RefineNewNSEFutures(DF):
     Futdf = reduce(lambda left,right: pd.merge(left,right,on='Symbol'), dfs)   
     
 
-    if (FindFeather(FnOVolatilityArg, './New NSE site/')):
-        Volatilitydf = feather.read_feather('./New NSE site/'+FnOVolatilityArg) #Volatilitydf.info()
+    if (FindFeather(FnOVolatilityArg, os.path.join(OGN_DIR, 'New NSE site/'))):
+        Volatilitydf = feather.read_feather(os.path.join(OGN_DIR, 'New NSE site/')+FnOVolatilityArg) #Volatilitydf.info()
         #Below Formatting is needed to clean up the csv and remove whitespaces
         Volatilitydf = Volatilitydf.rename(columns=lambda x: x.strip())
         Volatilitydf = Volatilitydf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
@@ -810,15 +814,15 @@ df['Month-str-full'] = df['Date'].dt.strftime('%B')
         print('For'+Scrip)
         OptionsFileName = Scrip + '_' + MonthlyOptionsFilePath
         #Read from feather
-        if (FindFeather(OptionsFileName, './Datastore')):
-            Optionsdf = feather.read_feather('./Datastore/Nifty Fin Service_ohlc.ftr')
+        if (FindFeather(OptionsFileName, os.path.join(OGN_DIR, 'Datastore'))):
+            Optionsdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/Nifty Fin Service_ohlc.ftr'))
             try:
                 # Optionsdf['Date'] = Optionsdf['Date'].dt.date
                 Optionsdf['Expiry'] = Optionsdf['Expiry'].dt.date
             except:
                 print(Scrip," :already done")
                 continue
-            feather.write_feather(Optionsdf, './Datastore/'+ OptionsFileName)
+            feather.write_feather(Optionsdf, os.path.join(OGN_DIR, 'Datastore/')+ OptionsFileName)
             # continue
 
 # def MACDVisual(MACDdf,Scrip):

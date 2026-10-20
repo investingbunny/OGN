@@ -43,6 +43,7 @@ import warnings
 import contextlib
 import textwrap
 from functools import reduce
+from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -144,6 +145,9 @@ FullFuturesFilePath = "full-futures" # now {Symbol}.parquet in Derivatives/Proce
 MonthlyOptionsFilePath = "monthly-options"
 
 RiskFreeRate = 0.065  # ~6.5% annualised (adjust as needed)
+
+# Default PDF folder, anchored to the project folder rather than the working directory.
+CHARTS_DIR = Path(__file__).resolve().parent / "charts"
 
 # ── Report composition ────────────────────────────────────────────────────
 # Comment out any line to drop that section from the generated report.
@@ -1343,6 +1347,20 @@ DTW_MAX_POINTS = 1000    # Series are resampled to this length before DTW
 DTW_BAND_FRACTION = 0.1  # Sakoe-Chiba band as a fraction of series length
 RATIO_OPERATOR = '__'    # NUM__DEN, e.g. US02Y__US10Y
 
+# Plain-English definitions shown beside each measure on the comparison slide.
+COMP_DEFINITIONS = {
+    'Cointegration': "Two series that wander but are tied together: a weighted spread "
+                     "between them keeps returning to its mean.",
+    'Granger': "Whether past values of one series improve forecasts of the other "
+               "beyond that series' own past.",
+    'Cross-Correlation': "Correlation (-1 to +1) of the two series' changes, with one "
+                         "shifted k periods to see which moves first.",
+    'Dynamic Time Warping': "Distance between the two standardized paths after stretching "
+                            "time to align them; 0 means identical shape.",
+    'Mutual Information': "How much knowing one series' change reduces uncertainty about "
+                          "the other's, in bits; 0 means independent.",
+}
+
 # Searched in order, so a bare symbol resolves to the most likely source first.
 _COMP_SOURCES = [
     ("Macro", MACRO_PROCESSED),
@@ -1584,6 +1602,9 @@ def _comp_load_symbol(symbol):
     """Locate `symbol` in any processed directory. Returns (df, source)."""
     for source, directory in _COMP_SOURCES:
         if (directory / f"{symbol}.parquet").exists():
+            if directory == DERIVATIVES_PROCESSED:
+                # The loader maps UDiFF instrument codes, so futures stay detectable.
+                return load_derivatives(symbol), source
             return _load_parquet(directory, symbol), source
     return None, None
 
@@ -1909,7 +1930,7 @@ def build_comparison_table(results):
             reading = "Weak evidence at 10% only"
         else:
               reading = "No evidence of cointegration at 10%"
-    rows.append(["Cointegration", value, reading,
+    rows.append(["Cointegration", COMP_DEFINITIONS['Cointegration'], value, reading,
                   "Engle-Granger on levels after ADF checks; not proof of a profitable spread."])
 
     for key in ('granger_ab', 'granger_ba'):
@@ -1927,7 +1948,7 @@ def build_comparison_table(results):
                 reading = f"{cause} predicts {effect} in-sample at 5%"
             else:
                  reading = f"No predictive evidence from {cause} at 5%"
-        rows.append([name, value, reading,
+        rows.append([name, COMP_DEFINITIONS['Granger'], value, reading,
                      "Changes; p adjusted for lag search per direction. Not causal or release-time evidence."])
 
     best = results.get('ccf_best', {})
@@ -1942,7 +1963,7 @@ def build_comparison_table(results):
             reading = f"{label_a} leads {label_b} by {lag} {lag_unit}"
         else:
               reading = f"{label_b} leads {label_a} by {abs(lag)} {lag_unit}"
-    rows.append(["Cross-Correlation", value, reading,
+    rows.append(["Cross-Correlation", COMP_DEFINITIONS['Cross-Correlation'], value, reading,
                   "Descriptive lag association, not an actionable delay; macro dates are observation periods."])
 
     dtw_value = results.get('dtw', float('nan'))
@@ -1956,7 +1977,7 @@ def build_comparison_table(results):
             reading = "Similar shape allowing for phase shift"
         else:
             reading = "Shapes diverge materially"
-    rows.append(["Dynamic Time Warping", value, reading,
+    rows.append(["Dynamic Time Warping", COMP_DEFINITIONS['Dynamic Time Warping'], value, reading,
                  "Shape similarity despite speed/phase differences; groups like regimes."])
 
     mi_value = results.get('mi', float('nan'))
@@ -1970,11 +1991,11 @@ def build_comparison_table(results):
             reading = "Mild shared information"
         else:
             reading = "Substantial shared info incl. non-linear"
-    rows.append(["Mutual Information", value, reading,
+    rows.append(["Mutual Information", COMP_DEFINITIONS['Mutual Information'], value, reading,
                  "Total shared information, linear and non-linear; used for feature selection."])
 
     return pd.DataFrame(
-        rows, columns=["Measure", "Value", "Reading", "What it tells you"])
+        rows, columns=["Measure", "Definition", "Value", "Reading", "What it tells you"])
 
 
 def load_analysis_frame(token):
@@ -2155,10 +2176,10 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
             tint = '#ffc7ce'
         else:
             tint = '#ffeb9c'
-        cell_colours.append(['#f2f2f2', tint, tint, '#f2f2f2'])
+        cell_colours.append(['#f2f2f2', '#f2f2f2', tint, tint, '#f2f2f2'])
 
     display_table = table.copy()
-    for column, width in zip(display_table.columns, [29, 28, 57, 72]):
+    for column, width in zip(display_table.columns, [22, 58, 22, 40, 56]):
         display_table[column] = display_table[column].map(
             lambda value: '\n'.join(textwrap.fill(line, width) for line in str(value).splitlines()))
     tbl = ax_table.table(
@@ -2167,7 +2188,7 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
         cellColours=cell_colours,
         colColours=['#4472c4'] * len(table.columns),
         cellLoc='left',
-        colWidths=[0.20, 0.16, 0.29, 0.35],
+        colWidths=[0.13, 0.28, 0.12, 0.20, 0.27],
         bbox=(0, 0, 1, 1),
     )
     tbl.auto_set_font_size(False)
@@ -2249,7 +2270,7 @@ def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None,
 
     table = build_comparison_table(results)
     with pd.option_context('display.max_colwidth', 60, 'display.width', 200):
-        print(table.to_string(index=False))
+        print(table.drop(columns='Definition').to_string(index=False))
     print()
 
     owns_pdf = False
@@ -2920,11 +2941,11 @@ def main():
                 suffix += f'_{comparison_frequency}'
             if comparison_aggregation != 'auto':
                 suffix += f'_{comparison_aggregation}'
-            pdf_path = f"charts/{symbol}_vs_{compare_with}{suffix}_Analysis.pdf"
+            pdf_path = str(CHARTS_DIR / f"{symbol}_vs_{compare_with}{suffix}_Analysis.pdf")
         elif symbol:
-            pdf_path = f"charts/{symbol}_Analysis.pdf"
+            pdf_path = str(CHARTS_DIR / f"{symbol}_Analysis.pdf")
         else:
-            pdf_path = "charts/FnO_Analysis.pdf"
+            pdf_path = str(CHARTS_DIR / "FnO_Analysis.pdf")
 
     try:
         FnOAnalysis(single_scrip=symbol,

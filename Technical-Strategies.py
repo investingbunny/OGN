@@ -20,11 +20,15 @@ ohlc_renko = {}
 tickers_signal = {}
 tickers_ret = {}
 
+import os
+OGN_DIR = os.path.dirname(os.path.abspath(__file__))  # data paths below are relative to the OGN folder
+
+
 def GetTickers():
-    NiftyOHLC = feather.read_feather('./Datastore/NIFTY_ohlc.ftr')
+    NiftyOHLC = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/NIFTY_ohlc.ftr'))
     OHLCStartDate = NiftyOHLC.iloc[-1].Date
     OHLCBhavFtr = 'sec_bhavdata_full_' + OHLCStartDate.strftime("%d%m%Y") + '.csv.ftr'
-    NSESymbols = feather.read_feather('./New NSE site/'+ OHLCBhavFtr)
+    NSESymbols = feather.read_feather(os.path.join(OGN_DIR, 'New NSE site/')+ OHLCBhavFtr)
     tickers.append(NSESymbols['SYMBOL'])
 
 def slope(ser,n):
@@ -82,7 +86,7 @@ def ReadDataFrames(Depth):
         ScripFileName = i + '-dataframe.ftr'
         # ScripFileName = 'REDINGTON-dataframe.ftr'
         try:
-            Tickerdf = feather.read_feather('./TechnicalFrames/'+ScripFileName)
+            Tickerdf = feather.read_feather(os.path.join(OGN_DIR, 'TechnicalFrames/')+ScripFileName)
             ohlc_intraday[i] = Tickerdf.tail(Depth).reset_index(drop=True)
         except:
             print(i," :failed to fetch data...retrying")

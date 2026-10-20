@@ -123,6 +123,9 @@ NSEFnOList = ["BANKNIFTY","NIFTY","ACC","ADANIENT","ADANIPORTS","AMARAJABAT","AM
 #     renko_df.drop_duplicates(subset="date",keep="last",inplace=True)
 #     return renko_df
 
+OGN_DIR = os.path.dirname(os.path.abspath(__file__))  # data paths below are relative to the OGN folder
+
+
 def Renko_DF(DF):
     "function to convert ohlc data into renko bricks"
     df = DF.copy()
@@ -199,8 +202,8 @@ def main():
         OHLCdf = None
         OHLCFileName = Scrip + '-' + AnalyzedFrame
         #Read from feather
-        if (FindFeather(OHLCFileName, './Datastore/Tech Analyzed/')):
-            OHLCdf = feather.read_feather('./Datastore/Tech Analyzed/'+OHLCFileName)
+        if (FindFeather(OHLCFileName, os.path.join(OGN_DIR, 'Datastore/Tech Analyzed/'))):
+            OHLCdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/Tech Analyzed/')+OHLCFileName)
 
             KPIdf = OHLCdf.tail(70) #Pass as argument later on
 

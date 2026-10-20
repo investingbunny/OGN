@@ -3,9 +3,11 @@
 Parquet Cleanup Utility
 Removes duplicate rows from all processed parquet files.
 
-Run this once to clean up any duplicates that accumulated from
-earlier merge logic. The main download script's merge now handles
-dedup correctly, so this should only be needed as a one-time fix.
+The download script's merge already removes duplicates, and repairs data
+written by earlier versions on its next run, so this is only an optional
+check. It applies the merge's own rules (loaded from the download script), so
+rows that merely share a date and symbol, such as a stock's EQ and bond series
+or several Market Activity lines, are never collapsed.
 
 Uses parallel processing for speed — each file is independent.
 
@@ -13,16 +15,34 @@ Usage:
     python parquet_cleanup.py
 """
 
+import importlib.util
 import pandas as pd
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
-DATA_ROOT = Path("MarketData_Parquet")
+HERE = Path(__file__).resolve().parent
+DATA_ROOT = HERE / "MarketData_Parquet"
 MAX_WORKERS = 8
+# Raw-file prefix of each category folder (see the Data Categories table in README.md).
+CATEGORY_PREFIXES = {
+    'Equity': 'cm', 'Derivatives': 'fo', 'Indices': 'idx', 'ShortSelling': 'ss',
+    'Volatility': 'vol', 'MarketActivity': 'ma', 'PriceBand': 'pb', 'PERatio': 'pe',
+    'CorporateBonds': 'cb', 'DeliveryPositions': 'del', 'WDM': 'wdm',
+}
 
 
-def _process_file(f: Path):
+def _load_merge_rules():
+    spec = importlib.util.spec_from_file_location('ogn_download', HERE / 'OGN v2.0-download.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.NSEMarketDataDownloader
+
+
+MERGE_RULES = _load_merge_rules()
+
+
+def _process_file(f: Path, raw_prefix):
     """Check a single parquet file for duplicates, rewrite if needed.
     Returns (removed_count, error_msg_or_None).
     """
@@ -30,12 +50,7 @@ def _process_file(f: Path):
         df = pd.read_parquet(f, engine='pyarrow')
         before = len(df)
 
-        dedup_cols = ['Date']
-        for key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
-            if key in df.columns:
-                dedup_cols.append(key)
-
-        df = df.drop_duplicates(subset=dedup_cols, keep='last')
+        df = MERGE_RULES._deduplicate(df, raw_prefix)
         after = len(df)
 
         if before != after:
@@ -66,7 +81,8 @@ def cleanup_duplicates():
     errors = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = {pool.submit(_process_file, f): f for f in all_files}
+        futures = {pool.submit(_process_file, f, CATEGORY_PREFIXES.get(f.parent.parent.name)): f
+                   for f in all_files}
 
         done = 0
         last_report = time.time()

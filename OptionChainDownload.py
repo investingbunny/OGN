@@ -21,6 +21,9 @@ import time
 OptionChainHolidayList = ['2021-01-26','2021-03-11','2021-03-29','2021-04-02','2021-04-14','2021-04-21','2021-05-13','2021-07-21','2021-08-19','2021-09-10','2021-10-15','2021-11-05','2021-11-19']
 OptionChainHolidayList = [dt.datetime.strptime(date, '%Y-%m-%d').date() for date in OptionChainHolidayList]
 
+OGN_DIR = os.path.dirname(os.path.abspath(__file__))  # data paths below are relative to the OGN folder
+
+
 def Next3Thursdays(dt):
     dt += relativedelta(day=31, weekday=TH(-1))
     if dt in OptionChainHolidayList:
@@ -81,8 +84,8 @@ def DownloadOptionChain(sym):
             content = browser.find_element_by_class_name('xlsdownload').click()
             while not os.path.exists(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv'):
                 time.sleep(1)
-            shutil.move(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv',r'.\Option chain - Dec 14\option-chain-equity-derivatives.csv')
-            shutil.move(r'.\Option chain - Dec 14\option-chain-equity-derivatives.csv',r'.\Option chain - Dec 14\\' + 
+            shutil.move(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv',os.path.join(OGN_DIR, r'Option chain - Dec 14\option-chain-equity-derivatives.csv'))
+            shutil.move(os.path.join(OGN_DIR, r'Option chain - Dec 14\option-chain-equity-derivatives.csv'),os.path.join(OGN_DIR, r'Option chain - Dec 14\\') + 
               CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 'option-chain-equity-derivatives-' +  
               ExpiryDateDownload.strftime("%Y-%m-%d") + '.csv')
     else:
@@ -102,8 +105,8 @@ def DownloadOptionChain(sym):
             content = browser.find_element_by_class_name('xlsdownload').click()
             while not os.path.exists(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv'):
                 time.sleep(1)
-            shutil.move(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv',r'.\Option chain - Dec 14\option-chain-equity-derivatives.csv')
-            shutil.move(r'.\Option chain - Dec 14\option-chain-equity-derivatives.csv',r'.\Option chain - Dec 14\\' + 
+            shutil.move(r'C:\Users\User\Downloads\option-chain-equity-derivatives.csv',os.path.join(OGN_DIR, r'Option chain - Dec 14\option-chain-equity-derivatives.csv'))
+            shutil.move(os.path.join(OGN_DIR, r'Option chain - Dec 14\option-chain-equity-derivatives.csv'),os.path.join(OGN_DIR, r'Option chain - Dec 14\\') + 
               CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 'option-chain-equity-derivatives-' +  
               ExpiryDateDownload.strftime("%Y-%m-%d") + '.csv')
 

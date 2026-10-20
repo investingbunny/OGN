@@ -6,6 +6,10 @@ Created on Sun Jul 19 19:29:04 2020
 """
 
 
+import os
+OGN_DIR = os.path.dirname(os.path.abspath(__file__))  # data paths below are relative to the OGN folder
+
+
 def FuturesUpdate:
     for Scrip in Scriplist:
         Futuresdf = None
@@ -14,8 +18,8 @@ def FuturesUpdate:
         CurrentYear = CurrentDate.year
         FuturesFileName = Scrip + '_' + FuturesFilePath
         #Read from feather
-        if (FindFeather(FuturesFileName, './Datastore')):
-            Futuresdf = feather.read_feather('./Datastore/'+FuturesFileName)
+        if (FindFeather(FuturesFileName, os.path.join(OGN_DIR, 'Datastore'))):
+            Futuresdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+FuturesFileName)
             LastDateFutures = ((Futuresdf.tail(1)).iloc[0]['Date'])
             LastDateFutures += datetime.timedelta(days=1) #Added this to start from the next day - TBV
             LastYearFutures = LastDateFutures.year
@@ -82,4 +86,4 @@ def FuturesUpdate:
                         break
         
         #Update Feather        
-        feather.write_feather(Futuresdf, './Datastore/'+ FuturesFileName)
+        feather.write_feather(Futuresdf, os.path.join(OGN_DIR, 'Datastore/')+ FuturesFileName)

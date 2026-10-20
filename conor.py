@@ -4,8 +4,12 @@ import pandas as pd
 from pylab import axhline, figure, legend, plot, show
 
 
+import os
+OGN_DIR = os.path.dirname(os.path.abspath(__file__))  # data paths below are relative to the OGN folder
+
+
 def main():
-    prices = feather.read_feather('./Datastore/SBIN_ohlc.ftr')
+    prices = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/SBIN_ohlc.ftr'))
     # prices.sort_index(inplace=True)
 
     # imp_vol = pd.read_csv('AAPL_IMP_VOL.csv', index_col=2, parse_dates=True)

@@ -38,6 +38,9 @@ OptionChainHolidayList = ['2021-01-26','2021-03-11','2021-03-29','2021-04-02','2
 OptionChainHolidayList = [datetime.datetime.strptime(date, '%Y-%m-%d').date() for date in OptionChainHolidayList]
 DailyOHLCFilePath = "ohlc.ftr";
 
+OGN_DIR = os.path.dirname(os.path.abspath(__file__))  # data paths below are relative to the OGN folder
+
+
 def Next3Thursdays(dt):
     global ThreeThursdayDateList
     ThreeThursdayDateList = []
@@ -81,7 +84,7 @@ def DownloadOptionChain(sym):
             except:
                 print('Timed out waiting for options page to load for '+ sym)
             if not oi_data.empty:
-                feather.write_feather(oi_data, './Option chain - Dec 14/'+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
+                feather.write_feather(oi_data, os.path.join(OGN_DIR, 'Option chain - Dec 14/')+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
                 'option-chain-equity-derivatives-' + ExpiryDateDownload.strftime("%Y-%m-%d")+'.ftr')
             else:
                 print('Options df failed to load for '+ sym + 'for expiry' + ExpiryDateDownload.strftime("%Y-%m-%d"))
@@ -94,7 +97,7 @@ def DownloadOptionChain(sym):
                 print('Timed out waiting for options page to load for '+ sym)
             if not oi_data.empty:
                 # 2021-06-13-NIFTYoption-chain-equity-derivatives-2021-08-26
-                feather.write_feather(oi_data, './Option chain - Dec 14/'+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
+                feather.write_feather(oi_data, os.path.join(OGN_DIR, 'Option chain - Dec 14/')+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
                 'option-chain-equity-derivatives-' + ExpiryDateDownload.strftime("%Y-%m-%d")+'.ftr')
             else:
                 print('Options df failed to load for '+ sym)
@@ -106,7 +109,7 @@ def FindFeather(name, path):
 
 def UpdateOptionChainTable(ExpiryDate,Symbol):
     OptionsFileName = CurrentDate.strftime("%Y-%m-%d") + '-' + Symbol + 'option-chain-equity-derivatives-'+ ExpiryDate.strftime("%Y-%m-%d") + '.ftr'
-    OptionChainCSVdf = feather.read_feather('./Option chain - Dec 14/'+OptionsFileName)    
+    OptionChainCSVdf = feather.read_feather(os.path.join(OGN_DIR, 'Option chain - Dec 14/')+OptionsFileName)    
     
     OptionChainCSVdf = OptionChainCSVdf.rename(columns=lambda x: x.strip())
     OptionChainCSVdf = OptionChainCSVdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
@@ -974,15 +977,15 @@ def plot_chart(DF, n, ticker, Dividend):
 
     OptionsFileName = ticker + '_' + MonthlyOptionsFilePath
     #Read from feather
-    if (FindFeather(OptionsFileName, './Datastore/')):
+    if (FindFeather(OptionsFileName, os.path.join(OGN_DIR, 'Datastore/'))):
         OptionsFrameStart = data.iloc[0].Date
         Mpdf = GetMaxPain(ticker,OptionsFrameStart)
         data = pd.merge(data,Mpdf, on = 'Date', how = 'outer')
         
     FuturesFileName = ticker + '_' + FullFuturesFilePath
     #Read from feather
-    if (FindFeather(FuturesFileName, './Datastore/')):
-        ReadFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
+    if (FindFeather(FuturesFileName, os.path.join(OGN_DIR, 'Datastore/'))):
+        ReadFuturesdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+FuturesFileName)
        
         d = OptionsFrameStart - datetime.timedelta(days=1) #Date to start from for axis alignment
         FuturesSlice = ReadFuturesdf[ReadFuturesdf.Date > d]
@@ -1146,7 +1149,7 @@ def plot_chart(DF, n, ticker, Dividend):
     ax_ema.legend()
 
     #Read from feather
-    if (FindFeather(FuturesFileName, './Datastore/')):
+    if (FindFeather(FuturesFileName, os.path.join(OGN_DIR, 'Datastore/'))):
         StdDev = data['Log_Ret'].std() # Daily Std Deviation for volatility
         DailyRet = data['Log_Ret'].mean()
         pd.to_datetime(Futdf['Date'])
@@ -1280,7 +1283,7 @@ def plot_chart(DF, n, ticker, Dividend):
     # level10 = price_min + 2.618 * diff
     # level11 = price_min + 4.236 * diff
     
-    if (FindFeather(OptionsFileName, './Datastore/')):
+    if (FindFeather(OptionsFileName, os.path.join(OGN_DIR, 'Datastore/'))):
         ax_maxpain.plot(data.index, data["Close"], label="Price")
         ax_maxpain.plot(data.index, data["MaxPain"],color="blue",marker="o", label="MaxPain")
         ax_pcr = ax_maxpain.twinx()
@@ -1328,8 +1331,8 @@ def Technicals(Scrip):
     print('Technicals for '+ Scrip)
     OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
     #Read from feather
-    if (FindFeather(OHLCFileName, './Datastore/')):
-        OHLCdf = feather.read_feather('./Datastore/'+OHLCFileName)
+    if (FindFeather(OHLCFileName, os.path.join(OGN_DIR, 'Datastore/'))):
+        OHLCdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+OHLCFileName)
         Indicatordf = OHLCdf.copy()
         Indicatordf = Indicatordf.set_index("Date")
         if(Scrip is not "INDIAVIX"):
@@ -1468,8 +1471,8 @@ def VolatilityTest(sym):
         sym = 'Nifty Fin Service'
     
     # bench = 'NIFTY' #None #'NIFTY'
-    data_file_path = './Datastore/'+sym+'_ohlc.ftr'
-    bench_file_path = './Datastore/NIFTY_ohlc.ftr'
+    data_file_path = os.path.join(OGN_DIR, 'Datastore/')+sym+'_ohlc.ftr'
+    bench_file_path = os.path.join(OGN_DIR, 'Datastore/NIFTY_ohlc.ftr')
     price_data, bench_data = GetVolatilityData(sym,data_file_path,bench_file_path)
     
     # initialize class

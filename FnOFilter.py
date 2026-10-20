@@ -43,6 +43,10 @@ FnONewList = ['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY','AARTIIND','ABB','ABBO
             'TORNTPOWER','TRENT','TVSMOTOR','UBL','ULTRACEMCO','UPL','VEDL','VOLTAS',
             'WHIRLPOOL','WIPRO','ZEEL']
 
+import os
+OGN_DIR = os.path.dirname(os.path.abspath(__file__))  # data paths below are relative to the OGN folder
+
+
 def PlotFnoFilter(DF, n, ticker, Dividend):
 
     # n = 100
@@ -60,15 +64,15 @@ def PlotFnoFilter(DF, n, ticker, Dividend):
 
     OptionsFileName = ticker + '_' + MonthlyOptionsFilePath
     #Read from feather
-    if (FindFeather(OptionsFileName, './Datastore/')):
+    if (FindFeather(OptionsFileName, os.path.join(OGN_DIR, 'Datastore/'))):
         OptionsFrameStart = data.iloc[0].Date
         Mpdf = GetMaxPain(ticker,OptionsFrameStart)
         data = pd.merge(data,Mpdf, on = 'Date', how = 'outer')
         
     FuturesFileName = ticker + '_' + FullFuturesFilePath
     #Read from feather
-    if (FindFeather(FuturesFileName, './Datastore/')):
-        ReadFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
+    if (FindFeather(FuturesFileName, os.path.join(OGN_DIR, 'Datastore/'))):
+        ReadFuturesdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+FuturesFileName)
        
         d = OptionsFrameStart - datetime.timedelta(days=1) #Date to start from for axis alignment
         FuturesSlice = ReadFuturesdf[ReadFuturesdf.Date > d]
@@ -232,7 +236,7 @@ def PlotFnoFilter(DF, n, ticker, Dividend):
     ax_ema.legend()
 
     #Read from feather
-    if (FindFeather(FuturesFileName, './Datastore/')):
+    if (FindFeather(FuturesFileName, os.path.join(OGN_DIR, 'Datastore/'))):
         StdDev = data['Log_Ret'].std() # Daily Std Deviation for volatility
         DailyRet = data['Log_Ret'].mean()
         pd.to_datetime(Futdf['Date'])
@@ -346,7 +350,7 @@ def PlotFnoFilter(DF, n, ticker, Dividend):
     level10 = price_max - 2.618 * diff
     level11 = price_max - 4.236 * diff
     
-    if (FindFeather(OptionsFileName, './Datastore/')):
+    if (FindFeather(OptionsFileName, os.path.join(OGN_DIR, 'Datastore/'))):
         ax_maxpain.plot(data.index, data["Close"], label="Price")
         ax_maxpain.plot(data.index, data["MaxPain"],color="blue",marker="o", label="MaxPain")
         ax_pcr = ax_maxpain.twinx()
@@ -378,8 +382,8 @@ def FnOFilter():
             # Scrip = "RELIANCE"
             OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
             #Read from feather
-            if (FindFeather(OHLCFileName, './Datastore/')):
-                OHLCdf = feather.read_feather('./Datastore/'+OHLCFileName)
+            if (FindFeather(OHLCFileName, os.path.join(OGN_DIR, 'Datastore/'))):
+                OHLCdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+OHLCFileName)
                 Indicatordf = OHLCdf.copy()
                 
                 Indicatordf = Indicatordf.set_index("Date")

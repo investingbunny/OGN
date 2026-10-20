@@ -56,6 +56,9 @@ expiry = []
 Optdatelist = []
 #Check for file
 
+OGN_DIR = os.path.dirname(os.path.abspath(__file__))  # data paths below are relative to the OGN folder
+
+
 def FindFeather(name, path):
     for root, dirs, files in os.walk(path):
         if name in files:
@@ -101,8 +104,8 @@ def GetMaxPain(Scrip,OptionsFrameStart): #Depth is considered in months to see h
     # MLdf = Tempdf.tail(1)
 
     #Read from feather
-    if (FindFeather(OptionsFileName, './Datastore')):
-        ReadOptionsdf = feather.read_feather('./Datastore/'+OptionsFileName)
+    if (FindFeather(OptionsFileName, os.path.join(OGN_DIR, 'Datastore'))):
+        ReadOptionsdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+OptionsFileName)
         OptionsSlice = ReadOptionsdf.copy()
         d = OptionsFrameStart - datetime.timedelta(days=1)
         OptionsSlice = OptionsSlice[OptionsSlice.Date > d]
@@ -338,15 +341,15 @@ def plot_chart(DF, n, ticker, Dividend):
 
     OptionsFileName = ticker + '_' + MonthlyOptionsFilePath
     #Read from feather
-    if (FindFeather(OptionsFileName, './Datastore/')):
+    if (FindFeather(OptionsFileName, os.path.join(OGN_DIR, 'Datastore/'))):
         OptionsFrameStart = data.iloc[0].Date
         Mpdf = GetMaxPain(ticker,OptionsFrameStart)
         data = pd.merge(data,Mpdf, on = 'Date', how = 'outer')
         
     FuturesFileName = ticker + '_' + FullFuturesFilePath
     #Read from feather
-    if (FindFeather(FuturesFileName, './Datastore/')):
-        ReadFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
+    if (FindFeather(FuturesFileName, os.path.join(OGN_DIR, 'Datastore/'))):
+        ReadFuturesdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+FuturesFileName)
        
         d = OptionsFrameStart - datetime.timedelta(days=1) #Date to start from for axis alignment
         FuturesSlice = ReadFuturesdf[ReadFuturesdf.Date > d]
@@ -510,7 +513,7 @@ def plot_chart(DF, n, ticker, Dividend):
     ax_ema.legend()
 
     #Read from feather
-    if (FindFeather(FuturesFileName, './Datastore/')):
+    if (FindFeather(FuturesFileName, os.path.join(OGN_DIR, 'Datastore/'))):
         StdDev = data['Log_Ret'].std() # Daily Std Deviation for volatility
         DailyRet = data['Log_Ret'].mean()
         pd.to_datetime(Futdf['Date'])
@@ -644,7 +647,7 @@ def plot_chart(DF, n, ticker, Dividend):
     # level10 = price_min + 2.618 * diff
     # level11 = price_min + 4.236 * diff
     
-    if (FindFeather(OptionsFileName, './Datastore/')):
+    if (FindFeather(OptionsFileName, os.path.join(OGN_DIR, 'Datastore/'))):
         ax_maxpain.plot(data.index, data["Close"], label="Price")
         ax_maxpain.plot(data.index, data["MaxPain"],color="blue",marker="o", label="MaxPain")
         ax_pcr = ax_maxpain.twinx()
@@ -715,8 +718,8 @@ def GenerateMLdf(DF,Scrip):
         
     FuturesFileName = Scrip + '_' + MonthlyFuturesFilePath
     #Read from feather
-    if (FindFeather(FuturesFileName, './Datastore/')):
-        ReadFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
+    if (FindFeather(FuturesFileName, os.path.join(OGN_DIR, 'Datastore/'))):
+        ReadFuturesdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+FuturesFileName)
         Futuresdf = ReadFuturesdf.copy()
         if not Futuresdf.empty:
             if not Futuresdf.tail(1)['Date'].values[0] < Focusdate: #Not past expiry
@@ -740,8 +743,8 @@ def GenerateMLdf(DF,Scrip):
             
     OptionsFileName = Scrip + '_' + MonthlyOptionsFilePath
     #Read from feather
-    if (FindFeather(OptionsFileName, './Datastore/')):
-        ReadOptionsdf = feather.read_feather('./Datastore/'+OptionsFileName)
+    if (FindFeather(OptionsFileName, os.path.join(OGN_DIR, 'Datastore/'))):
+        ReadOptionsdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+OptionsFileName)
         Optionsdf = ReadOptionsdf.copy()
         if not Optionsdf.empty:
             # Optionsdf['Date'] = Optionsdf['Date'].dt.date
@@ -812,10 +815,10 @@ def GenerateMLdf(DF,Scrip):
 
 def TechAnalysis():
     Finaldf = pd.DataFrame()
-    NiftyOHLC = feather.read_feather('./Datastore/NIFTY_ohlc.ftr')
+    NiftyOHLC = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/NIFTY_ohlc.ftr'))
     OHLCStartDate = NiftyOHLC.iloc[-1].Date
     OHLCBhavFtr = 'sec_bhavdata_full_' + OHLCStartDate.strftime("%d%m%Y") + '.csv.ftr'
-    NSESymbols = feather.read_feather('./New NSE site/'+ OHLCBhavFtr)
+    NSESymbols = feather.read_feather(os.path.join(OGN_DIR, 'New NSE site/')+ OHLCBhavFtr)
     NSESymbols = NSESymbols['SYMBOL']
 
     # sec_bhavdata_full_23122020.csv
@@ -828,8 +831,8 @@ def TechAnalysis():
             print('Now for '+ Scrip)
             OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
             #Read from feather
-            if (FindFeather(OHLCFileName, './Datastore/')):
-                OHLCdf = feather.read_feather('./Datastore/'+OHLCFileName)
+            if (FindFeather(OHLCFileName, os.path.join(OGN_DIR, 'Datastore/'))):
+                OHLCdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+OHLCFileName)
                 Indicatordf = OHLCdf.copy()
                 Indicatordf = Indicatordf.set_index("Date")
                 if(Scrip is not "INDIAVIX"):

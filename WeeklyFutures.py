@@ -28,6 +28,9 @@ FuturesIndexList = ["NIFTY","NIFTYIT","BANKNIFTY"]
 
 #Check for file
 
+OGN_DIR = os.path.dirname(os.path.abspath(__file__))  # data paths below are relative to the OGN folder
+
+
 def FindFeather(name, path):
     for root, dirs, files in os.walk(path):
         if name in files:
@@ -41,8 +44,8 @@ def IndexFuturesUpdate:
         CurrentYear = CurrentDate.year
         FuturesFileName = Scrip + '_' + WeeklyFuturesFilePath
         #Read from feather
-        if (FindFeather(FuturesFileName, './Datastore')):
-            Futuresdf = feather.read_feather('./Datastore/'+FuturesFileName)
+        if (FindFeather(FuturesFileName, os.path.join(OGN_DIR, 'Datastore'))):
+            Futuresdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+FuturesFileName)
             LastDateFutures = ((Futuresdf.tail(1)).iloc[0]['Date'])
             LastDateFutures += datetime.timedelta(days=1) #Added this to start from the next day - TBV
             LastYearFutures = LastDateFutures.year
@@ -110,4 +113,4 @@ def IndexFuturesUpdate:
                         break
         
         #Update Feather        
-        feather.write_feather(Futuresdf, './Datastore/'+ FuturesFileName)
+        feather.write_feather(Futuresdf, os.path.join(OGN_DIR, 'Datastore/')+ FuturesFileName)

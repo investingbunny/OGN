@@ -29,6 +29,9 @@ DailyOHLCFilePath = "ohlc.ftr"
 HolidayList = ['21-Feb-20','10-Mar-20','2-Apr-20','6-Apr-20','10-Apr-20','14-Apr-20','1-May-20','25-May-20','2-Oct-20','16-Nov-20','30-Nov-20','25-Dec-20']
 HolidayList = pd.to_datetime(pd.Series(HolidayList), format='%d-%b-%y')
 
+OGN_DIR = os.path.dirname(os.path.abspath(__file__))  # data paths below are relative to the OGN folder
+
+
 def FindFeather(name, path):
     for root, dirs, files in os.walk(path):
         if name in files:
@@ -36,7 +39,7 @@ def FindFeather(name, path):
 
 def UpdateOHLCBusinessDays():
     #Check Index futures for last update
-    SBINOHLC = feather.read_feather('./Datastore/SBIN_ohlc.ftr')
+    SBINOHLC = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/SBIN_ohlc.ftr'))
     OHLCStartDate = SBINOHLC.iloc[-1].Date
     OHLCStartDate += datetime.timedelta(days=1)
     LastOHLCDate = datetime.date.today() - datetime.timedelta(days=1)
@@ -63,7 +66,7 @@ def DownloadNewNSEOHLC():
             print('Couldnt download:'+ OHLCReportURL)    
             
         if not OHLCdf.empty:
-            feather.write_feather(OHLCdf, './New NSE site/'+OHLCBhavArg+'.ftr')
+            feather.write_feather(OHLCdf, os.path.join(OGN_DIR, 'New NSE site/')+OHLCBhavArg+'.ftr')
             
         #OHLC Volatility report download
         OHLCVolatilityArg = 'CMVOLT_' + weekday.strftime("%d%m%Y") + '.CSV' # CMVOLT_09102020.CSV
@@ -79,7 +82,7 @@ def DownloadNewNSEOHLC():
             print('Couldnt download:'+ OHLCVolatilityURL)    
             
         if not Voldf.empty:
-            feather.write_feather(Voldf, './New NSE site/'+OHLCVolatilityArg+'.ftr')
+            feather.write_feather(Voldf, os.path.join(OGN_DIR, 'New NSE site/')+OHLCVolatilityArg+'.ftr')
 
         print('Download Bhav PR for '+ weekday.strftime("%Y-%m-%d"))
         #Bhav PR report download
@@ -87,7 +90,7 @@ def DownloadNewNSEOHLC():
         OHLCBhavPRURL = OHLCBhavPR + OHLCBhavPRArg
         try:
             r = requests.get(OHLCBhavPRURL, allow_redirects=True) #Download Bhav PR report for 'weekday'
-            open('./New NSE site/'+OHLCBhavPRArg, 'wb').write(r.content)
+            open(os.path.join(OGN_DIR, 'New NSE site/')+OHLCBhavPRArg, 'wb').write(r.content)
         except:
             print('Couldnt download:'+ OHLCBhavPRURL)
 
@@ -95,8 +98,8 @@ def UpdatetNSEOHLCData():
     TotalNewOHLCdf = pd.DataFrame()
     for weekday in ohlcbday:
         OHLCBhavArg = 'sec_bhavdata_full_' + weekday.strftime("%d%m%Y") + '.csv.ftr'
-        if (FindFeather(OHLCBhavArg, './New NSE site/')):
-            OHLCBhavdf = feather.read_feather('./New NSE site/'+OHLCBhavArg) #OHLCBhavdf.info()
+        if (FindFeather(OHLCBhavArg, os.path.join(OGN_DIR, 'New NSE site/'))):
+            OHLCBhavdf = feather.read_feather(os.path.join(OGN_DIR, 'New NSE site/')+OHLCBhavArg) #OHLCBhavdf.info()
             TotalNewOHLCdf = TotalNewOHLCdf.append(OHLCBhavdf, ignore_index=True)
         else:
             print('Couldnt find: ' + OHLCBhavArg)
@@ -115,8 +118,8 @@ def UpdatetNSEOHLCData():
     for sym in OHLCSymbollist: # sym = 'HDFC'
         OHLCFileName = sym + '_' + DailyOHLCFilePath
         #Read from feather
-        if (FindFeather(OHLCFileName, './Datastore/')):
-            OldOHLCdf = feather.read_feather('./Datastore/'+OHLCFileName) # OldOHLCdf.info()
+        if (FindFeather(OHLCFileName, os.path.join(OGN_DIR, 'Datastore/'))):
+            OldOHLCdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+OHLCFileName) # OldOHLCdf.info()
             print('Updating OHLC for '+ sym)
             Mergedf = OldOHLCdf.append(TotalNewOHLCdf[TotalNewOHLCdf["Symbol"] == sym], ignore_index = True)            
         else: #A new symbol has been added, create a feather for it
@@ -125,7 +128,7 @@ def UpdatetNSEOHLCData():
             Mergedf.reset_index(level=0, inplace=True, drop=True)
             
         if not Mergedf.empty:
-            feather.write_feather(Mergedf, './Datastore/'+OHLCFileName)
+            feather.write_feather(Mergedf, os.path.join(OGN_DIR, 'Datastore/')+OHLCFileName)
         else:
             print(sym + ' not updated, in Series '+ Mergedf.iloc[-1].Series)
 
