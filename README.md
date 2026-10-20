@@ -33,6 +33,10 @@ python "OGN v2.0-download.py"
 ```
 
 This creates the `MarketData_Parquet/` directory tree with raw and processed Parquet files.
+Every script resolves `MarketData_Parquet/`, the legacy `Datastore/` folders and the
+default `charts/` output relative to the project folder itself, not the working directory,
+so the OGN folder can be moved (for example into a OneDrive-synced location) and run from
+anywhere.
 
 ### 3. Check data store status
 
@@ -134,6 +138,51 @@ gold_silver = load_macro("GLD_SLV")
 | 10 | Delivery Positions | `del` | `MarketData_Parquet/DeliveryPositions/Processed/` |
 | 11 | WDM Daily | `wdm` | `MarketData_Parquet/WDM/Processed/` |
 | 12 | Macro (FRED / Yahoo / derived) | — | `MarketData_Parquet/Macro/Processed/` |
+
+### NSE bhavcopy layouts
+
+NSE publishes the cash-market and F&O bhavcopies in the **UDiFF** layout from 1 January 2024
+(both layouts were published until 5 July 2024); the downloader uses UDiFF from that date.
+UDiFF F&O rows carry the underlying price (`UndrlygPric`) and lot size (`NewBrdLotQty`);
+the legacy layout has neither. `load_derivatives()` (and every loader built on it)
+normalises both eras:
+
+| Column | UDiFF rows | Legacy rows |
+|---|---|---|
+| `Underlying Price` | `UndrlygPric` | Same-day cash-market **EQ** close joined on symbol and date, so spot and strike share one corporate-action basis. Index derivatives use the stored index close (NIFTY, MINIFTY → NIFTY; BANKNIFTY; NIFTYNXT50 → NIFTYNEXT50; NFTYMCAP50 / NIFTYMID50 → NIFTYMIDCAP50). |
+| `Lot Size` | `NewBrdLotQty` | Blank — not published in the legacy layout |
+| `Instrument` | `IDF`/`STF`/`IDO`/`STO` mapped to `FUTIDX`/`FUTSTK`/`OPTIDX`/`OPTSTK` | Unchanged |
+| `Value` | Rupees | Published in ₹ lakh; multiplied by 100,000 to rupees |
+
+Notes: the cash-market close equals `UndrlygPric` for most stocks and otherwise differs by a
+tick or two (≤0.02% in a July 2024 check). Index derivatives whose index is not stored
+(FINNIFTY, MIDCPNIFTY, CNXIT/NIFTYIT, sector, VIX and global indices) keep a blank legacy
+spot. Days already downloaded are never downloaded again, so a data store built before
+the UDiFF switch keeps its legacy copies of January–July 2024. If both copies of a day
+ever reach the store (for example a sync-conflict file), the merge keeps the UDiFF copy
+and drops the legacy one, so no day is stored twice.
+
+### Existing data stores and fresh installs
+
+The same command works for both: `python "OGN v2.0-download.py"`. A fresh install downloads
+everything from 2010. An existing data store is first repaired once, then only the missing
+days are fetched. The repairs fix data written by earlier versions; no manual steps are
+needed:
+
+1. **Rows that share a date and symbol** — earlier merges kept one row per date and symbol
+   whenever an older day was merged late. That dropped a stock's `EQ` row when it also trades
+   in bond or block-deal series, and all but one Market Activity line, short sale or WDM
+   trade per day. Equity, Price Band, Delivery Positions, Market Activity, Short Selling
+   and WDM are rebuilt from their raw files, which keep every row. A category is left as
+   it is, with a warning, unless every raw file it was built from is confirmed present and
+   readable, since its processed files could otherwise hold the only copy.
+2. **Indices before late 2015** — NSE's old index names (`S&P CNX Nifty`, `CNX Bank`, …) and
+   the 2010–2011 PR-file columns were not recognised, so NIFTY and BANKNIFTY are missing.
+   Raw days saved without NIFTY (about 1,450) are downloaded again and merged.
+
+The first run after upgrading therefore takes longer. Each repair is recorded in
+`MarketData_Parquet/.migrations.json` when done and never runs again; an interrupted
+repair resumes on the next run.
 
 ---
 
@@ -805,17 +854,18 @@ afterwards when `option_overlay` is enabled.
 2. Both rebased to 100, or both standardized when either has zero/negative levels
 3. An OLS residual with mean and two-standard-deviation bands (not automatically cointegrated)
 4. The cross-correlation function, with the strongest lag highlighted
-5. A colour-coded summary table \u2014 measure name, value, a plain-English reading of *this*
-   result, and a one-line note on what the measure tells you
+5. A colour-coded summary table \u2014 measure name, a one-line definition of the measure,
+   value, a plain-English reading of *this* result, and a one-line note on what the measure
+   tells you
 
-The same table is printed to the console, with the selected cadence, aggregation,
+The same table (without the definitions) is printed to the console, with the selected cadence, aggregation,
 transformations, sample window and exclusions. The **three Japan macro pages**, **two US
 Schiller pages** and **two India Schiller pages** follow once per PDF. If comparison is
 unavailable, the other report pages remain and the
 reason is printed. This frequency handling applies to the comparison; the first symbol's
 technical and volatility pages still use their existing observation-based windows.
 
-Regression checks: `python -m unittest test_option_overlay test_comparison test_japan_macro test_valuation_macro -v`.
+Regression checks: `python -m unittest test_option_overlay test_comparison test_japan_macro test_valuation_macro test_market_data -v`.
 
 ---
 

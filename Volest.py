@@ -43,6 +43,9 @@ TopRecos = 2
 OptionChainHolidayList = ['2021-01-26','2021-03-11','2021-03-29','2021-04-02','2021-04-14','2021-04-21','2021-05-13','2021-07-21','2021-08-19','2021-09-10','2021-10-15','2021-11-05','2021-11-19']
 OptionChainHolidayList = [datetime.datetime.strptime(date, '%Y-%m-%d').date() for date in OptionChainHolidayList]
 
+OGN_DIR = os.path.dirname(os.path.abspath(__file__))  # data paths below are relative to the OGN folder
+
+
 def Next3Thursdays(dt):
     dt += relativedelta(day=31, weekday=TH(-1))
     if dt in OptionChainHolidayList:
@@ -117,7 +120,7 @@ def DownloadOptionChain(sym):
             while not check_for_files(FileString):
                 time.sleep(1)
             for filepath_object in glob.glob(FileString):
-                shutil.move(filepath_object ,'.\Option chain - Dec 14\\'+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
+                shutil.move(filepath_object ,os.path.join(OGN_DIR, 'Option chain - Dec 14\\')+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
                 'option-chain-equity-derivatives-' + ExpiryDateDownload.strftime("%Y-%m-%d") + '.csv')
     else:
         search_form = browser.find_element_by_id('select_symbol')
@@ -137,7 +140,7 @@ def DownloadOptionChain(sym):
             while not check_for_files(FileString):
                 time.sleep(1)
             for filepath_object in glob.glob(FileString):
-                shutil.move(filepath_object ,'.\Option chain - Dec 14\\'+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
+                shutil.move(filepath_object ,os.path.join(OGN_DIR, 'Option chain - Dec 14\\')+ CurrentDate.strftime("%Y-%m-%d") + '-'+ sym + 
                 'option-chain-equity-derivatives-' + ExpiryDateDownload.strftime("%Y-%m-%d") + '.csv')
 
     browser.close()
@@ -154,7 +157,7 @@ def UpdateOptionChainTable(ExpiryDate,Symbol):
     # Symbol = 'NIFTY'  ExpiryDate = '24-Jun-2021'   ExpiryDate = datetime.date(2021,6,24)
     # print('expiry = ',ExpiryDate.strftime("%Y-%m-%d"))
     
-    OptionChainCSVdf = pd.read_csv('./Option chain - Dec 14/'+ OptionChain, header = 1)
+    OptionChainCSVdf = pd.read_csv(os.path.join(OGN_DIR, 'Option chain - Dec 14/')+ OptionChain, header = 1)
     
     OptionChainCSVdf = OptionChainCSVdf.rename(columns=lambda x: x.strip())
     OptionChainCSVdf = OptionChainCSVdf.applymap(lambda x: x.strip() if isinstance(x, str) else x)
@@ -1024,15 +1027,15 @@ def plot_chart(DF, n, ticker, Dividend):
 
     OptionsFileName = ticker + '_' + MonthlyOptionsFilePath
     #Read from feather
-    if (FindFeather(OptionsFileName, './Datastore/')):
+    if (FindFeather(OptionsFileName, os.path.join(OGN_DIR, 'Datastore/'))):
         OptionsFrameStart = data.iloc[0].Date
         Mpdf = GetMaxPain(ticker,OptionsFrameStart)
         data = pd.merge(data,Mpdf, on = 'Date', how = 'outer')
         
     FuturesFileName = ticker + '_' + FullFuturesFilePath
     #Read from feather
-    if (FindFeather(FuturesFileName, './Datastore/')):
-        ReadFuturesdf = feather.read_feather('./Datastore/'+FuturesFileName)
+    if (FindFeather(FuturesFileName, os.path.join(OGN_DIR, 'Datastore/'))):
+        ReadFuturesdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+FuturesFileName)
        
         d = OptionsFrameStart - datetime.timedelta(days=1) #Date to start from for axis alignment
         FuturesSlice = ReadFuturesdf[ReadFuturesdf.Date > d]
@@ -1196,7 +1199,7 @@ def plot_chart(DF, n, ticker, Dividend):
     ax_ema.legend()
 
     #Read from feather
-    if (FindFeather(FuturesFileName, './Datastore/')):
+    if (FindFeather(FuturesFileName, os.path.join(OGN_DIR, 'Datastore/'))):
         StdDev = data['Log_Ret'].std() # Daily Std Deviation for volatility
         DailyRet = data['Log_Ret'].mean()
         pd.to_datetime(Futdf['Date'])
@@ -1330,7 +1333,7 @@ def plot_chart(DF, n, ticker, Dividend):
     # level10 = price_min + 2.618 * diff
     # level11 = price_min + 4.236 * diff
     
-    if (FindFeather(OptionsFileName, './Datastore/')):
+    if (FindFeather(OptionsFileName, os.path.join(OGN_DIR, 'Datastore/'))):
         ax_maxpain.plot(data.index, data["Close"], label="Price")
         ax_maxpain.plot(data.index, data["MaxPain"],color="blue",marker="o", label="MaxPain")
         ax_pcr = ax_maxpain.twinx()
@@ -1378,8 +1381,8 @@ def Technicals(Scrip):
     print('Technicals for '+ Scrip)
     OHLCFileName = Scrip + '_' + DailyOHLCFilePath #'2020-08-31-G1dataframe.ftr'#
     #Read from feather
-    if (FindFeather(OHLCFileName, './Datastore/')):
-        OHLCdf = feather.read_feather('./Datastore/'+OHLCFileName)
+    if (FindFeather(OHLCFileName, os.path.join(OGN_DIR, 'Datastore/'))):
+        OHLCdf = feather.read_feather(os.path.join(OGN_DIR, 'Datastore/')+OHLCFileName)
         Indicatordf = OHLCdf.copy()
         Indicatordf = Indicatordf.set_index("Date")
         if(Scrip is not "INDIAVIX"):
@@ -1500,13 +1503,13 @@ if sym == 'FINNIFTY':
     sym = 'Nifty Fin Service'
 
 # bench = 'NIFTY' #None #'NIFTY'
-data_file_path = './Datastore/'+sym+'_ohlc.ftr'
-bench_file_path = './Datastore/NIFTY_ohlc.ftr'
+data_file_path = os.path.join(OGN_DIR, 'Datastore/')+sym+'_ohlc.ftr'
+bench_file_path = os.path.join(OGN_DIR, 'Datastore/NIFTY_ohlc.ftr')
 
 CurrentDate = datetime.date.today()
 # CurrentDay = CurrentDate.day
 
-path = './Option chain - Dec 14/' # use your path
+path = os.path.join(OGN_DIR, 'Option chain - Dec 14/') # use your path
 all_files = glob.glob(path + CurrentDate.strftime("%Y-%m-%d") + '-' + sym + "*.csv")
 
 ExpiryDateList.clear()

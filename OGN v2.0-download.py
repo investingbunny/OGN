@@ -5,7 +5,7 @@ Created on Feb 21, 2026
 Author: Jules (Modernized from original OGN v2.0)
 
 This script downloads Equity (CM), Derivatives (FO), and Indices data from the NSE website.
-It supports both legacy archive formats and the new UDiFF format (post July 2024).
+It supports both legacy archive formats and the new UDiFF format (from January 2024).
 Data is stored in Parquet format for optimal space and performance.
 """
 
@@ -16,6 +16,7 @@ import argparse
 import sys
 import time
 import random
+import shutil
 import zipfile
 import datetime
 import threading
@@ -24,6 +25,7 @@ import requests.exceptions
 import urllib.parse
 import pandas as pd
 import numpy as np
+import pyarrow.parquet as pq
 import japan_macro
 import nifty_macro
 import schiller_macro
@@ -58,10 +60,14 @@ _USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
 ]
 
-UDIFF_START_DATE = datetime.date(2024, 7, 8)
+UDIFF_START_DATE = datetime.date(2024, 1, 1)  # NSE publishes both layouts 1 Jan-5 Jul 2024; UDiFF adds underlying price and lot size
+LEGACY_LAST_DATE = datetime.date(2024, 7, 5)  # Last legacy F&O bhavcopy; an F&O day can exist in both layouts only up to here
+# UDiFF F&O instrument codes; the legacy layout used FUT*/OPT* codes for the same contracts.
+UDIFF_FO_INSTRUMENTS = ('IDF', 'IDO', 'STF', 'STO')
 DEFAULT_START_DATE = datetime.date(2010, 1, 1)
 
-DATA_ROOT = Path("MarketData_Parquet")
+# Anchored to this file's folder so data lands in OGN/MarketData_Parquet from any working directory.
+DATA_ROOT = Path(__file__).resolve().parent / "MarketData_Parquet"
 EQUITY_RAW = DATA_ROOT / "Equity" / "Raw"
 EQUITY_PROCESSED = DATA_ROOT / "Equity" / "Processed"
 DERIVATIVES_RAW = DATA_ROOT / "Derivatives" / "Raw"
@@ -85,6 +91,8 @@ DELIVERY_PROCESSED = DATA_ROOT / "DeliveryPositions" / "Processed"
 WDM_RAW = DATA_ROOT / "WDM" / "Raw"
 WDM_PROCESSED = DATA_ROOT / "WDM" / "Processed"
 MACRO_PROCESSED = DATA_ROOT / "Macro" / "Processed"
+# One-time data-store repairs already applied (see _migrate_data_store).
+MIGRATIONS_FILE = DATA_ROOT / ".migrations.json"
 
 # Shared schema for every file in Macro/Processed.
 MACRO_COLUMNS = [
@@ -258,6 +266,11 @@ BUDGET_DAY = (2, 1)  # (month, day) — always try this date
 # They must never be swept up by the mixed-type coercion loops: stringifying
 # them makes the column uncomparable against dates in the stored file.
 DATE_COLUMNS = ('Date', 'Expiry')
+
+# Raw prefixes of reports whose rows have no identifying columns (Market
+# Activity summary lines, short-sale records, WDM trades): two rows there are
+# duplicates only when every column matches.
+KEYLESS_PREFIXES = ('ma', 'ss', 'wdm')
 
 
 class HTTP403Error(Exception):
@@ -1354,7 +1367,7 @@ class NSEMarketDataDownloader:
     def _clean_cm_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
         """Standardizes Equity data.
 
-        Handles both UDiFF format (post July 2024, TckrSymb/OpnPric columns)
+        Handles both UDiFF format (from January 2024, TckrSymb/OpnPric columns)
         and legacy format (SYMBOL/OPEN columns) via a unified column mapping.
         """
         df.columns = [c.strip() for c in df.columns]
@@ -1394,8 +1407,10 @@ class NSEMarketDataDownloader:
     def _clean_fo_data(self, df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
         """Standardizes F&O data.
 
-        Handles both UDiFF format (post July 2024, FinInstrmTp/SttlmPric columns)
+        Handles both UDiFF format (from January 2024, FinInstrmTp/SttlmPric columns)
         and legacy format (INSTRUMENT/SETTLE_PR columns) via a unified column mapping.
+        UDiFF rows keep UndrlygPric and NewBrdLotQty; OGN.load_derivatives turns
+        them into Underlying Price and Lot Size and fills legacy rows' spot.
         """
         df.columns = [c.strip() for c in df.columns]
         
@@ -1454,6 +1469,9 @@ class NSEMarketDataDownloader:
             'Turnover': 'Turnover',
             'P/E': 'PE', 'P/B': 'PB', 'Div Yield': 'DY',
             'PE': 'PE', 'PB': 'PB', 'DY': 'DY',
+            # PR zip (the only source before ind_close_all, 2010-2011)
+            'SECURITY': 'Symbol', 'OPEN_PRICE': 'Open', 'HIGH_PRICE': 'High',
+            'LOW_PRICE': 'Low', 'CLOSE_PRICE': 'Close',
         }
         df = df.rename(columns=mapping)
 
@@ -1482,21 +1500,24 @@ class NSEMarketDataDownloader:
         else:
             df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True, errors='coerce').dt.date
 
-        # Standardize Symbol names
-        df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        # Standardize Symbol names. Matching ignores case because NSE has
+        # printed the same index as "S&P CNX Nifty", "CNX Nifty" and "Nifty 50".
+        df['Symbol'] = df['Symbol'].astype(str).str.strip().str.upper()
         df['Symbol'] = df['Symbol'].replace({
-            'Nifty 50': 'NIFTY', 'NIFTY 50': 'NIFTY', 'S&P CNX NIFTY': 'NIFTY',
-            'Nifty Bank': 'BANKNIFTY', 'NIFTY BANK': 'BANKNIFTY', 'CNX BANK': 'BANKNIFTY',
-            'Nifty Next 50': 'NIFTYNEXT50', 'NIFTY NEXT 50': 'NIFTYNEXT50',
-            'Nifty 500': 'NIFTY500', 'NIFTY 500': 'NIFTY500', 'CNX 500': 'NIFTY500',
-            'Nifty Midcap 50': 'NIFTYMIDCAP50', 'NIFTY MIDCAP 50': 'NIFTYMIDCAP50',
+            'NIFTY 50': 'NIFTY', 'S&P CNX NIFTY': 'NIFTY', 'CNX NIFTY': 'NIFTY',
+            'NIFTY BANK': 'BANKNIFTY', 'BANK NIFTY': 'BANKNIFTY', 'CNX BANK': 'BANKNIFTY',
+            'NIFTY NEXT 50': 'NIFTYNEXT50', 'CNX NIFTY JUNIOR': 'NIFTYNEXT50',
+            'NIFTY 500': 'NIFTY500', 'S&P CNX 500': 'NIFTY500', 'CNX 500': 'NIFTY500',
+            'NIFTY MIDCAP 50': 'NIFTYMIDCAP50',
         })
 
-        # Filter for known indices to avoid trash
+        # Filter for known indices to avoid trash; PR files also carry
+        # stock rows and extra columns, so keep the standard columns only.
         known_indices = ['NIFTY', 'BANKNIFTY', 'NIFTYNEXT50', 'NIFTY500', 'NIFTYMIDCAP50']
-        df = df[df['Symbol'].isin(known_indices)].copy()
-        
-        return df
+        df = df[df['Symbol'].isin(known_indices)]
+        columns = ['Date', 'Symbol', 'Open', 'High', 'Low', 'Close', 'Change',
+                   'Percent Change', 'Volume', 'Turnover', 'PE', 'PB', 'DY']
+        return df[[c for c in columns if c in df.columns]].copy()
 
     # --- Clean functions for new report types ---
 
@@ -1780,8 +1801,7 @@ class NSEMarketDataDownloader:
                 existing_df = pd.read_parquet(file_path, engine='pyarrow')
                 # pd.concat automatically handles differing columns
                 combined_df = pd.concat([existing_df, group], ignore_index=True)
-                combined_df = combined_df.drop_duplicates(
-                    subset=self._dedup_keys(combined_df), keep='last')
+                combined_df = self._deduplicate(combined_df)
                 combined_df = combined_df.sort_values('Date')
                 combined_df.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
             else:
@@ -1792,31 +1812,82 @@ class NSEMarketDataDownloader:
     MERGE_WORKERS = 12  # Parallel threads for writing per-symbol parquet files
 
     @staticmethod
-    def _dedup_keys(df: pd.DataFrame) -> List[str]:
+    def _dedup_keys(df: pd.DataFrame, raw_prefix: Optional[str] = None) -> List[str]:
         """Identity columns that make a row unique within a processed file.
 
         Derivatives carry many rows per date (strike x expiry x option type),
-        so deduplicating on Date alone would collapse a whole day into one row.
+        and a cash-market symbol can trade in several series on one date (EQ
+        plus bond or block-deal series), so Date alone, or Date and Symbol,
+        would collapse distinct rows. Reports in KEYLESS_PREFIXES compare every
+        column.
         """
+        if raw_prefix in KEYLESS_PREFIXES:
+            return list(df.columns)
         keys = ['Date']
-        for extra_key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
+        for extra_key in ['Symbol', 'Series', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
             if extra_key in df.columns:
                 keys.append(extra_key)
         return keys
 
     @staticmethod
-    def _restore_date_columns(df: pd.DataFrame) -> pd.DataFrame:
-        """Converts ISO-string date columns back to datetime.date.
+    def _drop_superseded_legacy_rows(df: pd.DataFrame) -> pd.DataFrame:
+        """Keeps only the UDiFF copy of an F&O symbol-day stored in both layouts.
 
-        Retry files written before the stringification bug was fixed store
-        dates as text, which cannot be compared against the datetime.date
-        values in the processed file.
+        NSE published 1 Jan-5 Jul 2024 in both layouts and their instrument
+        codes differ (FUTIDX vs IDF), so identity keys never match the two
+        copies of a day. The UDiFF copy lists the same contracts and adds the
+        underlying price and lot size. Only legacy (FUT*/OPT*) rows of a
+        symbol-day that also has UDiFF rows are dropped.
+        """
+        if df.empty or not {'Instrument', 'Date'}.issubset(df.columns):
+            return df
+        udiff = df['Instrument'].isin(UDIFF_FO_INSTRUMENTS)
+        if not udiff.any():
+            return df
+        cutoff = pd.Timestamp(LEGACY_LAST_DATE)
+        days = [day for day in pd.unique(df.loc[udiff, 'Date'])
+                if pd.notna(day) and pd.Timestamp(day) <= cutoff]
+        if not days:
+            return df
+        on_days = df['Date'].isin(days).to_numpy()
+        candidates = df[on_days]
+        groups = [candidates[column].to_numpy() for column in ('Symbol', 'Date') if column in candidates.columns]
+        has_udiff = pd.Series(udiff.to_numpy()[on_days]).groupby(groups, dropna=False).transform('any').to_numpy()
+        legacy = candidates['Instrument'].astype(str).str.strip().str.startswith(('FUT', 'OPT'), na=False).to_numpy()
+        drop = np.zeros(len(df), dtype=bool)
+        drop[np.flatnonzero(on_days)[legacy & has_udiff]] = True
+        return df[~drop].copy() if drop.any() else df
+
+    @classmethod
+    def _deduplicate(cls, df: pd.DataFrame, raw_prefix: Optional[str] = None) -> pd.DataFrame:
+        """Drops rows that repeat an already stored row, keeping the newest copy."""
+        df = cls._drop_superseded_legacy_rows(df)
+        return df.drop_duplicates(subset=cls._dedup_keys(df, raw_prefix), keep='last')
+
+    @staticmethod
+    def _restore_date_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """Normalises Date/Expiry to datetime.date objects.
+
+        Earlier runs stored these columns as ISO text, and pandas 3 reads text
+        as the `str` dtype rather than `object`, so a column can arrive as
+        text, datetime64 or a text/date mix. Any of these breaks sorting and
+        comparison against the datetime.date values the cleaners produce.
+        Raises instead of silently blanking a value that is not a date.
         """
         for col in DATE_COLUMNS:
-            if col in df.columns and df[col].dtype == object:
-                sample = df[col].dropna()
-                if not sample.empty and isinstance(sample.iloc[0], str):
-                    df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+            if col not in df.columns:
+                continue
+            values = df[col]
+            if pd.api.types.infer_dtype(values, skipna=True) in ('date', 'empty'):
+                continue
+            parsed = pd.to_datetime(values, errors='coerce', format='ISO8601')
+            missing = parsed.isna() & values.notna()
+            if missing.any():
+                text = values[missing].astype(str).str.strip().str.lower()
+                bad = values[missing][~text.isin(['', 'nan', 'none', 'nat', '<na>', 'null'])]
+                if not bad.empty:
+                    raise ValueError(f"{len(bad)} unparseable {col} value(s), e.g. {bad.iloc[0]!r}")
+            df[col] = parsed.dt.date
         return df
 
     def merge_raw_to_processed(self, raw_dir: Path, raw_prefix: str, target_dir: Path, label: str, group_col: str = 'Symbol'):
@@ -1861,12 +1932,11 @@ class NSEMarketDataDownloader:
                             existing = pd.read_parquet(file_path, engine='pyarrow')
                             existing = self._restore_date_columns(existing)
                             combined = pd.concat([existing, new_data], ignore_index=True)
-                            combined = combined.drop_duplicates(
-                                subset=self._dedup_keys(combined), keep='last')
+                            combined = self._deduplicate(combined, raw_prefix)
                             combined = combined.sort_values('Date')
                             del existing
                         else:
-                            combined = new_data.sort_values('Date')
+                            combined = self._drop_superseded_legacy_rows(new_data).sort_values('Date')
                         # Coerce again after concat with existing (may re-introduce mixed types)
                         for col in combined.columns:
                             if combined[col].dtype == object and col not in DATE_COLUMNS:
@@ -1933,7 +2003,6 @@ class NSEMarketDataDownloader:
             try:
                 # --- Phase 1: Read raw files in chunks with parallel I/O ---
                 symbol_new_data: Dict[str, List[pd.DataFrame]] = {}
-                dedup_cols = None
                 read_errors = 0
 
                 def _read_one(f: Path):
@@ -1980,12 +2049,6 @@ class NSEMarketDataDownloader:
                         print(f"  [{label}] Warning: '{group_col}' missing — setting to 'UNKNOWN'.")
                         combined[group_col] = 'UNKNOWN'
 
-                    if dedup_cols is None:
-                        dedup_cols = ['Date']
-                        for extra_key in ['Symbol', 'Instrument', 'Expiry', 'Strike Price', 'Option type']:
-                            if extra_key in combined.columns:
-                                dedup_cols.append(extra_key)
-
                     for name, group in combined.groupby(group_col):
                         symbol_new_data.setdefault(name, []).append(group)
 
@@ -2016,8 +2079,12 @@ class NSEMarketDataDownloader:
                 for name in list(symbol_new_data.keys()):
                     dfs = symbol_new_data[name]
                     merged = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
+                    # Raw files from older runs hold Expiry as text.
+                    merged = self._restore_date_columns(merged)
+                    # Two copies of one F&O day (e.g. a sync-conflict file) may differ in layout.
+                    merged = self._drop_superseded_legacy_rows(merged)
                     for col in merged.columns:
-                        if merged[col].dtype == object and col != 'Date':
+                        if merged[col].dtype == object and col not in DATE_COLUMNS:
                             # Try numeric first (handles mixed float/str columns)
                             converted = pd.to_numeric(merged[col], errors='coerce')
                             if converted.notna().sum() >= merged[col].notna().sum() * 0.5:
@@ -2035,7 +2102,6 @@ class NSEMarketDataDownloader:
                       f"{num_symbols} symbols, read in {time.time() - mega_t0:.1f}s. Writing...", flush=True)
 
                 # --- Phase 2: Write each processed file ONCE, in parallel ---
-                final_dedup_cols = dedup_cols or ['Date']
                 write_errors = []
 
                 def _merge_and_write(item):
@@ -2045,6 +2111,7 @@ class NSEMarketDataDownloader:
                     try:
                         if file_path.exists():
                             existing = pd.read_parquet(file_path, engine='pyarrow')
+                            existing = self._restore_date_columns(existing)
                             new_min_date = new_data['Date'].min()
                             existing_max_date = existing['Date'].max()
                             if new_min_date > existing_max_date:
@@ -2053,7 +2120,7 @@ class NSEMarketDataDownloader:
                                 del new_sorted
                             else:
                                 merged = pd.concat([existing, new_data], ignore_index=True)
-                                merged = merged.drop_duplicates(subset=final_dedup_cols, keep='last')
+                                merged = self._deduplicate(merged, raw_prefix)
                                 merged = merged.sort_values('Date')
                             del existing
                         else:
@@ -2062,7 +2129,7 @@ class NSEMarketDataDownloader:
                         # Safety net: coerce any remaining mixed-type object columns
                         # so pyarrow can serialise without "Expected bytes / got float"
                         for col in merged.columns:
-                            if merged[col].dtype == object and col != 'Date':
+                            if merged[col].dtype == object and col not in DATE_COLUMNS:
                                 conv = pd.to_numeric(merged[col], errors='coerce')
                                 if conv.notna().sum() >= merged[col].notna().sum() * 0.5:
                                     merged[col] = conv
@@ -2636,6 +2703,113 @@ class NSEMarketDataDownloader:
             except Exception as e:
                 print(f"  [{symbol}] Update failed: {type(e).__name__}: {e}", flush=True)
 
+    def _migrate_data_store(self):
+        """Applies one-time repairs to data written by earlier versions.
+
+        A repair only deletes files that the normal download and merge then
+        rebuild, and is recorded in MIGRATIONS_FILE once done, so it runs once
+        per data store. A fresh install has nothing to repair.
+        """
+        applied = set()
+        if MIGRATIONS_FILE.exists():
+            try:
+                applied = set(json.loads(MIGRATIONS_FILE.read_text()))
+            except (ValueError, TypeError) as e:
+                print(f"Warning: unreadable {MIGRATIONS_FILE.name} ({e}); re-checking repairs.")
+        repairs = [
+            ('rebuild-collapsed-rows', self._rebuild_collapsed_categories),
+            ('redownload-incomplete-indices', self._redownload_incomplete_indices),
+        ]
+        for name, repair in repairs:
+            if name in applied:
+                continue
+            try:
+                repair()
+                applied.add(name)
+                MIGRATIONS_FILE.write_text(json.dumps(sorted(applied), indent=2))
+            except Exception as e:
+                print(f"Warning: one-time repair '{name}' did not finish "
+                      f"({type(e).__name__}: {e}); it resumes on the next run.", flush=True)
+
+    def _rebuild_collapsed_categories(self):
+        """Rebuilds categories whose earlier merges could drop distinct rows.
+
+        Rows sharing Date and Symbol (EQ and bond series, Market Activity
+        lines, short sales, WDM trades) collapsed into one whenever an older
+        day was merged late. The raw day files still hold every row.
+        """
+        for label, raw_dir, raw_prefix, processed_dir in [
+                ("Equity", EQUITY_RAW, "cm", EQUITY_PROCESSED),
+                ("Price Band", PRICEBAND_RAW, "pb", PRICEBAND_PROCESSED),
+                ("Delivery Positions", DELIVERY_RAW, "del", DELIVERY_PROCESSED),
+                ("Market Activity", MARKETACTIVITY_RAW, "ma", MARKETACTIVITY_PROCESSED),
+                ("Short Selling", SHORTSELLING_RAW, "ss", SHORTSELLING_PROCESSED),
+                ("WDM Daily", WDM_RAW, "wdm", WDM_PROCESSED)]:
+            self._rebuild_from_raw(raw_dir, raw_prefix, processed_dir, label)
+
+    @staticmethod
+    def _rebuild_from_raw(raw_dir: Path, raw_prefix: str, processed_dir: Path, label: str):
+        """Deletes a category's processed files so the next merge rebuilds them from raw.
+
+        Skipped, with a warning, unless every raw file in the merge record
+        still exists and is readable, since the processed files could
+        otherwise hold the only copy. Processed files go first and the record
+        last, so an interrupted repair resumes on the next run.
+        """
+        stamp = raw_dir / f".merged_{raw_prefix}.txt"
+        processed = sorted(processed_dir.glob("*.parquet"))
+        if processed:
+            merged = stamp.read_text().strip().splitlines() if stamp.exists() else []
+            unusable = 0
+            for name in merged:
+                try:
+                    pq.read_metadata(raw_dir / name)
+                except Exception:
+                    unusable += 1
+            if not merged or unusable:
+                reason = (f"{unusable} merged raw files are missing or unreadable" if merged
+                          else "no record of which raw files were merged")
+                print(f"  [{label}] Warning: not rebuilt from raw ({reason}); "
+                      f"processed files kept as they are.", flush=True)
+                return
+            print(f"  [{label}] One-time repair: rebuilding {len(processed)} processed "
+                  f"files from raw data.", flush=True)
+            for path in processed:
+                path.unlink()
+        shutil.rmtree(raw_dir / ".retry", ignore_errors=True)
+        stamp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _redownload_incomplete_indices():
+        """Deletes raw index days saved without NIFTY so they are downloaded again.
+
+        Earlier versions did not recognise NSE's pre-2016 index names ("S&P
+        CNX Nifty", "CNX Bank") or the 2010-2011 PR-file columns, so those days
+        were stored without the indices. Processed files keep their rows. The
+        merge record is updated before deleting, so a re-downloaded day is
+        always merged even if this repair is interrupted.
+        """
+        incomplete = []
+        for path in sorted(INDICES_RAW.glob("idx_*.parquet")):
+            try:
+                symbols = pq.read_table(path, columns=['Symbol']).column('Symbol').to_pylist()
+                complete = 'NIFTY' in {str(symbol).strip() for symbol in symbols}
+            except Exception:
+                complete = False
+            if not complete:
+                incomplete.append(path)
+        if not incomplete:
+            return
+        print(f"  [Indices] One-time repair: re-downloading {len(incomplete)} days "
+              f"saved without NIFTY.", flush=True)
+        stamp = INDICES_RAW / ".merged_idx.txt"
+        if stamp.exists():
+            names = {path.name for path in incomplete}
+            kept = [name for name in stamp.read_text().strip().splitlines() if name not in names]
+            stamp.write_text('\n'.join(kept))
+        for path in incomplete:
+            path.unlink()
+
     def _retry_nodata_sample(self, download_fn, raw_dir, raw_prefix, processed_dir, label):
         """Retries a random sample of .nodata days to recover falsely-marked dates.
 
@@ -2690,7 +2864,7 @@ class NSEMarketDataDownloader:
                 raw_file = raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet"
                 try:
                     for _c in df.columns:
-                        if df[_c].dtype == object and _c != 'Date':
+                        if df[_c].dtype == object and _c not in DATE_COLUMNS:
                             _conv = pd.to_numeric(df[_c], errors='coerce')
                             if _conv.notna().sum() >= df[_c].notna().sum() * 0.5:
                                 df[_c] = _conv
@@ -2817,7 +2991,7 @@ class NSEMarketDataDownloader:
                                 # Safety net: coerce any remaining mixed-type
                                 # object columns so pyarrow can serialise them.
                                 for _c in df.columns:
-                                    if df[_c].dtype == object and _c != 'Date':
+                                    if df[_c].dtype == object and _c not in DATE_COLUMNS:
                                         _conv = pd.to_numeric(df[_c], errors='coerce')
                                         if _conv.notna().sum() >= df[_c].notna().sum() * 0.5:
                                             df[_c] = _conv
@@ -2900,9 +3074,11 @@ class NSEMarketDataDownloader:
           1. Retry a random sample of .nodata days (recover false negatives)
           2. Download missing days concurrently (newest-first)
           3. Merge raw day-parquet files into per-symbol processed files
+        One-time repairs for data written by earlier versions run first.
         """
         print("Starting Incremental Update...")
         t0 = time.time()
+        self._migrate_data_store()
 
         # All categories download from DEFAULT_START_DATE to today (newest first).
         # Already-downloaded days are skipped automatically (raw file exists on disk).

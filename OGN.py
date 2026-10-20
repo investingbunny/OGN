@@ -23,9 +23,10 @@ import pandas as pd
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Data store paths (must match OGN v2.0-download.py)
+# Data store paths (must match OGN v2.0-download.py). Anchored to this file's
+# folder so the store is found from any working directory.
 # ---------------------------------------------------------------------------
-DATA_ROOT = Path("MarketData_Parquet")
+DATA_ROOT = Path(__file__).resolve().parent / "MarketData_Parquet"
 
 EQUITY_PROCESSED         = DATA_ROOT / "Equity" / "Processed"
 DERIVATIVES_PROCESSED    = DATA_ROOT / "Derivatives" / "Processed"
@@ -39,6 +40,18 @@ CORPBONDS_PROCESSED      = DATA_ROOT / "CorporateBonds" / "Processed"
 DELIVERY_PROCESSED       = DATA_ROOT / "DeliveryPositions" / "Processed"
 WDM_PROCESSED            = DATA_ROOT / "WDM" / "Processed"
 MACRO_PROCESSED          = DATA_ROOT / "Macro" / "Processed"
+
+# NSE's F&O bhavcopy switched to the UDiFF layout in January 2024. Its
+# instrument codes are mapped onto the legacy names so both eras filter alike.
+UDIFF_INSTRUMENTS = {'IDF': 'FUTIDX', 'STF': 'FUTSTK', 'IDO': 'OPTIDX', 'STO': 'OPTSTK'}
+
+# Index derivatives have no cash-market row; their spot is the stored index
+# close. Only indices kept by the Indices download can be mapped (MINIFTY was
+# a mini contract on NIFTY 50; NFTYMCAP50 was renamed NIFTYMID50 in 2016).
+INDEX_UNDERLYINGS = {
+    'NIFTY': 'NIFTY', 'MINIFTY': 'NIFTY', 'BANKNIFTY': 'BANKNIFTY', 'NIFTYNXT50': 'NIFTYNEXT50',
+    'NFTYMCAP50': 'NIFTYMIDCAP50', 'NIFTYMID50': 'NIFTYMIDCAP50',
+}
 
 
 # ---------------------------------------------------------------------------
@@ -147,23 +160,69 @@ def list_equity_symbols() -> list:
 # Derivatives (Futures + Options)
 # ---------------------------------------------------------------------------
 
+def _underlying_close(symbol: str) -> pd.Series:
+    """Same-day close of a derivative's underlying, indexed by Date.
+
+    Index derivatives use the stored index close; anything else uses the
+    cash-market EQ series close (other series are bonds or block deals).
+    Returns an empty Series when no matching cash data is stored.
+    """
+    try:
+        if symbol in INDEX_UNDERLYINGS:
+            frame = _load_parquet(INDICES_PROCESSED, INDEX_UNDERLYINGS[symbol])
+        else:
+            frame = _load_parquet(EQUITY_PROCESSED, symbol)
+            if 'Series' not in frame.columns:
+                return pd.Series(dtype=float)
+            frame = frame[frame['Series'].astype(str).str.strip().eq('EQ')]
+    except FileNotFoundError:
+        return pd.Series(dtype=float)
+    if 'Close' not in frame.columns:
+        return pd.Series(dtype=float)
+    close = pd.Series(pd.to_numeric(frame['Close'], errors='coerce').to_numpy(),
+                      index=frame['Date'])
+    return close.dropna().groupby(level=0).last()
+
+
 def load_derivatives(symbol: str, start: str = None, end: str = None) -> pd.DataFrame:
     """Load all derivatives data (futures + options) for a symbol.
 
     Columns: Date, Symbol, Instrument, Open, High, Low, Close, Settle Price,
              Open Int, Change in OI, Contracts, Value, Expiry, Strike Price,
-             Option type
+             Option type, Underlying Price, Lot Size
+
+    Rows span NSE's legacy and UDiFF layouts, normalised here: Instrument
+    uses the legacy codes and Value is in rupees (legacy files report lakh).
+    UDiFF rows carry the underlying price and lot size. Legacy rows take the
+    same day's cash-market EQ close (or the stored index close for the index
+    derivatives in INDEX_UNDERLYINGS), so spot and strike share one
+    corporate-action basis; their Lot Size stays blank.
     """
     df = _load_parquet(DERIVATIVES_PROCESSED, symbol)
     # Parse Expiry as datetime for date-based filtering downstream
     if 'Expiry' in df.columns:
         df['Expiry'] = pd.to_datetime(df['Expiry'])
-    return _filter_dates(df, start, end)
+    df = _filter_dates(df, start, end)
+    if 'Instrument' in df.columns:
+        instrument = df['Instrument'].astype(str).str.strip()
+        if 'Value' in df.columns:
+            value = pd.to_numeric(df['Value'], errors='coerce')
+            df['Value'] = value.where(~instrument.str.startswith(('FUT', 'OPT'), na=False), value * 100_000)
+        df['Instrument'] = instrument.replace(UDIFF_INSTRUMENTS)
+    spot = pd.Series(np.nan, index=df.index)
+    if 'UndrlygPric' in df.columns:
+        spot = pd.to_numeric(df['UndrlygPric'], errors='coerce')
+    if spot.isna().any():
+        spot = spot.fillna(df['Date'].map(_underlying_close(symbol)))
+    df['Underlying Price'] = spot
+    df['Lot Size'] = (pd.to_numeric(df['NewBrdLotQty'], errors='coerce')
+                      if 'NewBrdLotQty' in df.columns else np.nan)
+    return df
 
 
 def load_futures(symbol: str, start: str = None, end: str = None,
                  instrument: str = None) -> pd.DataFrame:
-    """Load futures data for a symbol (filters to FUTSTK / FUTIDX rows).
+    """Load futures data for a symbol (FUTSTK / FUTIDX rows, both NSE layouts).
 
     Args:
         symbol:     NSE symbol
@@ -177,7 +236,7 @@ def load_futures(symbol: str, start: str = None, end: str = None,
 
 def load_options(symbol: str, start: str = None, end: str = None,
                  option_type: str = None, expiry: str = None) -> pd.DataFrame:
-    """Load options data for a symbol (filters to OPTSTK / OPTIDX rows).
+    """Load options data for a symbol (OPTSTK / OPTIDX rows, both NSE layouts).
 
     Args:
         symbol:      NSE symbol

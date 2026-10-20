@@ -72,6 +72,10 @@ tickers = ["3MINDIA","ACC","AIAENG","APLAPOLLO","AUBANK","AARTIIND","AAVAS","ABB
                    "VINATIORGA","IDEA","VOLTAS","WABCOINDIA","WELCORP","WELSPUNIND","WESTLIFE","WHIRLPOOL",
                    "WIPRO","WOCKPHARMA","YESBANK","ZEEL","ZENSARTECH","ZYDUSWELL","ECLERX","TATACONSUM"]
 
+import os
+OGN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # data paths below are relative to the OGN folder
+
+
 def slope(ser,n):
     "function to calculate the slope of n consecutive points on a plot"
     slopes = [i*0 for i in range(n-1)]
@@ -111,7 +115,7 @@ def ReadDataFrames():
     ScripFileName = Scrip + '-dataframe.ftr'
     for i in range(len(tickers)):
         try:
-            ohlc_intraday[tickers[i]] = feather.read_feather('./TechnicalFrames/'+ScripFileName)
+            ohlc_intraday[tickers[i]] = feather.read_feather(os.path.join(OGN_DIR, 'TechnicalFrames/')+ScripFileName)
         except:
             print(tickers[i]," :failed to fetch data...retrying")
             continue
