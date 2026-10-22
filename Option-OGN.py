@@ -13,11 +13,15 @@ multi-panel technical analysis charts including:
 
 Report pages: technical -> trendlines -> volatility -> comparison, then separate
 Japan, US Schiller and India Schiller appendices once per PDF.
-Edit REPORT_SECTIONS to drop any of them.
+Edit REPORT_SECTIONS to drop any of them. Every graph covers the last
+REPORT_YEARS (1) years unless --years N is given; a page with no data in that
+range is left out, and the volatility page is drawn only for symbols with a
+derivatives file.
 
 Usage:
     python Option-OGN.py                          # analyse all FnO symbols (interactive)
     python Option-OGN.py WTI                       # full analysis for one series
+    python Option-OGN.py --years 3 WTI             # ... over the last 3 years
     python Option-OGN.py WTI US02Y__US10Y          # ... plus a statistical comparison
     python Option-OGN.py WTI US02Y__US10Y 250      # ... over the last 250 observations
     python Option-OGN.py --pdf WTI JP10Y 120      # last 120 aligned months
@@ -49,8 +53,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.patches
 from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.dates import date2num, AutoDateLocator, ConciseDateFormatter
-from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import Formatter, FuncFormatter, MaxNLocator
 import mplfinance as mpf
 import pandas as pd
 import numpy as np
@@ -63,6 +66,7 @@ import japan_macro
 import nifty_macro
 import schiller_macro
 import option_overlay
+from date_axis import DateAxis
 
 # Optional: stocktrends for Renko (pip install stocktrends)
 try:
@@ -154,13 +158,17 @@ CHARTS_DIR = Path(r"C:\OGN-OneDrive\OneDrive\Github projects\OGN") / "charts"
 REPORT_SECTIONS = [
     'technical',    # multi-panel indicator chart for the first symbol
     'trendlines',   # candlestick page with support / resistance regression lines
-    'volatility',   # volatility cone / rolling / histogram page
+    'volatility',   # volatility cone / rolling / histogram page (symbols with derivatives only)
     'option_overlay',
     'comparison',   # statistical comparison, only when a second symbol is given
     'japan_macro',
     'schiller_macro',
     'india_schiller',
 ]
+
+# Time range of every graph, in years back from the report date. Override with
+# --years N on the command line (decimals allowed, e.g. 0.5 for six months).
+REPORT_YEARS = 1
 
 # ── Trendline page defaults (override on the CLI) ─────────────────────────
 TREND_BARS = 180              # Trailing bars fed to the pivot search
@@ -206,6 +214,34 @@ VOLATILITY_QUANTILES = [0.25, 0.75]
 # ---------------------------------------------------------------------------
 # Helper utilities
 # ---------------------------------------------------------------------------
+
+def _report_months(years):
+    months = int(round(float(years) * 12))
+    if months < 1:
+        raise ValueError(f'The report range must be at least one month, got {years} years.')
+    return months
+
+
+def report_start(years=REPORT_YEARS, today=None):
+    """First date of a report covering the last `years` years up to `today`."""
+    today = pd.Timestamp(datetime.date.today() if today is None else today).normalize()
+    return today - pd.DateOffset(months=_report_months(years))
+
+
+def report_range_label(years=REPORT_YEARS):
+    """'1 year', '3 years' or '6 months'."""
+    months = _report_months(years)
+    count, unit = (months // 12, 'year') if months % 12 == 0 else (months, 'month')
+    return f"{count} {unit}{'' if count == 1 else 's'}"
+
+
+def _report_range_suffix(years):
+    """File-name tag of a non-default report range: '_3y', '_6m'; '' for the default."""
+    months = _report_months(years)
+    if months == _report_months(REPORT_YEARS):
+        return ''
+    return f"_{months // 12}y" if months % 12 == 0 else f"_{months}m"
+
 
 def business_days(start, end):
     """Return number of business days between two date(-like) values."""
@@ -706,6 +742,7 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     # Clamp display window to available data
     n = min(n, len(data))
     data = data.iloc[-n:]
+    window_start = pd.Timestamp(data['Date'].iloc[0])
 
     # ── Try loading options / futures for overlay ──────────────────────
     Mpdf = None
@@ -748,10 +785,11 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     data.index = pd.to_datetime(data["Date"])
     data.drop("Date", axis=1, inplace=True)
 
-    # ── Build OHLC list for candlestick (date as matplotlib number) ───
-    ohlc = []
-    for dt, row in data.iterrows():
-        ohlc.append([date2num(dt), row['Open'], row['High'], row['Low'], row['Close']])
+    # Price rows on a trading-day axis: weekends, holidays and dates merged in
+    # without a price (option-only days) take no space on the chart.
+    chart = data[data['Close'].notna()]
+    dates = DateAxis(chart.index)
+    x = dates.x(chart.index)
 
     # ── Figure 2: main analysis panels (7-panel layout) ────────────
     fig2 = plt.figure(figsize=(54, 30))  # Increased from (48, 27)
@@ -776,12 +814,12 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     ax_table = fig2.add_axes((0.74, 0.06, 0.21, 0.42))
     ax_table.axis('off')
 
-    ax_macd.xaxis_date()  # Format x-axis as dates
+    dates.format(ax_macd, max_ticks=13)  # shared by every panel above
 
     for col in ["5DMA-E", "9DMA-E", "13DMA-E", "21DMA-E", "48DMA-E"]:
-        if col in data.columns:
-            ax_ema.plot(data.index, data[col], label=col)
-    ax_ema.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
+        if col in chart.columns:
+            ax_ema.plot(x, chart[col], label=col)
+    ax_ema.plot(x, chart['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
     ax_ema.legend(fontsize=20)
     ax_ema.grid(True)
     ax_ema.tick_params(labelsize=20)
@@ -789,18 +827,18 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
 
     # ── SMA panel ─────────────────────────────────────────────────────
     for col in ["20DMA", "50DMA", "200DMA"]:
-        if col in data.columns:
-            ax_sma.plot(data.index, data[col], label=col)
-    ax_sma.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
+        if col in chart.columns:
+            ax_sma.plot(x, chart[col], label=col)
+    ax_sma.plot(x, chart['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
     ax_sma.legend(fontsize=20)
     ax_sma.grid(True)
     ax_sma.tick_params(labelsize=20)
     ax_sma.set_title('SMA Crossover', fontsize=30, fontweight='bold', pad=8)
 
     # ── MACD panel ────────────────────────────────────────────────────
-    ax_macd.plot(data.index, data["MACD"], label="MACD")
-    ax_macd.bar(data.index, (data["MACD"] - data["Signal"]) * 3, label="hist")
-    ax_macd.plot(data.index, data["Signal"], label="Signal")
+    ax_macd.plot(x, chart["MACD"], label="MACD")
+    ax_macd.bar(x, (chart["MACD"] - chart["Signal"]) * 3, label="hist")
+    ax_macd.plot(x, chart["Signal"], label="Signal")
     ax_macd.legend(fontsize=20)
     ax_macd.grid(True)
     ax_macd.tick_params(labelsize=20)
@@ -811,31 +849,31 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     ax_rsi.axhline(70, color='grey', linestyle='--', label="overbought")
     ax_rsi.axhline(30, color='grey', linestyle='--', label="oversold")
     ax_rsi.axhline(50, color='grey', linestyle=':')
-    ax_rsi.plot(data.index, data["RSI"], label="RSI", color='lightpink')
-    if 'ADX' in data.columns:
-        ax_rsi.plot(data.index, data["ADX"], label="ADX", color='blue')
-    if 'DIplusN' in data.columns:
-        ax_rsi.plot(data.index, data["DIplusN"], label="DI+", color='green')
-    if 'DIminusN' in data.columns:
-        ax_rsi.plot(data.index, data["DIminusN"], label="DI-", color='red')
+    ax_rsi.plot(x, chart["RSI"], label="RSI", color='lightpink')
+    if 'ADX' in chart.columns:
+        ax_rsi.plot(x, chart["ADX"], label="ADX", color='blue')
+    if 'DIplusN' in chart.columns:
+        ax_rsi.plot(x, chart["DIplusN"], label="DI+", color='green')
+    if 'DIminusN' in chart.columns:
+        ax_rsi.plot(x, chart["DIminusN"], label="DI-", color='red')
     ax_rsi.legend(fontsize=20)
     ax_rsi.grid(True)
     ax_rsi.tick_params(labelsize=20)
     ax_rsi.set_title('RSI & ADX', fontsize=30, fontweight='bold', pad=8)
 
     # ── Bollinger Bands + OBV panel ───────────────────────────────────
-    ax_bba.plot(data.index, data["BB_up"], label="BB_up")
-    ax_bba.plot(data.index, data["BB_dn"], label="BB_dn")
-    ax_bba.plot(data.index, data["MA"], label="MA")
-    ax_bba.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
+    ax_bba.plot(x, chart["BB_up"], label="BB_up")
+    ax_bba.plot(x, chart["BB_dn"], label="BB_dn")
+    ax_bba.plot(x, chart["MA"], label="MA")
+    ax_bba.plot(x, chart['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
     ax_bba.legend(fontsize=20)
     ax_bba.grid(True)
     ax_bba.tick_params(labelsize=20)
     ax_bba.set_title('Bollinger Bands & OBV', fontsize=30, fontweight='bold', pad=8)
 
-    if 'OBV' in data.columns:
+    if 'OBV' in chart.columns:
         ax_obv = ax_bba.twinx()
-        ax_obv.plot(data.index, data["OBV"] / 100000, marker="*", label="OBV")
+        ax_obv.plot(x, chart["OBV"] / 100000, marker="*", label="OBV")
         ax_obv.set_ylabel('OBV')
         ax_obv.tick_params(labelsize=20)
         ax_obv.grid(visible=False)
@@ -864,11 +902,15 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
 
     # Candlestick overlay on Fibonacci panel using mplfinance-compatible OHLC
     # (Using simple line plot since mplfinance add_plot requires different setup)
-    ax_fibret.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
+    ax_fibret.plot(x, chart['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
 
     # ── Renko chart (bottom-left of right column) ─────────────────────
-    if not renkodata.empty:
-        PlotRenko(renkodata, 100, ax=ax_renko)
+    # Bricks formed in the same window as the other panels.
+    bricks = renkodata
+    if not bricks.empty:
+        bricks = bricks[pd.to_datetime(bricks['date']) >= window_start]
+    if len(bricks) >= 2:
+        PlotRenko(bricks, len(bricks), ax=ax_renko)
     else:
         ax_renko.axis('off')
         ax_renko.text(0.5, 0.5, 'Renko unavailable',
@@ -1165,17 +1207,20 @@ def trendline_analysis(price_data, ticker, bars=TREND_BARS,
 
 def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
                 compare_with=None, days=None, estimator=DEFAULT_ESTIMATOR,
-                trend_bars=TREND_BARS, trend_distance=TREND_DISTANCE,
+                trend_bars=None, trend_distance=TREND_DISTANCE,
                 trend_prominence=None,
                 trend_prominence_pct=TREND_PROMINENCE_PCT,
                 comparison_frequency='auto', comparison_aggregation='auto',
                 option_dates=option_overlay.OPTION_HISTORY_DATES,
                 option_min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
                 option_outliers=option_overlay.OPTION_OUTLIER_COUNT,
-                option_rate=RiskFreeRate, option_iv_unit='percent'):
+                option_rate=RiskFreeRate, option_iv_unit='percent',
+                years=REPORT_YEARS):
     """Run technical analysis for each symbol in the list.
 
     Sections are driven by REPORT_SECTIONS, so any of them can be commented out.
+    Every graph covers the last `years` years; a page with no data in that
+    range is left out.
 
     Args:
         scrip_list:           List of symbols to analyse (default: NSEFnOList)
@@ -1183,9 +1228,11 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         pdf_path:             If set, save all charts to this PDF file
         compare_with:         If set, append a statistical comparison of the
                               analysed symbol against this second series
-        days:                 Window in aligned observations (legacy parameter name)
+        days:                 Comparison window in aligned observations; replaces
+                              the report range for the comparison only
         estimator:            Volatility estimator name (see ESTIMATORS)
-        trend_bars:           Trailing bars used by the trendline page
+        trend_bars:           Trailing bars for the trendline page; None uses
+                              the report range
         trend_distance:       Minimum bars between two trendline pivots
         trend_prominence:     Absolute pivot prominence; None auto-scales
         trend_prominence_pct: Fraction of the window range used when
@@ -1197,6 +1244,7 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         option_outliers:      Additional qualifying MAD outliers per side/expiry/date
         option_rate:          Annual decimal rate for Black-76 IV estimates
         option_iv_unit:       Unit of source-reported IV: percent or decimal
+        years:                Report range in years back from today (default 1)
     """
     if single_scrip:
         symbols = [single_scrip]
@@ -1204,6 +1252,9 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         symbols = scrip_list
     else:
         symbols = NSEFnOList
+
+    start = report_start(years)
+    print(f"  Report range: last {report_range_label(years)} (since {start:%Y-%m-%d})")
 
     # Set non-interactive backend for PDF output
     pdf_pages = None
@@ -1230,6 +1281,11 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         if OHLCdf.empty:
             print(f"  [skip] Empty data for {Scrip}")
             continue
+
+        in_range = int((OHLCdf['Date'] >= start).sum())
+        if not in_range:
+            print(f"  [range] No {Scrip} observations since {start:%Y-%m-%d}; its pages are "
+                  f"left out (widen the range with --years N).")
 
         # ── Ensure OHLCV columns are numeric (parquet may store as string) ──
         for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
@@ -1289,14 +1345,17 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         Indicatordf.reset_index(inplace=True)
 
         # ── Plot ──────────────────────────────────────────────────────
-        if 'technical' in REPORT_SECTIONS:
-            display_bars = min(25, len(Indicatordf))
-            plot_chart(Indicatordf, display_bars, Scrip, 0, pdf_pages=pdf_pages)
+        # Indicators use the full history; the graphs show the report range.
+        if 'technical' in REPORT_SECTIONS and in_range:
+            plot_chart(Indicatordf, in_range, Scrip, 0, pdf_pages=pdf_pages)
 
         # ── Support / resistance trendlines ───────────────────────────
         if 'trendlines' in REPORT_SECTIONS:
+            prices = OHLCdf.set_index('Date')
+            if trend_bars is None:
+                prices = prices[prices.index >= start]
             try:
-                trendline_analysis(OHLCdf.set_index('Date'), Scrip,
+                trendline_analysis(prices, Scrip,
                                    bars=trend_bars, distance=trend_distance,
                                    prominence=trend_prominence,
                                    prominence_pct=trend_prominence_pct,
@@ -1304,21 +1363,25 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
             except (ValueError, KeyError) as e:
                 print(f"  [trendlines skipped] {e}")
 
-        # ── Volatility profile ────────────────────────────────────────
+        # ── Volatility profile (underlyings with derivatives only) ────
         if 'volatility' in REPORT_SECTIONS:
-            try:
-                volatility_analysis(OHLCdf.set_index('Date'), Scrip,
-                                    estimator=estimator, pdf_pages=pdf_pages,
-                                    option_dates=option_dates, option_min_contracts=option_min_contracts,
-                                    option_outliers=option_outliers, option_rate=option_rate,
-                                    option_iv_unit=option_iv_unit)
-            except (ValueError, KeyError) as e:
-                print(f"  [volatility skipped] {e}")
+            if not (DERIVATIVES_PROCESSED / f"{Scrip}.parquet").exists():
+                print(f"  [volatility skipped] {Scrip} has no derivatives file; the volatility "
+                      f"profile is drawn only for symbols with derivatives.")
+            else:
+                try:
+                    volatility_analysis(OHLCdf.set_index('Date'), Scrip,
+                                        estimator=estimator, pdf_pages=pdf_pages,
+                                        option_dates=option_dates, option_min_contracts=option_min_contracts,
+                                        option_outliers=option_outliers, option_rate=option_rate,
+                                        option_iv_unit=option_iv_unit, start=start)
+                except (ValueError, KeyError) as e:
+                    print(f"  [volatility skipped] {e}")
 
         # ── Appended statistical comparison ───────────────────────────
         if compare_with and 'comparison' in REPORT_SECTIONS:
             try:
-                compare_series(Scrip, compare_with, days=days,
+                compare_series(Scrip, compare_with, days=days, start=None if days else start,
                                pdf_pages=pdf_pages, frequency=comparison_frequency,
                                aggregation=comparison_aggregation)
             except (ValueError, FileNotFoundError) as e:
@@ -1327,11 +1390,11 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
     if pdf_pages:
         try:
             if 'japan_macro' in REPORT_SECTIONS:
-                plot_japan_macro(pdf_pages=pdf_pages)
+                plot_japan_macro(pdf_pages=pdf_pages, years=years)
             if 'schiller_macro' in REPORT_SECTIONS:
-                plot_schiller_macro(pdf_pages=pdf_pages)
+                plot_schiller_macro(pdf_pages=pdf_pages, years=years)
             if 'india_schiller' in REPORT_SECTIONS:
-                plot_india_schiller(pdf_pages=pdf_pages)
+                plot_india_schiller(pdf_pages=pdf_pages, years=years)
         finally:
             pdf_pages.close()
         print(f"\n  PDF saved: {pdf_path}")
@@ -1758,10 +1821,11 @@ def granger_min_pvalue(cause, effect, max_lag=COMP_MAX_LAG):
 
 def compute_comparison(series_a, series_b, label_a, label_b,
                        max_lag=COMP_MAX_LAG, days=None,
-                       frequency='auto', aggregation='auto'):
+                       frequency='auto', aggregation='auto', start=None):
     """Compare native series on a shared cadence before calculating changes.
 
     The legacy `days` parameter counts aligned observations, not calendar days.
+    Without it, `start` keeps aligned observations from that date on.
     Short samples retain descriptive charts but not significance tests.
     """
     if label_a == label_b:
@@ -1776,11 +1840,16 @@ def compute_comparison(series_a, series_b, label_a, label_b,
         if days < 3:
             raise ValueError('The comparison window needs at least 3 aligned observations.')
         aligned = aligned.tail(days)
+        start = None
+    elif start is not None:
+        start = pd.Timestamp(start)
+        aligned = aligned[aligned.index >= start]
 
     if len(aligned) < 3:
+        since = f" since {start:%Y-%m-%d}" if start is not None else ""
         raise ValueError(
             f"Only {len(aligned)} overlapping observations between {label_a} and "
-            f"{label_b} - need at least 3 for descriptive charts.")
+            f"{label_b}{since} - need at least 3 for descriptive charts.")
 
     levels_a = aligned[label_a].to_numpy(dtype=float)
     levels_b = aligned[label_b].to_numpy(dtype=float)
@@ -1823,6 +1892,7 @@ def compute_comparison(series_a, series_b, label_a, label_b,
         'label_b': label_b,
         'max_lag': effective_lag,
         'days_requested': days,
+        'window_start': start,
         'total_overlap': total_overlap,
         'inference_note': '' if enough_history else inference_note,
     }
@@ -2040,9 +2110,11 @@ def load_analysis_frame(token):
 
 def _comp_window_note(results):
     """Label a requested window in aligned periods rather than calendar days."""
-    if not results.get('days_requested'):
-        return ""
-    return f"   |   last {len(results['aligned']):,} {results.get('lag_unit', 'observations')}"
+    if results.get('days_requested'):
+        return f"   |   last {len(results['aligned']):,} {results.get('lag_unit', 'observations')}"
+    if results.get('window_start') is not None:
+        return f"   |   since {results['window_start']:%d-%b-%Y}"
+    return ""
 
 
 def _comp_alignment_note(results):
@@ -2082,7 +2154,9 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
                 fontsize=12, color='#555555', va='top')
 
     # --- Raw levels on twin axes (units rarely match) ---
-    ax_raw.plot(aligned.index, aligned[label_a], color='tab:blue', linewidth=1.8,
+    dates = DateAxis(aligned.index)
+    x = dates.x(aligned.index)
+    ax_raw.plot(x, aligned[label_a], color='tab:blue', linewidth=1.8,
                 label=f"{label_a}  ({desc_a})")
     unit_a = results['units'].get(label_a, '')
     unit_b = results['units'].get(label_b, '')
@@ -2091,13 +2165,14 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
     ax_raw.tick_params(axis='y', labelcolor='tab:blue', labelsize=13)
     ax_raw.tick_params(axis='x', labelsize=13)
     ax_raw_twin = ax_raw.twinx()
-    ax_raw_twin.plot(aligned.index, aligned[label_b], color='tab:red', linewidth=1.8,
+    ax_raw_twin.plot(x, aligned[label_b], color='tab:red', linewidth=1.8,
                      label=f"{label_b}  ({desc_b})")
     ax_raw_twin.set_ylabel(f"{label_b} ({unit_b})" if unit_b else label_b,
                            fontsize=14, color='tab:red')
     ax_raw_twin.tick_params(axis='y', labelcolor='tab:red', labelsize=13)
     ax_raw_twin.grid(visible=False)
     ax_raw.grid(True, alpha=0.3)
+    dates.format(ax_raw)
     ax_raw.set_title(
         f"Levels  |  {aligned.index.min():%d-%b-%Y} to {aligned.index.max():%d-%b-%Y}"
         f"  |  {len(aligned):,} aligned observations",
@@ -2110,8 +2185,9 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
     for column, colour in ((label_a, 'tab:blue'), (label_b, 'tab:red')):
         values = aligned[column]
         rebased = values / values.iloc[0] * 100.0 if positive_levels else _comp_zscore(values)
-        ax_norm.plot(aligned.index, rebased, color=colour, linewidth=1.8, label=column)
+        ax_norm.plot(x, rebased, color=colour, linewidth=1.8, label=column)
     ax_norm.axhline(100 if positive_levels else 0, color='grey', linestyle='--', linewidth=1)
+    dates.format(ax_norm)
     ax_norm.legend(fontsize=14)
     ax_norm.grid(True, alpha=0.3)
     ax_norm.tick_params(labelsize=13)
@@ -2124,8 +2200,9 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
     if spread is not None and not spread.empty:
         mean = spread.mean()
         sigma = spread.std()
-        ax_spread.plot(spread.index, spread, color='tab:purple', linewidth=1.5,
+        ax_spread.plot(dates.x(spread.index), spread, color='tab:purple', linewidth=1.5,
                        label='Spread (residual)')
+        dates.format(ax_spread)
         ax_spread.axhline(mean, color='black', linestyle='-', linewidth=1.2, label='mean')
         ax_spread.axhline(mean + 2 * sigma, color='tab:red', linestyle='--',
                           linewidth=1.2, label='+2 sigma')
@@ -2221,11 +2298,12 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
 
 
 def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None,
-                    frequency='auto', aggregation='auto'):
+                    frequency='auto', aggregation='auto', start=None):
     """Resolve, align, measure, and render a comparison of two series.
 
     Pass `pdf_pages` to append the comparison onto a report that is already
-    open; the caller keeps ownership and closes it.
+    open; the caller keeps ownership and closes it. `start` limits the
+    comparison to observations from that date when `days` is not given.
     """
     if pdf_path and pdf_pages is None:
         matplotlib.use('Agg')
@@ -2244,13 +2322,16 @@ def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None,
           f"({len(series_b):,} obs)")
 
     results = compute_comparison(series_a, series_b, label_a, label_b, days=days,
-                                 frequency=frequency, aggregation=aggregation)
+                                 frequency=frequency, aggregation=aggregation, start=start)
     aligned = results['aligned']
     overlap = results['total_overlap']
     if days and len(aligned) < days:
         scope = f"{len(aligned):,} observations - fewer than the {days:,} requested"
     elif days:
         scope = f"last {len(aligned):,} of {overlap:,} aligned observations"
+    elif results['window_start'] is not None:
+        scope = (f"{len(aligned):,} of {overlap:,} aligned observations, "
+                 f"since {results['window_start']:%Y-%m-%d}")
     else:
         scope = f"{len(aligned):,} aligned observations in the latest contiguous overlap"
     print(f"\n  {_comp_alignment_note(results)}")
@@ -2297,8 +2378,11 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
                                      date_count=option_overlay.OPTION_HISTORY_DATES,
                                      min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
                                      outlier_count=option_overlay.OPTION_OUTLIER_COUNT,
-                                     rate=RiskFreeRate, reported_iv_unit='percent'):
-    """Load all expiries for one underlying and build an as-of IV overlay."""
+                                     rate=RiskFreeRate, reported_iv_unit='percent', start=None):
+    """Load all expiries for one underlying and build an as-of IV overlay.
+
+    Realized benchmarks use estimator values from `start` on (all when None).
+    """
     if date_count < 1 or min_contracts < 1 or not 0 <= outlier_count <= 2:
         raise ValueError('Option dates and minimum contracts must be positive; outliers must be 0, 1 or 2')
     if estimator in MOMENT_ESTIMATORS:
@@ -2343,14 +2427,16 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
             print('  [options] Install vollib to estimate missing IV; reported IV can be used directly.')
         return None
     points = option_overlay.attach_realized_benchmarks(
-        points, history, lambda available, tenor: get_volatility_estimator(available, estimator, tenor))
+        points, history, lambda available, tenor: get_volatility_estimator(available, estimator, tenor),
+        start=start)
     print(f"  [options] {len(points)} selected points across {points['Expiry'].nunique()} expiries and "
           f"{points['Date'].nunique()} dates; {diagnostics['reported_iv']} reported IV, "
           f"{diagnostics['estimated_iv']} Black-76 estimates. Rate {rate:.2%}, ACT/365.")
     return {'points': points, 'diagnostics': diagnostics, 'as_of': dates[-1],
             'estimator': estimator, 'top_count': option_overlay.OPTION_TOP_COUNT,
             'outlier_count': outlier_count, 'min_contracts': min_contracts, 'rate': rate,
-            'reported_iv_unit': reported_iv_unit}
+            'reported_iv_unit': reported_iv_unit,
+            'benchmark_start': None if start is None else pd.Timestamp(start)}
 
 
 def get_volatility_estimator(price_data, estimator=DEFAULT_ESTIMATOR,
@@ -2380,10 +2466,12 @@ def _has_intraday_range(price_data):
 
 def compute_volatility_profile(price_data, estimator=DEFAULT_ESTIMATOR,
                                windows=None, window=VOLATILITY_WINDOW,
-                               quantiles=None):
+                               quantiles=None, start=None):
     """Cone statistics plus the rolling series for one symbol.
 
-    Returns None when there is not enough history for any requested window.
+    Estimators run on the full history, so every window has values from
+    `start`; the cone, distribution and rolling series then keep only values
+    from `start` on (all values when None). Returns None when there are none.
     """
     windows = list(windows or VOLATILITY_WINDOWS)
     quantiles = list(quantiles or VOLATILITY_QUANTILES)
@@ -2394,12 +2482,15 @@ def compute_volatility_profile(price_data, estimator=DEFAULT_ESTIMATOR,
     if not usable:
         return None
 
+    def in_range(series):
+        series = series.replace([np.inf, -np.inf], np.nan).dropna()
+        return series if start is None else series[series.index >= pd.Timestamp(start)]
+
     cone = {'windows': [], 'max': [], 'top_q': [], 'median': [], 'mean': [],
             'bottom_q': [], 'min': [], 'realized': [], 'series': []}
 
     for w in usable:
-        series = get_volatility_estimator(price_data, estimator, w)
-        series = series.replace([np.inf, -np.inf], np.nan).dropna()
+        series = in_range(get_volatility_estimator(price_data, estimator, w))
         if series.empty:
             continue
         cone['windows'].append(w)
@@ -2416,8 +2507,7 @@ def compute_volatility_profile(price_data, estimator=DEFAULT_ESTIMATOR,
         return None
 
     rolling_window = window if len(price_data) > window + 1 else cone['windows'][-1]
-    rolling = get_volatility_estimator(price_data, estimator, rolling_window)
-    rolling = rolling.replace([np.inf, -np.inf], np.nan).dropna()
+    rolling = in_range(get_volatility_estimator(price_data, estimator, rolling_window))
 
     return {
         'estimator': estimator,
@@ -2427,6 +2517,7 @@ def compute_volatility_profile(price_data, estimator=DEFAULT_ESTIMATOR,
         'rolling': rolling,
         'rolling_window': rolling_window,
         'flat_bars': not _has_intraday_range(price_data),
+        'start': start,
     }
 
 
@@ -2447,8 +2538,9 @@ def plot_volatility(profile, ticker, pdf_pages=None):
     options = profile.get('option_overlay')
 
     figure = plt.figure(figsize=(30, 17))
+    window_note = f"   |   since {profile['start']:%d-%b-%Y}" if profile.get('start') is not None else ""
     figure.suptitle(
-        f"{ticker}   Volatility Profile   |   {estimator} estimator"
+        f"{ticker}   Volatility Profile   |   {estimator} estimator{window_note}"
         + ("   |   flat bars: range-based models read zero" if profile['flat_bars'] else ""),
         fontsize=32, fontweight='bold', y=0.975)
 
@@ -2503,14 +2595,17 @@ def plot_volatility(profile, ticker, pdf_pages=None):
     if has('rolling') and not rolling.empty:
         ax_roll = figure.add_axes((0.05, 0.31, 0.90, 0.17))
         w = profile['rolling_window']
-        ax_roll.plot(rolling.index, rolling, color='tab:red', linewidth=1.4,
+        dates = DateAxis(rolling.index)
+        x = dates.x(rolling.index)
+        ax_roll.plot(x, rolling, color='tab:red', linewidth=1.4,
                      label=f"Realized ({w}d)")
-        ax_roll.plot(rolling.index, rolling.rolling(w).quantile(upper),
+        ax_roll.plot(x, rolling.rolling(w).quantile(upper),
                      color='tab:blue', linewidth=1, label=f"{int(upper * 100)}th Prctl")
-        ax_roll.plot(rolling.index, rolling.rolling(w).median(),
+        ax_roll.plot(x, rolling.rolling(w).median(),
                      color='black', linewidth=1, label='Median')
-        ax_roll.plot(rolling.index, rolling.rolling(w).quantile(lower),
+        ax_roll.plot(x, rolling.rolling(w).quantile(lower),
                      color='tab:green', linewidth=1, label=f"{int(lower * 100)}th Prctl")
+        dates.format(ax_roll, max_ticks=12)
         ax_roll.yaxis.set_major_formatter(FuncFormatter(lambda v, _: label(v)))
         ax_roll.grid(True, alpha=0.3)
         ax_roll.tick_params(labelsize=13)
@@ -2584,8 +2679,12 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
                         pdf_pages=None, option_dates=option_overlay.OPTION_HISTORY_DATES,
                         option_min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
                         option_outliers=option_overlay.OPTION_OUTLIER_COUNT,
-                        option_rate=RiskFreeRate, option_iv_unit='percent'):
-    """Compute and render the volatility page for one symbol."""
+                        option_rate=RiskFreeRate, option_iv_unit='percent', start=None):
+    """Compute and render the volatility page for one symbol.
+
+    `start` limits the cone, distributions, rolling series and the option
+    pages' realized benchmarks to values from that date (all history when None).
+    """
     if estimator in RANGE_ESTIMATORS and not _has_intraday_range(price_data):
         print(f"  [volatility] {estimator} needs an intraday high/low range, but "
               f"{ticker} has flat bars - it will read zero.")
@@ -2597,17 +2696,18 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
             options = build_volatility_option_overlay(
                 price_data, ticker, estimator, date_count=option_dates,
                 min_contracts=option_min_contracts, outlier_count=option_outliers,
-                rate=option_rate, reported_iv_unit=option_iv_unit)
+                rate=option_rate, reported_iv_unit=option_iv_unit, start=start)
         except Exception as error:
             print(f'  [options unavailable] {type(error).__name__}: {error}')
     windows = list(VOLATILITY_WINDOWS)
     if options is not None:
         latest = options['points'][options['points']['Date'].eq(options['as_of'])]
         windows = sorted(set(windows) | set(latest.loc[latest['RV count'] > 0, 'Tenor sessions'].astype(int)))
-    profile = compute_volatility_profile(price_data, estimator=estimator, windows=windows)
+    profile = compute_volatility_profile(price_data, estimator=estimator, windows=windows, start=start)
     if profile is None:
-        print(f"  [volatility] Not enough history for {ticker} "
-              f"(need more than {min(VOLATILITY_WINDOWS) + 1} rows).")
+        since = f" since {pd.Timestamp(start):%Y-%m-%d}" if start is not None else ""
+        print(f"  [volatility] Not enough history for {ticker}{since} "
+              f"(need more than {min(VOLATILITY_WINDOWS) + 1} rows); page left out.")
         return None
 
     rolling = profile['rolling']
@@ -2625,23 +2725,87 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
     return profile
 
 
-def _plot_macro_group_pages(group_label, registry, report_groups, subtitle, footer, pdf_pages=None):
-    """Render a macro group using the shared metadata and missing-data layout."""
+def _load_macro_panel(symbol, definition, today, cutoff, range_label):
+    """(observations from `cutoff` to `today`, status text, last stored date) for one series."""
+    frame = pd.DataFrame(columns=['Date', 'Value'])
+    status = definition.get('unavailable', 'No stored observations.')
+    last_date = None
+    path = MACRO_PROCESSED / f'{symbol}.parquet'
+    if path.exists():
+        try:
+            stored = _load_parquet(MACRO_PROCESSED, symbol)
+            if not {'Date', 'Value', 'Unit', 'Series'}.issubset(stored.columns):
+                raise ValueError('Missing macro columns')
+            if (not stored['Unit'].eq(definition['unit']).all()
+                    or not stored['Series'].eq(definition['series']).all()):
+                raise ValueError('Stored series or units differ from this definition')
+            frame = stored[['Date', 'Value']].copy()
+            frame['Date'] = pd.to_datetime(frame['Date'], errors='coerce', utc=True).dt.tz_convert(None)
+            frame['Value'] = pd.to_numeric(frame['Value'], errors='coerce')
+            frame = frame.dropna()
+            frame = frame[np.isfinite(frame['Value']) & (frame['Date'] <= today)]
+            frame = frame.drop_duplicates('Date', keep='last').sort_values('Date')
+            last_date = frame['Date'].max() if not frame.empty else None
+            frame = frame[frame['Date'] >= cutoff]
+            status = (f'No observations in the past {range_label}.' if last_date is not None
+                      else 'No usable stored values.')
+        except Exception as error:
+            frame = pd.DataFrame(columns=['Date', 'Value'])
+            status = f'Stored data unavailable: {error}'
+    return frame, status, last_date
+
+
+class _ExactDecimalsFormatter(Formatter):
+    """Thousands-separated tick labels with as few decimals as keep every tick distinct."""
+
+    def __call__(self, value, pos=None):
+        return f'{value:,.2f}' if abs(value) < 10 else f'{value:,.0f}'
+
+    def format_ticks(self, values):
+        values = [float(value) for value in values]
+        decimals = next((places for places in range(5)
+                         if all(abs(round(value, places) - value) <= 1e-9 * max(1.0, abs(value))
+                                for value in values)), 4)
+        return [f'{value:,.{decimals}f}' for value in values]
+
+
+def _plot_macro_group_pages(group_label, registry, report_groups, subtitle, footer, pdf_pages=None,
+                            years=REPORT_YEARS, detailed_axes=False):
+    """Render a macro group using the shared metadata and missing-data layout.
+
+    Covers the last `years` years. A page none of whose series has data in that
+    range is left out; a series without data on a kept page shows why.
+    `detailed_axes` adds a light grey grid on both axes and finer tick labels.
+    """
     today = pd.Timestamp(datetime.date.today())
-    cutoff = today - pd.DateOffset(years=5)
+    cutoff = report_start(years, today)
+    range_label = report_range_label(years)
     summaries = {}
+    pages = []
+    for group_name, symbols in report_groups:
+        panels = {symbol: _load_macro_panel(symbol, registry[symbol], today, cutoff, range_label)
+                  for symbol in symbols}
+        for symbol, (frame, _, _) in panels.items():
+            summaries[symbol] = 'unavailable' if frame.empty else 'plotted'
+        if all(frame.empty for frame, _, _ in panels.values()):
+            print(f"  [{group_label}] '{group_name}' page left out: no data in the past "
+                  f"{range_label} for {', '.join(symbols)}.")
+            continue
+        pages.append((group_name, symbols, panels))
+
     colours = ['#236b8e', '#237a62', '#b54446']
-    for page_number, (group_name, symbols) in enumerate(report_groups, 1):
+    for page_number, (group_name, symbols, panels) in enumerate(pages, 1):
         figure = plt.figure(figsize=(30, 17), facecolor='white')
         figure.text(0.055, 0.962, f'{group_label} | {group_name}', fontsize=30,
                     fontweight='bold', color='#24282b', va='top')
         figure.text(0.055, 0.922,
-                    f'{subtitle} | Past 5 years | Report date {today:%Y-%m-%d}',
+                    f'{subtitle} | Past {range_label} | Report date {today:%Y-%m-%d}',
                     fontsize=14, color='#555b60', va='top')
         rows = math.ceil(len(symbols) / 2)
         row_height = 0.82 / rows
         for position, symbol in enumerate(symbols):
             definition = registry[symbol]
+            frame, status, last_date = panels[symbol]
             left = 0.055 + (position % 2) * 0.48
             top = 0.875 - (position // 2) * row_height
             figure.text(left, top, f"{symbol} | {definition['name']}", fontsize=19,
@@ -2654,30 +2818,6 @@ def _plot_macro_group_pages(group_label, registry, report_groups, subtitle, foot
                         fontsize=12, color='#373d41', va='top')
             bottom = top - row_height + 0.051
             axes = figure.add_axes((left + 0.025, bottom, 0.385, row_height - 0.15))
-            frame = pd.DataFrame(columns=['Date', 'Value'])
-            status = definition.get('unavailable', 'No stored observations.')
-            last_date = None
-            path = MACRO_PROCESSED / f'{symbol}.parquet'
-            if path.exists():
-                try:
-                    stored = _load_parquet(MACRO_PROCESSED, symbol)
-                    if not {'Date', 'Value', 'Unit', 'Series'}.issubset(stored.columns):
-                        raise ValueError('Missing macro columns')
-                    if (not stored['Unit'].eq(definition['unit']).all()
-                            or not stored['Series'].eq(definition['series']).all()):
-                        raise ValueError('Stored series or units differ from this definition')
-                    frame = stored[['Date', 'Value']].copy()
-                    frame['Date'] = pd.to_datetime(frame['Date'], errors='coerce', utc=True).dt.tz_convert(None)
-                    frame['Value'] = pd.to_numeric(frame['Value'], errors='coerce')
-                    frame = frame.dropna()
-                    frame = frame[np.isfinite(frame['Value']) & (frame['Date'] <= today)]
-                    frame = frame.drop_duplicates('Date', keep='last').sort_values('Date')
-                    last_date = frame['Date'].max() if not frame.empty else None
-                    frame = frame[frame['Date'] >= cutoff]
-                    status = 'No observations in the past 5 years.' if last_date is not None else 'No usable stored values.'
-                except Exception as error:
-                    frame = pd.DataFrame(columns=['Date', 'Value'])
-                    status = f'Stored data unavailable: {error}'
             if frame.empty:
                 axes.set_axis_off()
                 axes.text(0.5, 0.65, 'Data unavailable', transform=axes.transAxes,
@@ -2687,35 +2827,41 @@ def _plot_macro_group_pages(group_label, registry, report_groups, subtitle, foot
                 latest_label = f"Unit: {definition['unit']} | No values plotted"
                 if last_date is not None:
                     latest_label += f' | Last stored observation {last_date:%Y-%m-%d}'
-                summaries[symbol] = 'unavailable'
             else:
                 colour = colours[(page_number - 1) % len(colours)]
+                dates = DateAxis(frame['Date'])
+                x = dates.x(frame['Date'])
                 if symbol == 'JPPOLRATE':
-                    axes.step(frame['Date'], frame['Value'], where='post', color=colour, linewidth=1.6)
+                    axes.step(x, frame['Value'], where='post', color=colour, linewidth=1.6)
                 else:
-                    axes.plot(frame['Date'], frame['Value'], color=colour, linewidth=1.6)
+                    axes.plot(x, frame['Value'], color=colour, linewidth=1.6)
                 latest = frame.iloc[-1]
-                axes.scatter([latest['Date']], [latest['Value']], color=colour, s=30, zorder=3)
-                axes.grid(axis='y', color='#d5dadd', alpha=0.6)
+                axes.scatter([x[-1]], [latest['Value']], color=colour, s=30, zorder=3)
                 axes.spines[['top', 'right']].set_visible(False)
                 axes.spines[['left', 'bottom']].set_color('#bcc3c7')
-                locator = AutoDateLocator(minticks=3, maxticks=6)
-                axes.xaxis.set_major_locator(locator)
-                axes.xaxis.set_major_formatter(ConciseDateFormatter(locator))
-                axes.yaxis.set_major_formatter(FuncFormatter(
-                    lambda value, position: f'{value:,.2f}' if abs(value) < 10 else f'{value:,.0f}'))
+                # Daily series skip non-trading days; slower ones keep calendar spacing.
+                if detailed_axes:
+                    axes.grid(True, axis='both', color='#c8c8c8', linewidth=1.0)
+                    axes.set_axisbelow(True)
+                    dates.format(axes, max_ticks=12)
+                    axes.yaxis.set_major_locator(MaxNLocator(nbins=10))
+                    axes.yaxis.set_major_formatter(_ExactDecimalsFormatter())
+                else:
+                    axes.grid(axis='y', color='#d5dadd', alpha=0.6)
+                    dates.format(axes, max_ticks=6)
+                    axes.yaxis.set_major_formatter(FuncFormatter(
+                        lambda value, position: f'{value:,.2f}' if abs(value) < 10 else f'{value:,.0f}'))
                 axes.tick_params(labelsize=10)
                 if frame['Value'].min() < 0 < frame['Value'].max():
                     axes.axhline(0, color='#777777', linewidth=0.7, linestyle='--')
                 age = (today - latest['Date']).days
                 latest_label = (f"Latest: {latest['Value']:,.3f} {definition['unit']} | "
                                 f"Observed {latest['Date']:%Y-%m-%d} | {age} days old")
-                summaries[symbol] = 'plotted'
             figure.text(left + 0.025, bottom - 0.034, latest_label, fontsize=11,
                         color='#454c50', va='top')
         figure.text(0.055, 0.025, footer,
                     fontsize=11, color='#555b60')
-        figure.text(0.945, 0.025, f'{group_label} {page_number}/{len(report_groups)}',
+        figure.text(0.945, 0.025, f'{group_label} {page_number}/{len(pages)}',
                     fontsize=11, color='#555b60', ha='right')
         if pdf_pages is not None:
             try:
@@ -2727,34 +2873,34 @@ def _plot_macro_group_pages(group_label, registry, report_groups, subtitle, foot
     return summaries
 
 
-def plot_japan_macro(pdf_pages=None):
+def plot_japan_macro(pdf_pages=None, years=REPORT_YEARS):
     """Render cached Japan indicators with definitions, dates and explicit gaps."""
     return _plot_macro_group_pages(
         'Japan', japan_macro.JAPAN_SERIES, japan_macro.JAPAN_REPORT_GROUPS,
         'Macro and carry-trade indicators',
         'Dates are observation periods, not publication timestamps. CFTC contracts are not '
         'the proprietary MacroMicro COT index; that index has no verified public feed.',
-        pdf_pages=pdf_pages)
+        pdf_pages=pdf_pages, years=years)
 
 
-def plot_schiller_macro(pdf_pages=None):
+def plot_schiller_macro(pdf_pages=None, years=REPORT_YEARS):
     """Render the US-only Schiller valuation group from cached history."""
     return _plot_macro_group_pages(
         'US Schiller', schiller_macro.SCHILLER_SERIES, schiller_macro.SCHILLER_REPORT_GROUPS,
         'US equity valuation | Robert Shiller, S&P and Multpl',
         'Observation periods, not release dates. Sources may revise estimates. '
         'US prices, earnings and inflation remain separate from Indian valuations.',
-        pdf_pages=pdf_pages)
+        pdf_pages=pdf_pages, years=years, detailed_axes=True)
 
 
-def plot_india_schiller(pdf_pages=None):
+def plot_india_schiller(pdf_pages=None, years=REPORT_YEARS):
     """Render Indian-only valuations, distinguishing published CAPE from estimates."""
     return _plot_macro_group_pages(
         'India Schiller', nifty_macro.NIFTY_SERIES, nifty_macro.NIFTY_REPORT_GROUPS,
         'Indian market valuation | NSE NIFTY, Indian inflation and requested research sources',
         'Indian inputs only. NIFTYCAPE is an estimate, not IIM/NSE published CAPE. '
         'CPI ends March 2025; index and earnings-methodology changes affect comparability.',
-        pdf_pages=pdf_pages)
+        pdf_pages=pdf_pages, years=years)
 
 
 # ---------------------------------------------------------------------------
@@ -2790,6 +2936,7 @@ def main():
     Usage:
         python Option-OGN.py                          # interactive, all FnO
         python Option-OGN.py WTI                      # full analysis, one symbol
+        python Option-OGN.py --years 0.5 WTI          # every graph over the last 6 months
         python Option-OGN.py WTI US02Y__US10Y         # ... plus a comparison
         python Option-OGN.py WTI US02Y__US10Y 250     # ... over the last 250 observations
         python Option-OGN.py --pdf WTI JP10Y --periods 120  # monthly alignment
@@ -2842,7 +2989,7 @@ def main():
         if raw_prominence is not None and raw_prominence_pct is not None:
             raise ValueError("--trend-prominence and --trend-prominence-pct are "
                              "mutually exclusive; the absolute value would win.")
-        trend_bars = (TREND_BARS if raw_bars is None
+        trend_bars = (None if raw_bars is None
                       else _positive_number(raw_bars, '--trend-bars', int))
         trend_distance = (TREND_DISTANCE if raw_distance is None
                           else _positive_number(raw_distance, '--trend-distance', int))
@@ -2853,11 +3000,15 @@ def main():
             TREND_PROMINENCE_PCT if raw_prominence_pct is None
             else _positive_number(raw_prominence_pct,
                                   '--trend-prominence-pct', float) / 100.0)
+        raw_years = _take_flag_value(args, '--years')
+        years = (REPORT_YEARS if raw_years is None
+                 else _positive_number(raw_years, '--years', float))
+        report_range_label(years)   # rejects ranges shorter than a month
     except ValueError as e:
         print(f"  [error] {e}")
         return
 
-    if trend_bars < 2 * trend_distance + 1:
+    if trend_bars is not None and trend_bars < 2 * trend_distance + 1:
         print(f"  [error] --trend-bars {trend_bars} cannot hold two pivots "
               f"{trend_distance} bars apart; needs at least "
               f"{2 * trend_distance + 1}.")
@@ -2902,13 +3053,15 @@ def main():
             return
 
     if len(tokens) > 2:
-        print("Usage: python Option-OGN.py [--pdf] [--estimator NAME] "
+        print("Usage: python Option-OGN.py [--pdf] [--years N] [--estimator NAME] "
               "[--trend-bars N] [--trend-distance N] [--trend-prominence X] "
               "[--compare-frequency FREQ] [--compare-aggregation METHOD] "
               "[symbol] [compare_symbol] [observations]")
         print("  symbol            full technical analysis for this series")
         print("  compare_symbol    optional - append a statistical comparison")
         print("  observations      optional - last N aligned observations; also --periods N")
+        print(f"  --years N         optional - default {REPORT_YEARS}; time range of every graph, "
+              f"in years (0.5 = six months)")
         print("  --compare-frequency   auto (slower source), daily, weekly, monthly, quarterly, annual")
         print("  --compare-aggregation auto (series-specific), mean, last, sum")
         print('  --option-dates N          recent trading dates for IV overlays (default 5)')
@@ -2918,7 +3071,7 @@ def main():
         print('  --option-iv-unit UNIT     source IV units: percent (default) or decimal')
         print(f"  --estimator       optional - default {DEFAULT_ESTIMATOR}; one of: "
               f"{', '.join(ESTIMATORS)}")
-        print(f"  --trend-bars      optional - default {TREND_BARS}; trendline lookback")
+        print(f"  --trend-bars      optional - default: the report range; trendline lookback in bars")
         print(f"  --trend-distance  optional - default {TREND_DISTANCE}; min bars between pivots")
         print(f"  --trend-prominence     optional - absolute pivot prominence, price units")
         print(f"  --trend-prominence-pct optional - default "
@@ -2935,17 +3088,18 @@ def main():
         return
 
     if use_pdf and not pdf_path:
+        span = _report_range_suffix(years)   # e.g. WTI_3y_Analysis.pdf for --years 3
         if symbol and compare_with:
             suffix = f"_{days}obs" if days else ""
             if comparison_frequency != 'auto':
                 suffix += f'_{comparison_frequency}'
             if comparison_aggregation != 'auto':
                 suffix += f'_{comparison_aggregation}'
-            pdf_path = str(CHARTS_DIR / f"{symbol}_vs_{compare_with}{suffix}_Analysis.pdf")
+            pdf_path = str(CHARTS_DIR / f"{symbol}_vs_{compare_with}{suffix}{span}_Analysis.pdf")
         elif symbol:
-            pdf_path = str(CHARTS_DIR / f"{symbol}_Analysis.pdf")
+            pdf_path = str(CHARTS_DIR / f"{symbol}{span}_Analysis.pdf")
         else:
-            pdf_path = str(CHARTS_DIR / "FnO_Analysis.pdf")
+            pdf_path = str(CHARTS_DIR / f"FnO{span}_Analysis.pdf")
 
     try:
         FnOAnalysis(single_scrip=symbol,
@@ -2961,7 +3115,7 @@ def main():
                     comparison_aggregation=comparison_aggregation,
                     option_dates=option_dates, option_min_contracts=option_min_contracts,
                     option_outliers=option_outliers, option_rate=option_rate,
-                    option_iv_unit=option_iv_unit)
+                    option_iv_unit=option_iv_unit, years=years)
     except (ValueError, FileNotFoundError) as e:
         print(f"  [error] {e}")
 

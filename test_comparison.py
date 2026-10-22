@@ -262,6 +262,33 @@ class ComparisonTests(unittest.TestCase):
             cell_box = cell.get_window_extent(renderer)
             self.assertLessEqual(text_box.width, cell_box.width)
             self.assertLessEqual(text_box.height, cell_box.height)
+        # Monthly observations keep calendar spacing on the date panels.
+        from matplotlib.dates import date2num
+        levels = figure.axes[0].get_lines()[0].get_xdata()
+        np.testing.assert_allclose(levels, date2num(result['aligned'].index.to_numpy()))
+
+    def test_daily_chart_skips_weekends_and_holidays(self):
+        dates = pd.bdate_range('2025-01-01', periods=160)
+        dates = dates[~dates.isin(pd.to_datetime(['2025-01-20', '2025-02-17']))]
+        generator = np.random.default_rng(11)
+        first = self.series(dates, 100 + generator.normal(size=len(dates)).cumsum())
+        second = self.series(dates, 50 + generator.normal(size=len(dates)).cumsum())
+        result = self.module.compute_comparison(first, second, 'Gold', 'Silver')
+        document = Mock()
+        self.module.plot_comparison(result, self.module.build_comparison_table(result),
+                                    'Macro', 'Macro', pdf_pages=document)
+        figure = document.savefig.call_args.args[0]
+        figure.canvas.draw()
+        ax_raw, ax_norm, ax_spread = figure.axes[0], figure.axes[1], figure.axes[2]
+        expected = np.arange(len(result['aligned']), dtype=float)
+        for axes in (ax_raw, ax_norm, ax_spread):
+            np.testing.assert_array_equal(axes.get_lines()[0].get_xdata(), expected)
+        np.testing.assert_array_equal(figure.axes[-1].get_lines()[0].get_xdata(), expected)
+        labels = [label.get_text() for label in ax_raw.get_xticklabels()]
+        self.assertTrue(labels and all(label.split('\n')[0] in
+                                       ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug')
+                                       for label in labels), labels)
+        self.assertIn('\n2025', labels[0])
 
 
 if __name__ == '__main__':

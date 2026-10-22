@@ -16,6 +16,7 @@ End-to-end pipeline for downloading, storing, and analysing NSE (National Stock 
 | [option_overlay.py](option_overlay.py) | Volume-ranked CE/PE implied-volatility overlays, matched-futures Black-76 IV estimates, and robust same-expiry smile diagnostics. |
 | [diagnose_store.py](diagnose_store.py) | Read-only health and cost report for `MarketData_Parquet`: sizes and file shapes per category, what a one-day update rewrites, duplicate rows, columns named after dates, OneDrive online-only files and sync-conflict copies. |
 | **models.py** + `GarmanKlass.py`, `HodgesTompkins.py`, `Kurtosis.py`, `Parkinson.py`, `Raw.py`, `RogersSatchell.py`, `Skew.py`, `YangZhang.py` | Volatility estimators. One module per model, each exposing `get_estimator(price_data, window, clean)`. |
+| [date_axis.py](date_axis.py) | Shared chart x-axis: daily data is drawn without gaps for weekends and holidays, with date ticks and labels; slower series keep calendar spacing. |
 
 ---
 
@@ -68,7 +69,7 @@ folder. The report is printed and saved as JSON in the temp folder.
 One command handles both the technical analysis and the optional pairwise comparison:
 
 ```
-python Option-OGN.py [--pdf] [--estimator NAME] [symbol] [compare_symbol] [days]
+python Option-OGN.py [--pdf] [--years N] [--estimator NAME] [symbol] [compare_symbol] [observations]
 ```
 
 ```bash
@@ -79,10 +80,13 @@ python Option-OGN.py
 python Option-OGN.py RELIANCE
 python Option-OGN.py WTI
 
+# ... over the last 3 years instead of the default 1 year (6 months: --years 0.5)
+python Option-OGN.py --years 3 WTI
+
 # Full analysis of the first symbol, plus a statistical comparison against the second
 python Option-OGN.py WTI US02Y__US10Y
 
-# ... with the comparison restricted to the last 250 days
+# ... with the comparison restricted to the last 250 aligned observations
 python Option-OGN.py WTI US02Y__US10Y 250
 
 # Choose the volatility estimator (default YangZhang)
@@ -91,7 +95,7 @@ python Option-OGN.py --estimator Raw WTI
 # Export to PDF — all FnO symbols
 python Option-OGN.py --pdf
 
-# Export to PDF — single symbol → charts/WTI_Analysis.pdf
+# Export to PDF — single symbol → charts/WTI_Analysis.pdf (charts/WTI_3y_Analysis.pdf with --years 3)
 python Option-OGN.py --pdf WTI
 
 # Export to PDF — pair → charts/WTI_vs_US02Y__US10Y_Analysis.pdf
@@ -104,11 +108,35 @@ python Option-OGN.py --pdf output.pdf
 The report is assembled in this order:
 
 1. **Technical analysis** of the first symbol
-2. **Volatility profile** of the first symbol
-3. **Statistical comparison** — only when a second symbol is given
+2. **Trendlines** of the first symbol
+3. **Volatility profile** of the first symbol — only when it has a derivatives file
+   (`Derivatives/Processed/{symbol}.parquet`), followed by its option IV pages
+4. **Statistical comparison** — only when a second symbol is given
+5. **Japan, US Schiller and India Schiller** macro pages (PDF only)
 
 See [Volatility Analysis](#volatility-analysis) and [Statistical Comparison](#statistical-comparison)
 below.
+
+**Report range.** Every graph covers the **last 1 year** (`REPORT_YEARS`) up to today:
+the technical panels, Renko bricks, trendlines, the volatility cone, distributions and
+rolling series, the option pages' realized benchmarks, the comparison and the macro pages.
+`--years N` changes it for the whole report (decimals allowed: `--years 0.5` is six months)
+and is added to the PDF name. Indicators such as the 200-day average and the volatility
+windows still use the full history, so they are complete from the first day shown.
+`--trend-bars N` and a comparison `observations` count override the range for their own page.
+
+**Pages without data are left out.** A page with nothing to plot in the report range —
+a symbol without recent data, a comparison with fewer than 3 aligned observations, or a
+macro page none of whose series has observations in the range — is skipped, and the console
+says why. On a page that is kept, a series without data still shows why it is missing.
+
+**Date axes skip days without data.** Charts of daily data — the technical panels, the
+trendline page, the rolling volatility panel, option IV dates, daily comparisons and daily
+macro series — place consecutive observations next to each other, so weekends and exchange
+holidays leave no gap. Ticks fall on the first trading day of a week, month, quarter or year,
+and in interactive mode the cursor readout shows the date. Weekly, monthly and quarterly
+series keep calendar spacing: they have no weekend gaps, and a missing period stays visible.
+The shared logic is in [date_axis.py](date_axis.py).
 
 ### 5. Use as a library
 
@@ -312,10 +340,11 @@ without contacting NSE, and generate an analysis PDF with the Japan appendix:
 
 Each series is stored under `MarketData_Parquet/Macro/Processed/{symbol}.parquet`.
 The existing FRED `USDJPY` file is unchanged; `JPUSDJPY` uses Yahoo's `USDJPY=X`.
-Every analysis PDF includes three Japan pages once per report: funding/carry trade;
+Every analysis PDF includes up to three Japan pages once per report: funding/carry trade;
 growth/inflation/wages; positioning/capital flows. Each panel includes the stored
 ticker, source identifier, definition, frequency, units, and latest observation date.
-Charts read local data only and show the past five years. Remove `japan_macro` from
+Charts read local data only and show the report range (past year by default; see
+`--years`). A page with no observations in that range is left out. Remove `japan_macro` from
 `REPORT_SECTIONS` in [Option-OGN.py](Option-OGN.py) to disable this appendix.
 
 Verified public downloads:
@@ -513,9 +542,12 @@ separators, and tz-aware timestamps.
 
 ## Volatility Analysis
 
-Every report includes a volatility page for the **first** symbol, built from the standalone
+Reports include a volatility page for the **first** symbol when it has a derivatives file
+(`Derivatives/Processed/{symbol}.parquet`), built from the standalone
 estimator modules (`GarmanKlass.py`, `YangZhang.py`, ...), each of which exposes
-`get_estimator(price_data, window, clean)` and is dispatched through `models.py`.
+`get_estimator(price_data, window, clean)` and is dispatched through `models.py`. Symbols
+without derivatives (macro series, ratios, cash-only stocks) skip it, and the console says so.
+All panels use estimator values from the report range (last year by default).
 
 ```bash
 python Option-OGN.py --pdf WTI                    # default estimator (YangZhang)
@@ -552,10 +584,10 @@ Volatility estimators are annualised (252 trading periods) and shown as percenta
 | `box` | Box-and-whisker of the same per-window distributions |
 | `rolling` | The rolling estimator through time with quantile bands |
 | `histogram` | Distribution of estimator values, normal fit, and latest value marked |
-| `summary` | Latest value, percentile rank against its own history, median, min/max, sample size |
+| `summary` | Latest value, percentile rank within the report range, median, min/max, sample size |
 
 The cone is the classic read: if the realized line sits above the upper percentile band,
-short-dated volatility is rich relative to its own history.
+short-dated volatility is rich relative to its own history over the report range.
 
 ### Tuning
 
@@ -761,11 +793,15 @@ python Option-OGN.py GLD SLV 250            # last 250 common trading observatio
 python Option-OGN.py --pdf GLD SLV 250      # charts/GLD_vs_SLV_250obs_Analysis.pdf
 python Option-OGN.py --pdf WTI JP10Y 120    # last 120 monthly observations
 python Option-OGN.py --pdf WTI JP10Y --periods 120  # equivalent named option
-python Option-OGN.py GLD SLV                # omitted → full common horizon
+python Option-OGN.py GLD SLV                # omitted → the report range (last year)
+python Option-OGN.py --years 10 WTI JP10Y   # omitted, wider report range → last 10 years
 ```
 
-- **Omitted**: use the common history. Weekly and slower comparisons use the latest
+- **Omitted**: use the observations in the report range (last year unless `--years N`).
+  Weekly and slower comparisons use the latest
   consecutive run of usable periods, so a missing month is not treated as a one-month lag.
+  A one-year monthly comparison has 12 observations, so its significance tests are marked
+  unavailable; widen it with `--years` or an observation count.
 - **Supplied**: use the latest N observations *after* alignment. N means months for a
   monthly comparison, quarters for quarterly, years for annual, and common observations
   for daily. It never means N calendar days. The Python API retains the legacy name `days`.
@@ -916,13 +952,15 @@ afterwards when `option_overlay` is enabled.
    tells you
 
 The same table (without the definitions) is printed to the console, with the selected cadence, aggregation,
-transformations, sample window and exclusions. The **three Japan macro pages**, **two US
-Schiller pages** and **two India Schiller pages** follow once per PDF. If comparison is
+transformations, sample window and exclusions. The **Japan macro pages**, **US Schiller
+pages** and **India Schiller pages** follow once per PDF; pages without data in the report
+range are left out. US Schiller panels have a light grey grid on both axes and finer
+month and value labels. If comparison is
 unavailable, the other report pages remain and the
 reason is printed. This frequency handling applies to the comparison; the first symbol's
-technical and volatility pages still use their existing observation-based windows.
+technical and volatility pages use the report range.
 
-Regression checks: `python -m unittest test_option_overlay test_comparison test_japan_macro test_valuation_macro test_market_data -v`.
+Regression checks: `python -m unittest test_option_overlay test_comparison test_japan_macro test_valuation_macro test_market_data test_date_axis test_report_scope -v`.
 
 ---
 
