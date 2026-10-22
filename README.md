@@ -598,9 +598,10 @@ date**. This applies to the first analysed symbol, not the comparison symbol.
   paginated. Pages cover the **next three monthly expiries** (the last listed expiry of
   each calendar month) and, when the underlying also lists weekly contracts (such as
   NIFTY), the **next five expiries of any kind**. An expiry in both sets gets one page;
-  for example, with Tuesday weeklies NIFTY as of 21 Oct 2026 would show 27 Oct, 3, 10, 17
-  and 23 Nov, and 29 Dec. Titles say *Monthly expiry* or *Weekly expiry*; expiries on or
-  before the latest date are left out.
+  NIFTY as of 22 Oct 2026 shows 27 Oct, 3, 9, 17 and 23 Nov, and 29 Dec (an expiry that
+  falls on a holiday moves to the previous trading day, so 9 and 23 Nov are Mondays).
+  Titles say *Monthly expiry* or *Weekly expiry*; expiries on or before the latest date
+  are left out.
   `OPTION_MONTHLY_EXPIRIES` and `OPTION_SERIES_EXPIRIES` in
   [option_overlay.py](option_overlay.py) set the two counts.
 - **How-to-use lines:** under the CE chart, the PE chart and the table, one line says how
@@ -704,9 +705,12 @@ An outlier can be a bad quote or model-fit issue; an IV-minus-realized gap can r
 a normal risk premium. Neither establishes mispricing, arbitrage, or a trade signal.
 
 Focused checks: `python -m unittest test_option_overlay -v`.
-Option pricing and dense chart layouts are validated with explicitly synthetic fixtures;
-the local processed derivatives folder is empty, so no live option-chain validation or
-market outlier claim has been made.
+Option pricing and dense chart layouts are validated with explicitly synthetic fixtures.
+Expiry handling was also checked against a one-week NSE F&O bhavcopy (14-22 Oct 2026):
+`Expiry` holds the holiday-adjusted date (equal to `FininstrmActlXpryDt`), only NIFTY lists
+weekly expiries among the index contracts, and the parity forwards of its monthly
+expiries matched the same-expiry futures settlement within 0.1%. No market outlier
+claim has been made.
 
 ---
 

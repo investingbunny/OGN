@@ -346,11 +346,11 @@ class OptionIntegrationTests(unittest.TestCase):
 
 
 class WeeklyExpiryTests(unittest.TestCase):
-    """NIFTY-style listing as of 21 Oct 2026: the last listed expiry of each month is the monthly."""
+    """NSE's NIFTY listing for 14-22 Oct 2026; Monday dates are holiday-shifted Tuesdays."""
     AS_OF = pd.Timestamp('2026-10-21')
-    LISTED = pd.to_datetime(['2026-10-27', '2026-11-03', '2026-11-10', '2026-11-17', '2026-11-24',
+    LISTED = pd.to_datetime(['2026-10-27', '2026-11-03', '2026-11-09', '2026-11-17', '2026-11-23',
                              '2026-12-01', '2026-12-29'])
-    MONTHLY = pd.to_datetime(['2026-10-27', '2026-11-24', '2026-12-29'])
+    MONTHLY = pd.to_datetime(['2026-10-27', '2026-11-23', '2026-12-29'])
 
     @classmethod
     def setUpClass(cls):
@@ -381,14 +381,15 @@ class WeeklyExpiryTests(unittest.TestCase):
         return pd.DataFrame(rows)
 
     def test_last_listed_expiry_of_each_month_is_monthly(self):
-        kinds = overlay.classify_expiries(list(self.LISTED) + [self.LISTED[1], pd.Timestamp('2027-03-30')])
+        listed = [pd.Timestamp('2026-10-19')] + list(self.LISTED) + [self.LISTED[1], pd.Timestamp('2027-03-30')]
+        kinds = overlay.classify_expiries(listed)
         monthly = kinds[kinds.eq('Monthly')].index.strftime('%d %b').tolist()
-        self.assertEqual(monthly, ['27 Oct', '24 Nov', '29 Dec', '30 Mar'])
+        self.assertEqual(monthly, ['27 Oct', '23 Nov', '29 Dec', '30 Mar'])
         self.assertEqual(kinds[kinds.eq('Weekly')].index.strftime('%d %b').tolist(),
-                         ['03 Nov', '10 Nov', '17 Nov', '01 Dec'])
+                         ['19 Oct', '03 Nov', '09 Nov', '17 Nov', '01 Dec'])
 
     def test_weekly_iv_uses_the_same_expiry_parity_forward(self):
-        expiries = pd.to_datetime(['2026-10-27', '2026-11-03', '2026-11-24'])
+        expiries = pd.to_datetime(['2026-10-27', '2026-11-03', '2026-11-23'])
         frame, diagnostic = overlay.prepare_option_iv(self.chain([self.AS_OF], expiries), 'NIFTY', [self.AS_OF])
         weekly = frame[frame['Expiry'].eq(expiries[1])]
         self.assertEqual(len(weekly), 42)
@@ -403,7 +404,7 @@ class WeeklyExpiryTests(unittest.TestCase):
         self.assertEqual(diagnostic['estimated_iv'], 126)
 
     def test_parity_forward_far_from_the_underlying_is_rejected(self):
-        expiries = pd.to_datetime(['2026-10-27', '2026-11-03', '2026-11-24'])
+        expiries = pd.to_datetime(['2026-10-27', '2026-11-03', '2026-11-23'])
         chain = self.chain([self.AS_OF], expiries, spot=30000.0)
         frame, diagnostic = overlay.prepare_option_iv(chain, 'NIFTY', [self.AS_OF])
         self.assertFalse(frame['Expiry'].eq(expiries[1]).any())
@@ -412,17 +413,17 @@ class WeeklyExpiryTests(unittest.TestCase):
 
     def test_pages_cover_next_three_monthly_and_next_five_expiries(self):
         listed = list(self.LISTED) + [pd.Timestamp('2027-03-30')]
-        kinds = overlay.classify_expiries(listed + [pd.Timestamp('2026-10-20')])
+        kinds = overlay.classify_expiries(listed + [pd.Timestamp('2026-10-19')])
         points = pd.DataFrame({'Date': self.AS_OF, 'Expiry': listed})
-        points = pd.concat([points, pd.DataFrame({'Date': [pd.Timestamp('2026-10-19')],
-                                                  'Expiry': [pd.Timestamp('2026-10-20')]})])
+        points = pd.concat([points, pd.DataFrame({'Date': [pd.Timestamp('2026-10-16')],
+                                                  'Expiry': [pd.Timestamp('2026-10-19')]})])
         points['Expiry type'] = points['Expiry'].map(kinds)
         pages = overlay.select_report_expiries(points)
         self.assertEqual([f'{expiry:%d %b}' for expiry in pages],
-                         ['27 Oct', '03 Nov', '10 Nov', '17 Nov', '24 Nov', '29 Dec'])
+                         ['27 Oct', '03 Nov', '09 Nov', '17 Nov', '23 Nov', '29 Dec'])
         monthly_only = points[points['Expiry type'].eq('Monthly')]
         self.assertEqual([f'{expiry:%d %b}' for expiry in overlay.select_report_expiries(monthly_only)],
-                         ['27 Oct', '24 Nov', '29 Dec'])
+                         ['27 Oct', '23 Nov', '29 Dec'])
 
     def test_one_liners_quote_latest_iv_against_realized(self):
         latest = pd.DataFrame({'Option type': ['CE', 'CE', 'PE'], 'IV': [0.14, 0.16, 0.18],
@@ -447,7 +448,7 @@ class WeeklyExpiryTests(unittest.TestCase):
         with patch.object(self.module, 'load_derivatives', return_value=chain):
             profile = self.module.build_volatility_option_overlay(prices, 'NIFTY', 'YangZhang', date_count=2)
         self.assertEqual([f'{expiry:%d %b}' for expiry in profile['expiries']],
-                         ['27 Oct', '03 Nov', '10 Nov', '17 Nov', '24 Nov', '29 Dec'])
+                         ['27 Oct', '03 Nov', '09 Nov', '17 Nov', '23 Nov', '29 Dec'])
         self.assertEqual(sorted(pd.to_datetime(profile['points']['Expiry'].unique())), profile['expiries'])
         weekly = profile['points'][profile['points']['Expiry type'].eq('Weekly')]
         self.assertTrue(weekly['IV source'].eq('Black-76 parity estimate').all())
