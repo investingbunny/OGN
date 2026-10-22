@@ -14,6 +14,7 @@ End-to-end pipeline for downloading, storing, and analysing NSE (National Stock 
 | [schiller_macro.py](schiller_macro.py) | US-only Schiller valuations: Robert Shiller's CAPE/real-price/earnings workbook and Multpl valuation histories. |
 | [nifty_macro.py](nifty_macro.py) | Separate India Schiller group: NIFTY valuations, calculated Indian-only CAPE, and explicitly unverified IIM/RBI/index-price-sales sources. |
 | [option_overlay.py](option_overlay.py) | Volume-ranked CE/PE implied-volatility overlays, matched-futures Black-76 IV estimates, and robust same-expiry smile diagnostics. |
+| [diagnose_store.py](diagnose_store.py) | Read-only health and cost report for `MarketData_Parquet`: sizes and file shapes per category, what a one-day update rewrites, duplicate rows, columns named after dates, OneDrive online-only files and sync-conflict copies. |
 | **models.py** + `GarmanKlass.py`, `HodgesTompkins.py`, `Kurtosis.py`, `Parkinson.py`, `Raw.py`, `RogersSatchell.py`, `Skew.py`, `YangZhang.py` | Volatility estimators. One module per model, each exposing `get_estimator(price_data, window, clean)`. |
 
 ---
@@ -50,6 +51,17 @@ python OGN.py
 ```
 
 Prints a summary table showing available categories, symbol counts, and directory paths.
+
+For a deeper check (file sizes and shapes, what a one-day update rewrites, duplicate rows,
+columns named after dates, OneDrive online-only files, sync-conflict copies):
+
+```bash
+python diagnose_store.py --deep 10 --timing
+```
+
+It never writes inside the data folder and does not open online-only files (opening one
+makes OneDrive download it). `--timing` times a merge-style rewrite of a copy in the temp
+folder. The report is printed and saved as JSON in the temp folder.
 
 ### 4. Generate analysis charts
 
@@ -167,6 +179,41 @@ the UDiFF switch keeps its legacy copies of January–July 2024. If both copies 
 ever reach the store (for example a sync-conflict file), the merge keeps the UDiFF copy
 and drops the legacy one, so no day is stored twice.
 
+### How an update writes processed files
+
+Every raw day is merged into one Parquet file per symbol. When all new rows are dated after
+a symbol's stored history (the normal daily update), they are appended with pyarrow: the
+stored history is no longer converted to pandas, re-checked and re-typed on every run, which
+made one new day cost as much as twenty. The result is identical to the full pandas merge,
+which still handles late or overlapping days (with deduplication) and any column whose type
+would change. The merge log shows how many symbols were written by fast append.
+
+Every processed and raw file is first written to a temporary file that replaces the old one
+only when complete, so an interrupted run, or a file briefly locked by OneDrive or a virus
+scanner, never leaves a truncated file behind.
+
+If several raw files hold the same day (for example a sync-conflict copy such as
+`cm_20240315 (1).parquet` or `cm_20240315-DESKTOP-ABC.parquet`), the merge reports them in
+its log and keeps one file's rows per symbol and day: the UDiFF copy where the layouts
+differ, otherwise the original file. "Day" here is the date in the file name, so rows from
+two different days' files are never compared (a short-sale report lists trades dated a week
+earlier). Copies are never deleted or renamed; a copy whose rows were not used stays in `Raw`.
+
+### Report layouts
+
+- **Market Activity** — NSE heads the report with its date (`,19-Oct-2026`), which used to
+  name a new column every day. That column is now stored as `Details`. Only the summary
+  sentence and the section titles are kept: the report's tables have more fields than its
+  two-field header line, so the CSV reader skips them.
+- **WDM Daily** — each sub-file is one series: `Debt_trd_sett` (trades), `Debt_add` (issues
+  added) and `Debt_mat` (issues matured), instead of one dated symbol per day. The issue
+  lists open with a title line ("Issues added on 19 October 2026"), so their real header
+  (`ST, Security, Issue, Issue Description, Coupon, …`) is now used. Where a year's title line
+  was shorter than its data rows, those rows were skipped at download and stay missing
+  unless those raw days are downloaded again.
+- **Short Selling** — older reports name the symbol column `Security Symbol`; it is now
+  mapped to `Symbol` instead of storing those days under `UNKNOWN`.
+
 ### Existing data stores and fresh installs
 
 The same command works for both: `python "OGN v2.0-download.py"`. For a fresh install, first
@@ -185,6 +232,10 @@ manual steps are needed:
 2. **Indices before late 2015** — NSE's old index names (`S&P CNX Nifty`, `CNX Bank`, …) and
    the 2010–2011 PR-file columns were not recognised, so NIFTY and BANKNIFTY are missing.
    Raw days saved without NIFTY (about 1,450) are downloaded again and merged.
+3. **Dates in names and unmapped symbols** — Market Activity gained a column per day, WDM
+   kept dates in its symbols and column names, and older Short Selling days were stored
+   under `UNKNOWN`. These three categories are rebuilt from their raw files in the layouts
+   described above, with the same check that every raw file is present and readable.
 
 The first run after upgrading therefore takes longer. Each repair is recorded in
 `MarketData_Parquet/.migrations.json` when done and never runs again; an interrupted

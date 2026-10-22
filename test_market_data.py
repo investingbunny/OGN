@@ -5,14 +5,17 @@ import datetime
 import importlib.util
 import io
 import json
+import os
 import re
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import DEFAULT, patch
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 import OGN
@@ -65,6 +68,91 @@ def market_activity_day(date):
     return pd.DataFrame({'Date': date, 'Symbol': 'MARKET',
                          'Line': ['Equity', 'Derivatives', 'Currency', 'Debt', 'Total'],
                          'Value': [1.0, 2.0, 3.0, 4.0, 10.0]})
+
+
+def cm_day(date, close):
+    """One stock trading in two series, with an integer column."""
+    return pd.DataFrame({'Date': [date, date], 'Symbol': 'PFC', 'Series': ['EQ', 'N1'],
+                         'Close': [close, close + 600.0], 'Volume': [100, 200]})
+
+
+def legacy_fo(date):
+    """Legacy F&O day with the empty trailing CSV column and integer open interest."""
+    return legacy_day(date).assign(**{'Open Int': [1000, 2000], 'Unnamed: 15': np.nan})
+
+
+def udiff_fo(date, first_id=1001):
+    """UDiFF F&O day: adds columns (one integer) and lacks the legacy trailing column."""
+    return udiff_day(date).assign(**{'Open Int': [3000, 4000], 'FinInstrmId': [first_id, first_id + 1]})
+
+
+def dated_market_activity(date):
+    """Market Activity day as earlier versions saved it: a column named after the date."""
+    return pd.DataFrame({'Unnamed: 0': ['The Nifty witnessed an intraday movement', 'nan', 'nan'],
+                         date.strftime('%d-%b-%Y'): ['nan', 'TOP 25 Securities Today :',
+                                                     'Top Five Nifty 50 Gainers:'],
+                         'Symbol': 'MARKET', 'Date': date})
+
+
+def old_short_sales(date):
+    """Short sales as earlier versions saved them: symbol in an unmapped column, UNKNOWN Symbol."""
+    return pd.DataFrame({'Security Name': ['YES BANK LIMITED', 'KOTAK MAHINDRA BANK LTD'],
+                         'Security Symbol': ['YESBANK', 'KOTAKBANK'], 'Date': date,
+                         'Qty Short Sold': [153300, 56000], 'Symbol': 'UNKNOWN'})
+
+
+WDM_ADDED = ['ST', 'Security', 'Issue', 'Issue Description', 'Coupon', 'Issue Date', 'Maturity Date',
+             'Next IP Date', 'Coupon Freq', 'Rating', 'Listed']
+WDM_MATURED = ['ST', 'Security', 'Issue', 'Issue Description', 'Coupon', 'Issue Date', 'Maturity Date',
+               'Rating', 'Listed']
+
+
+def old_wdm_day(date):
+    """A WDM day as earlier versions saved it.
+
+    Symbols carry dates, and each issue list was read with its title line as the
+    header, so the real header is the first data row, the title names the 4th
+    column, and the numeric Coupon column lost its header text.
+    """
+    def issue_list(title, header, row, symbol):
+        cells = {f'Unnamed: {i}': [name, value, 'nan'] for i, (name, value) in enumerate(zip(header, row))}
+        cells[title] = cells.pop('Unnamed: 3')
+        cells['Unnamed: 4'] = [np.nan, float(row[4]), np.nan]
+        return pd.DataFrame({**cells, 'Date': date, 'Symbol': symbol})
+
+    trades = pd.DataFrame({'Date': [date], 'Sectype': ['GS'], 'Security': ['CG2031'],
+                           'Traded Value (Rs.Cr.)': [128.24], 'Symbol': [f'Debt_trd{date:%d%m}_sett']})
+    added = issue_list(f'Issues added on {date:%d %B %Y}', WDM_ADDED,
+                       ['CP', 'ABML', '110923', 'ABML CP 11/09/23', '0', '13-Jun-2023', '11-Sep-2023',
+                        'nan', 'nan', 'CRISIL A1+', 'Yes'], f'Debt_add{date:%Y%m%d}')
+    matured = issue_list(f'Issues matured on {date:%d %B %Y}', WDM_MATURED,
+                         ['PT', 'PFC23', '8.19%', 'POWER FIN 8.19% 2023', '8.19', '14-Jun-2013',
+                          '14-Jun-2023', 'ICRA AAA', 'Yes'], f'Debt_mat{date:%Y%m%d}')
+    frame = pd.concat([trades, added, matured], ignore_index=True)
+    for col in frame.columns:
+        if frame[col].dtype == object and col != 'Date':
+            frame[col] = frame[col].astype(str)
+    return frame
+
+
+def wdm_zip(date):
+    """A WDM Daily ZIP as NSE ships it, with 2011-style short title lines."""
+    files = {
+        f'trd{date:%d%m}_sett.csv': f'Trade date,Sectype,Security,Traded Value (Rs.Cr.)\n'
+                                    f'{date:%d-%b-%Y},GS,CG2036,25.00\n',
+        f'add{date:%Y%m%d}.csv': f',,,Issues added on {date:%d %B %Y}\n' + ','.join(WDM_ADDED) + '\n'
+                                 'CP,ICFL,310827,ICFL CP 31/08/27,0,16-Oct-2026,31-Aug-2027,,,CARE A1+,Yes\n'
+                                 'DB,IBHF29,9.80%,INDBULLS HSG FIN 9.80 % 2029,9.8,16-Oct-2026,16-Oct-2029,'
+                                 '16-Oct-2027,Yearly,BRCK AA+,Yes\n',
+        f'mat{date:%Y%m%d}.csv': f',,,Issues matured on {date:%d %B %Y},,,,,\n' + ','.join(WDM_MATURED) + '\n'
+                                 'PT,PGC26,8.85%,PGC 8.85% 2026,8.85,19-Oct-2012,19-Oct-2026,CARE AAA,Yes\n',
+        'Legend.doc': 'not a data file',
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w') as archive:
+        for name, text in files.items():
+            archive.writestr(name, text)
+    return buffer.getvalue()
 
 
 class MergeTests(unittest.TestCase):
@@ -229,6 +317,252 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.module.UDIFF_START_DATE, DAY(2024, 1, 1))
 
 
+def plain_text(table):
+    """The table with large_string columns read as string (pandas 3 writes large_string)."""
+    return table.cast(pa.schema([pa.field(f.name, pa.string()) if pa.types.is_large_string(f.type) else f
+                                 for f in table.schema], metadata=table.schema.metadata))
+
+
+class FastAppendTests(unittest.TestCase):
+    """Appending newer days with pyarrow must write exactly what the pandas merge writes."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_script('OGN v2.0-download.py', 'ogn_market_data_fast_append')
+        cls.rules = cls.module.NSEMarketDataDownloader
+
+    def folders(self, tmp):
+        raw, processed = Path(tmp) / 'Raw', Path(tmp) / 'Processed'
+        raw.mkdir()
+        processed.mkdir()
+        return raw, processed
+
+    def run_merges(self, prefix, batches, fast):
+        """Merges each batch of raw days in turn and returns the processed tables."""
+        outcomes = []
+        append = self.rules._append_newer_rows
+
+        def spy(file_path, new_data):
+            outcomes.append(append(file_path, new_data) if fast else False)
+            return outcomes[-1]
+
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()), \
+                patch.object(self.rules, '_append_newer_rows', side_effect=spy):
+            raw, processed = self.folders(tmp)
+            for batch in batches:
+                for name, frame in batch.items():
+                    frame.to_parquet(raw / name, index=False)
+                object.__new__(self.rules).merge_raw_to_processed(raw, prefix, processed, prefix)
+            tables = {p.name: pq.read_table(p) for p in processed.glob('*.parquet')}
+            frames = {p.name: pd.read_parquet(p) for p in processed.glob('*.parquet')}
+            leftovers = [p.name for p in processed.iterdir() if not p.name.endswith('.parquet')]
+        self.assertEqual(leftovers, [])
+        return tables, frames, outcomes
+
+    def assert_same_output(self, prefix, batches):
+        for mode in string_modes():
+            with self.subTest(mode=mode), mode():
+                fast_tables, fast_frames, outcomes = self.run_merges(prefix, batches, fast=True)
+                slow_tables, slow_frames, _ = self.run_merges(prefix, batches, fast=False)
+                self.assertTrue(any(outcomes), 'the fast append was never used')
+                self.assertEqual(sorted(fast_tables), sorted(slow_tables))
+                for name in fast_tables:
+                    fast, slow = plain_text(fast_tables[name]), plain_text(slow_tables[name])
+                    self.assertEqual(fast.schema.remove_metadata(), slow.schema.remove_metadata(), name)
+                    self.assertTrue(fast.equals(slow), name)
+                    self.assertEqual(json.loads(fast.schema.metadata[b'pandas'])['columns'],
+                                     json.loads(slow.schema.metadata[b'pandas'])['columns'], name)
+                    pd.testing.assert_frame_equal(fast_frames[name], slow_frames[name])
+
+    def test_derivatives_across_layout_change(self):
+        # UDiFF days add columns (one of them integer) and lack the legacy trailing column;
+        # the next day's integers then join the float column the first append created.
+        self.assert_same_output('fo', [
+            {'fo_20240102.parquet': legacy_fo(DAY(2024, 1, 2)), 'fo_20240103.parquet': legacy_fo(DAY(2024, 1, 3))},
+            {'fo_20240710.parquet': udiff_fo(DAY(2024, 7, 10))},
+            {'fo_20240711.parquet': udiff_fo(DAY(2024, 7, 11), 2001),
+             'fo_20240712.parquet': udiff_fo(DAY(2024, 7, 12), 3001)}])
+
+    def test_equity_and_keyless_reports(self):
+        self.assert_same_output('cm', [{'cm_20240102.parquet': cm_day(DAY(2024, 1, 2), 400.0)},
+                                       {'cm_20240103.parquet': cm_day(DAY(2024, 1, 3), 410.0),
+                                        'cm_20240104.parquet': cm_day(DAY(2024, 1, 4), 420.0)}])
+        self.assert_same_output('ma', [{'ma_20240102.parquet': market_activity_day(DAY(2024, 1, 2))},
+                                       {'ma_20240103.parquet': market_activity_day(DAY(2024, 1, 3)).assign(Note='late')}])
+
+    def test_overlaps_and_type_changes_are_left_to_the_full_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'PFC.parquet'
+            cm_day(DAY(2024, 1, 3), 400.0).to_parquet(path, index=False)
+            before = path.read_bytes()
+            for later in (cm_day(DAY(2024, 1, 3), 401.0), cm_day(DAY(2024, 1, 2), 401.0),
+                          cm_day(DAY(2024, 1, 4), 401.0).assign(Volume=[1.5, 2.5]),
+                          cm_day(DAY(2024, 1, 4), 401.0).drop(columns='Volume')):
+                self.assertFalse(self.rules._append_newer_rows(path, later))
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_interrupted_write_keeps_the_stored_file(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            raw, processed = self.folders(tmp)
+            downloader = object.__new__(self.rules)
+            cm_day(DAY(2024, 1, 2), 400.0).to_parquet(raw / 'cm_20240102.parquet', index=False)
+            downloader.merge_raw_to_processed(raw, 'cm', processed, 'Equity')
+            before = (processed / 'PFC.parquet').read_bytes()
+            cm_day(DAY(2024, 1, 3), 410.0).to_parquet(raw / 'cm_20240103.parquet', index=False)
+            write_table = pq.write_table
+
+            def disk_full(table, where, *args, **kwargs):
+                if Path(where).parent == processed:
+                    Path(where).write_bytes(b'PAR1 partial')
+                    raise OSError('disk full')
+                return write_table(table, where, *args, **kwargs)
+
+            with patch.object(self.module.pq, 'write_table', side_effect=disk_full):
+                downloader.merge_raw_to_processed(raw, 'cm', processed, 'Equity')
+            self.assertEqual((processed / 'PFC.parquet').read_bytes(), before)
+            self.assertEqual([p.name for p in processed.iterdir()], ['PFC.parquet'])
+            self.assertTrue((raw / '.retry' / 'PFC.parquet').exists())
+            downloader.merge_raw_to_processed(raw, 'cm', processed, 'Equity')
+            result = pd.read_parquet(processed / 'PFC.parquet')
+        self.assertEqual(result.groupby('Date').size().to_dict(), {DAY(2024, 1, 2): 2, DAY(2024, 1, 3): 2})
+
+    def test_replace_waits_for_a_briefly_locked_file(self):
+        attempts = []
+        replace = os.replace
+
+        def locked(source, target):
+            attempts.append(target)
+            if len(attempts) < 3:
+                raise PermissionError('in use by OneDrive')
+            return replace(source, target)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(self.module.os, 'replace', side_effect=locked), \
+                patch.object(self.module.time, 'sleep'):
+            path = Path(tmp) / 'PFC.parquet'
+            self.rules._write_parquet_atomic(cm_day(DAY(2024, 1, 2), 400.0), path)
+            self.assertEqual(len(pd.read_parquet(path)), 2)
+            self.assertEqual([p.name for p in Path(tmp).iterdir()], ['PFC.parquet'])
+        self.assertEqual(len(attempts), 3)
+
+
+class ReportLayoutTests(unittest.TestCase):
+    """Dates in column and symbol names, unmapped symbols and copies of a day."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_script('OGN v2.0-download.py', 'ogn_market_data_layouts')
+        cls.rules = cls.module.NSEMarketDataDownloader
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.raw, self.processed = Path(self.tmp.name) / 'Raw', Path(self.tmp.name) / 'Processed'
+        self.raw.mkdir()
+        self.processed.mkdir()
+        self.downloader = object.__new__(self.rules)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def merge(self, prefix):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.downloader.merge_raw_to_processed(self.raw, prefix, self.processed, prefix)
+        return output.getvalue()
+
+    def save_download(self, prefix, day, frame):
+        """Saves a cleaned day the way the downloader does."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.downloader._concurrent_download([day], lambda d: (d, frame), self.raw, prefix, prefix)
+
+    def test_market_activity_date_is_not_a_column_name(self):
+        for date in (DAY(2024, 1, 2), DAY(2024, 1, 3)):
+            dated_market_activity(date).to_parquet(self.raw / f'ma_{date:%Y%m%d}.parquet', index=False)
+        self.merge('ma')
+        cleaned = self.downloader._clean_market_activity_data(
+            pd.DataFrame({'Unnamed: 0': ['The Nifty witnessed', np.nan], '04-Jan-2024': [np.nan, 'TOP 25']}),
+            DAY(2024, 1, 4))
+        self.assertEqual(cleaned.columns.tolist(), ['Unnamed: 0', 'Details', 'Symbol', 'Date'])
+        self.save_download('ma', DAY(2024, 1, 4), cleaned)
+        self.merge('ma')
+        result = pd.read_parquet(self.processed / 'MARKET.parquet')
+        self.assertEqual(result.columns.tolist(), ['Unnamed: 0', 'Details', 'Symbol', 'Date'])
+        self.assertEqual(result.groupby('Date').size().tolist(), [3, 3, 2])
+        self.assertEqual(result.loc[result['Date'].eq(DAY(2024, 1, 3)), 'Details'].tolist(),
+                         ['nan', 'TOP 25 Securities Today :', 'Top Five Nifty 50 Gainers:'])
+
+    def test_short_sales_keep_their_security_symbol(self):
+        cleaned = self.downloader._clean_short_selling_data(
+            pd.DataFrame({'Security Name': ['YES BANK LIMITED'], 'Security Symbol': ['YESBANK'],
+                          'Trade Date': ['07-Jun-2016'], 'Quantity': [153300]}), DAY(2016, 6, 14))
+        self.assertEqual(cleaned[['Symbol', 'Date', 'Qty Short Sold']].values.tolist(),
+                         [['YESBANK', DAY(2016, 6, 7), 153300]])
+        self.assertNotIn('Security Symbol', cleaned.columns)
+        old_short_sales(DAY(2016, 6, 7)).to_parquet(self.raw / 'ss_20160614.parquet', index=False)
+        self.merge('ss')
+        self.assertEqual(sorted(p.name for p in self.processed.glob('*.parquet')),
+                         ['KOTAKBANK.parquet', 'YESBANK.parquet'])
+        self.assertEqual(pd.read_parquet(self.processed / 'YESBANK.parquet')['Qty Short Sold'].tolist(), [153300])
+
+    def test_wdm_is_three_series_with_real_column_names(self):
+        parsed = self.downloader._parse_wdm_zip(wdm_zip(DAY(2026, 10, 19)), DAY(2026, 10, 19))
+        self.assertEqual(sorted(parsed['Symbol'].unique()), ['Debt_add', 'Debt_mat', 'Debt_trd_sett'])
+        self.assertEqual(parsed.loc[parsed['Symbol'].eq('Debt_add'), 'Security'].tolist(), ['ICFL', 'IBHF29'])
+        old_wdm_day(DAY(2023, 6, 14)).to_parquet(self.raw / 'wdm_20230614.parquet', index=False)
+        self.merge('wdm')
+        self.save_download('wdm', DAY(2026, 10, 19), parsed)
+        self.merge('wdm')
+        self.assertEqual(sorted(p.name for p in self.processed.glob('*.parquet')),
+                         ['Debt_add.parquet', 'Debt_mat.parquet', 'Debt_trd_sett.parquet'])
+        for symbol, header, securities in (('Debt_add', WDM_ADDED, ['ABML', 'ICFL', 'IBHF29']),
+                                           ('Debt_mat', WDM_MATURED, ['PFC23', 'PGC26'])):
+            stored = pd.read_parquet(self.processed / f'{symbol}.parquet')
+            self.assertEqual(sorted(stored.columns), sorted(header + ['Date', 'Symbol']), symbol)
+            self.assertEqual(stored['Security'].tolist(), securities)
+        trades = pd.read_parquet(self.processed / 'Debt_trd_sett.parquet')
+        self.assertEqual(trades['Security'].tolist(), ['CG2031', 'CG2036'])
+        self.assertFalse([c for c in trades.columns if c.startswith(('Unnamed', 'Issues'))])
+
+    def test_unexpected_issue_list_is_left_as_it_is(self):
+        frame = old_wdm_day(DAY(2023, 6, 14))
+        frame.loc[frame['Symbol'].str.startswith('Debt_add'), 'Unnamed: 0'] = 'XX'
+        result = self.rules._normalise_wdm(frame)
+        self.assertIn('Issues added on 14 June 2023', result.columns)
+        self.assertEqual(result['Symbol'].value_counts().to_dict(),
+                         {'Debt_add': 3, 'Debt_mat': 1, 'Debt_trd_sett': 1})
+
+    def test_copies_of_a_day_are_stored_once(self):
+        for prefix, day_frame in (('cm', lambda d: cm_day(d, 400.0)), ('ma', market_activity_day)):
+            with self.subTest(prefix=prefix):
+                for path in list(self.raw.iterdir()) + list(self.processed.iterdir()):
+                    path.unlink()
+                day_frame(DAY(2024, 1, 2)).to_parquet(self.raw / f'{prefix}_20240102.parquet', index=False)
+                self.merge(prefix)
+                for name in (f'{prefix}_20240103.parquet', f'{prefix}_20240103 (1).parquet',
+                             f'{prefix}_20240103-DESKTOP-PC.parquet'):
+                    day_frame(DAY(2024, 1, 3)).to_parquet(self.raw / name, index=False)
+                output = self.merge(prefix)
+                result = pd.read_parquet(next(self.processed.glob('*.parquet')))
+                self.assertIn('2 raw files are extra copies of a day', output)
+                rows = len(day_frame(DAY(2024, 1, 2)))
+                self.assertEqual(result.groupby('Date').size().tolist(), [rows, rows])
+
+    def test_copy_rule_never_compares_different_days(self):
+        # A short-sale report lists trades dated a week earlier, so two reports can hold the
+        # same symbol and date. A copy of another day in the same merge must not drop either.
+        def short_sales(date, quantity):
+            return pd.DataFrame({'Security Name': ['YES BANK LIMITED'], 'Symbol': ['YESBANK'],
+                                 'Date': [date], 'Qty Short Sold': [quantity]})
+
+        short_sales(DAY(2016, 6, 7), 100).to_parquet(self.raw / 'ss_20160614.parquet', index=False)
+        short_sales(DAY(2016, 6, 7), 200).to_parquet(self.raw / 'ss_20160615.parquet', index=False)
+        for name in ('ss_20160616.parquet', 'ss_20160616 (1).parquet'):
+            short_sales(DAY(2016, 6, 9), 300).to_parquet(self.raw / name, index=False)
+        self.assertIn('1 raw files are extra copies of a day', self.merge('ss'))
+        result = pd.read_parquet(self.processed / 'YESBANK.parquet')
+        self.assertEqual(sorted(result['Qty Short Sold']), [100, 200, 300])
+
+
 class IndicesCleanerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -384,7 +718,8 @@ class RepairTests(unittest.TestCase):
     def test_fresh_install_has_nothing_to_repair(self):
         self.assertEqual(self.migrate(), '')
         self.assertEqual(json.loads(self.record.read_text()),
-                         ['rebuild-collapsed-rows', 'redownload-incomplete-indices'])
+                         ['rebuild-collapsed-rows', 'rebuild-report-layouts',
+                          'redownload-incomplete-indices'])
         self.assertEqual([path for path in self.root.rglob('*') if path.is_file()], [self.record])
 
     def test_collapsed_rows_are_rebuilt_from_raw(self):
@@ -437,12 +772,13 @@ class RepairTests(unittest.TestCase):
 
         with patch.object(Path, 'unlink', locked):
             self.assertIn('resumes on the next run', self.migrate())
-        self.assertEqual(json.loads(self.record.read_text()), ['redownload-incomplete-indices'])
+        self.assertEqual(json.loads(self.record.read_text()),
+                         ['rebuild-report-layouts', 'redownload-incomplete-indices'])
         self.assertTrue((raw / '.merged_cm.txt').exists())
         self.migrate()
         self.assertFalse((processed / 'PFC.parquet').exists())
         self.assertFalse((raw / '.merged_cm.txt').exists())
-        self.assertEqual(len(json.loads(self.record.read_text())), 2)
+        self.assertEqual(len(json.loads(self.record.read_text())), 3)
 
     def test_index_days_without_nifty_are_downloaded_again(self):
         raw, processed = self.module.INDICES_RAW, self.module.INDICES_PROCESSED
@@ -460,6 +796,32 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in raw.glob('*.parquet')), ['idx_20160601.parquet'])
         self.assertEqual((raw / '.merged_idx.txt').read_text().split(), ['idx_20160601.parquet'])
         self.assertEqual((processed / 'NIFTY500.parquet').read_bytes(), before)
+
+    def test_dated_layouts_are_rebuilt_from_raw(self):
+        # 'rebuild-normalised-reports' is the earlier id of this repair; stores that ran it rebuild again.
+        self.record.write_text(json.dumps(['rebuild-collapsed-rows', 'rebuild-normalised-reports',
+                                           'redownload-incomplete-indices']))
+        stores = {
+            'ma': (self.module.MARKETACTIVITY_RAW, self.module.MARKETACTIVITY_PROCESSED,
+                   dated_market_activity(DAY(2024, 1, 2)), 'MARKET.parquet'),
+            'ss': (self.module.SHORTSELLING_RAW, self.module.SHORTSELLING_PROCESSED,
+                   old_short_sales(DAY(2016, 6, 7)), 'UNKNOWN.parquet'),
+            'wdm': (self.module.WDM_RAW, self.module.WDM_PROCESSED,
+                    old_wdm_day(DAY(2023, 6, 14)), 'Debt_add20230614.parquet'),
+        }
+        for prefix, (raw, processed, frame, stored_name) in stores.items():
+            frame.to_parquet(raw / f'{prefix}_20240102.parquet', index=False)
+            (raw / f'.merged_{prefix}.txt').write_text(f'{prefix}_20240102.parquet')
+            frame.to_parquet(processed / stored_name, index=False)
+        self.assertEqual(self.migrate().count('One-time repair: rebuilding 1 processed files'), 3)
+        for prefix, (raw, processed, _, _) in stores.items():
+            self.merge(raw, prefix, processed)
+        self.assertEqual(pd.read_parquet(self.module.MARKETACTIVITY_PROCESSED / 'MARKET.parquet').columns.tolist(),
+                         ['Unnamed: 0', 'Details', 'Symbol', 'Date'])
+        self.assertEqual(sorted(p.name for p in self.module.SHORTSELLING_PROCESSED.glob('*.parquet')),
+                         ['KOTAKBANK.parquet', 'YESBANK.parquet'])
+        self.assertEqual(sorted(p.name for p in self.module.WDM_PROCESSED.glob('*.parquet')),
+                         ['Debt_add.parquet', 'Debt_mat.parquet', 'Debt_trd_sett.parquet'])
 
 
 class CleanupTests(unittest.TestCase):

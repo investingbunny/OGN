@@ -11,6 +11,7 @@ Data is stored in Parquet format for optimal space and performance.
 
 import os
 import io
+import re
 import json
 import argparse
 import sys
@@ -25,6 +26,8 @@ import requests.exceptions
 import urllib.parse
 import pandas as pd
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import japan_macro
 import nifty_macro
@@ -271,6 +274,32 @@ DATE_COLUMNS = ('Date', 'Expiry')
 # Activity summary lines, short-sale records, WDM trades): two rows there are
 # duplicates only when every column matches.
 KEYLESS_PREFIXES = ('ma', 'ss', 'wdm')
+
+# A raw day is saved as {prefix}_YYYYMMDD.parquet; text after the date marks
+# another copy of that day, such as a OneDrive sync conflict "cm_20240315 (1)".
+RAW_DAY_FILE = re.compile(r'^[a-z]+_(?P<day>\d{8})(?P<copy>.*)\.parquet$')
+
+# NSE heads the Market Activity report with its date (",19-Oct-2026"), which
+# named a column after every day; that column is stored as 'Details'.
+MARKET_ACTIVITY_DATE_HEADER = re.compile(r'^\d{1,2}-[A-Za-z]{3}-\d{4}$')
+
+# WDM issue lists open with a title line (",,,Issues added on 19 October 2026"),
+# which earlier versions read as the header. The real header, the same since
+# 2011, then sat in the first data row; the title took the 4th column's place.
+WDM_TITLE = re.compile(r'^\s*issues\s+(added|matured)\s+on\b', re.IGNORECASE)
+WDM_ISSUE_HEADERS = {
+    'added': ['ST', 'Security', 'Issue', 'Issue Description', 'Coupon', 'Issue Date',
+              'Maturity Date', 'Next IP Date', 'Coupon Freq', 'Rating', 'Listed'],
+    'matured': ['ST', 'Security', 'Issue', 'Issue Description', 'Coupon', 'Issue Date',
+                'Maturity Date', 'Rating', 'Listed'],
+}
+WDM_ISSUE_SYMBOLS = {'added': 'Debt_add', 'matured': 'Debt_mat'}
+
+# Cell text the merge's text conversion produces for a missing value.
+BLANK_TEXT = ('', 'nan', 'None', '<NA>', 'NaT')
+# Attempts to replace a processed file another program (OneDrive, a virus
+# scanner) briefly holds open.
+REPLACE_ATTEMPTS = 5
 
 
 class HTTP403Error(Exception):
@@ -1285,7 +1314,8 @@ class NSEMarketDataDownloader:
         """Downloads WDM Daily Report (ZIP containing multiple files) for a given date.
 
         The ZIP contains multiple CSV/DAT files.  Each sub-file is read,
-        cleaned, and tagged with Symbol = 'Debt_{filename_stem}'.  All
+        cleaned, and tagged with Symbol = 'Debt_{file name without dates}'
+        (Debt_trd_sett, Debt_add, Debt_mat).  All
         sub-files are concatenated into a single DataFrame so the normal
         merge pipeline can split them back into per-symbol processed files.
 
@@ -1316,7 +1346,8 @@ class NSEMarketDataDownloader:
 
     def _parse_wdm_zip(self, content: bytes, date: datetime.date) -> Optional[pd.DataFrame]:
         """Extracts all CSV/DAT files from a WDM Daily ZIP and returns them
-        as a single DataFrame with Symbol = 'Debt_{filename_stem}'.
+        as a single DataFrame with Symbol = 'Debt_{file name without dates}'
+        (Debt_add, Debt_mat, Debt_trd_sett), so each sub-file is one time series.
 
         Raises DownloadFailedError if the ZIP cannot be read.
         Returns None if the ZIP is empty or contains no data.
@@ -1346,15 +1377,18 @@ class NSEMarketDataDownloader:
                         if not raw_bytes.strip():
                             continue
 
-                        df = self._read_csv_with_encoding(raw_bytes)
-                        if df is None or df.empty:
+                        # Issue lists open with a title line; their header is the next line.
+                        first_line = raw_bytes.split(b'\n', 1)[0].decode('latin-1')
+                        titled = any(WDM_TITLE.match(field.strip().strip('"'))
+                                     for field in first_line.split(','))
+                        df = self._read_csv_with_encoding(raw_bytes, skiprows=1 if titled else 0)
+                        if df is None:
+                            continue
+                        df = df.dropna(how='all')
+                        if df.empty:
                             continue
 
-                        # Derive symbol name from filename: Debt_{stem}
-                        stem = Path(fname).stem
-                        # Sanitize: remove date digits from stem for a clean name
-                        symbol_name = f"Debt_{stem}"
-                        df = self._clean_wdm_subfile(df, date, symbol_name)
+                        df = self._clean_wdm_subfile(df, date, self._wdm_symbol(Path(fname).stem))
                         all_dfs.append(df)
                     except Exception as e:
                         print(f"  [WDM] Error parsing {fname} for {date}: {e}")
@@ -1548,6 +1582,7 @@ class NSEMarketDataDownloader:
             'DATE': 'Date', 'Date': 'Date', 'Trade Date': 'Date',
         }
         df = df.rename(columns=mapping)
+        df = self._normalise_short_selling(df)
         if 'Date' not in df.columns:
             df['Date'] = date
         else:
@@ -1600,6 +1635,7 @@ class NSEMarketDataDownloader:
             'SEGMENT': 'Symbol', 'Market Type': 'Symbol', 'MARKET_TYPE': 'Symbol',
         }
         df = df.rename(columns=mapping)
+        df = self._normalise_market_activity(df)
         if 'Symbol' not in df.columns:
             df['Symbol'] = 'MARKET'
         else:
@@ -1755,7 +1791,7 @@ class NSEMarketDataDownloader:
     def _clean_wdm_subfile(self, df: pd.DataFrame, date: datetime.date, symbol_name: str) -> pd.DataFrame:
         """Standardizes a single sub-file from a WDM Daily ZIP.
 
-        Sets Symbol = symbol_name (e.g. 'Debt_mktwatch') so the merge
+        Sets Symbol = symbol_name (e.g. 'Debt_trd_sett') so the merge
         pipeline writes each sub-file to its own processed parquet.
         Attempts to parse any Date column found; falls back to the
         download date if none exists.
@@ -1793,6 +1829,110 @@ class NSEMarketDataDownloader:
                     df[col] = df[col].astype(str)
 
         return df
+
+    # --- Layout fixes shared by the cleaners and the merge (for older raw days) ---
+
+    @staticmethod
+    def _is_blank(values: pd.Series) -> pd.Series:
+        """True where a cell is missing or holds the text the merge writes for a missing value."""
+        return values.isna() | values.astype(str).str.strip().isin(BLANK_TEXT)
+
+    @staticmethod
+    def _wdm_symbol(stem: str) -> str:
+        """Debt_{file name without its dates}: add20261019 -> Debt_add, trd1910_sett -> Debt_trd_sett."""
+        name = re.sub(r'_+', '_', re.sub(r'\d+', '', stem)).strip('_')
+        return f"Debt_{name or 'daily'}"
+
+    @classmethod
+    def _normalise_market_activity(cls, df: pd.DataFrame) -> pd.DataFrame:
+        """Stores the column NSE heads with the report date (e.g. '19-Oct-2026') as 'Details'."""
+        dated = [c for c in df.columns if MARKET_ACTIVITY_DATE_HEADER.match(str(c).strip())]
+        if not dated:
+            return df
+        sources = (['Details'] if 'Details' in df.columns else []) + dated
+        details = df[sources[0]]
+        for col in sources[1:]:
+            details = details.where(~cls._is_blank(details), df[col])
+        position = sum(1 for c in df.columns[:list(df.columns).index(sources[0])] if c not in sources)
+        df = df.drop(columns=sources)
+        df.insert(position, 'Details', details)
+        return df
+
+    @classmethod
+    def _normalise_short_selling(cls, df: pd.DataFrame) -> pd.DataFrame:
+        """Takes the symbol from 'Security Symbol', the header older reports used.
+
+        Earlier versions did not map it, so those days were stored under UNKNOWN.
+        """
+        if 'Security Symbol' not in df.columns:
+            return df
+        df = df.copy()
+        if 'Symbol' in df.columns:
+            unknown = cls._is_blank(df['Symbol']) | df['Symbol'].astype(str).str.strip().eq('UNKNOWN')
+            df['Symbol'] = df['Symbol'].where(~unknown, df['Security Symbol'])
+        else:
+            df['Symbol'] = df['Security Symbol']
+        df['Symbol'] = df['Symbol'].astype(str).str.strip()
+        return df.drop(columns=['Security Symbol'])
+
+    @classmethod
+    def _normalise_wdm(cls, df: pd.DataFrame) -> pd.DataFrame:
+        """Gives a WDM day saved by an earlier version the layout the parser now produces.
+
+        Symbols lose their dates (Debt_add20261019 -> Debt_add). The issue lists,
+        read with their title line as the header, get their real column names
+        back and lose the header row stored among the data. A list is left as it
+        is unless its stored header row confirms the known layout and no other
+        column holds data for it.
+        """
+        if 'Symbol' not in df.columns:
+            return df
+        df = df.copy()
+        df['Symbol'] = [cls._wdm_symbol(str(s)[len('Debt_'):]) if str(s).startswith('Debt_') else s
+                        for s in df['Symbol']]
+        numbered = set()
+        for col in df.columns:
+            match = re.fullmatch(r'Unnamed: (\d+)', str(col))
+            if match:
+                numbered.add(int(match.group(1)))
+        for title in [c for c in df.columns if WDM_TITLE.match(str(c))]:
+            kind = WDM_TITLE.match(str(title)).group(1).lower()
+            header = WDM_ISSUE_HEADERS[kind]
+            rows = df['Symbol'].eq(WDM_ISSUE_SYMBOLS[kind])
+            gaps = [p for p in range(len(header)) if p not in numbered]
+            if len(gaps) != 1 or not rows.any():
+                continue
+            columns = [title if p == gaps[0] else f'Unnamed: {p}' for p in range(len(header))]
+            part = df.loc[rows]
+            others = [c for c in part.columns if c not in columns + ['Date', 'Symbol']]
+            if others and not part[others].apply(cls._is_blank).all(axis=None):
+                continue
+            stored_header = (part[columns[0]].astype(str).str.strip().eq('ST')
+                             & part[columns[1]].astype(str).str.strip().eq('Security'))
+            if not stored_header.any():
+                continue
+            part = part.loc[~stored_header, columns + ['Date', 'Symbol']]
+            part = part.rename(columns=dict(zip(columns, header)))
+            part = part.loc[~part[header].apply(cls._is_blank).all(axis=1)]
+            df = pd.concat([df.loc[~rows], part], ignore_index=True)
+        return df
+
+    @classmethod
+    def _normalise_raw_frame(cls, df: pd.DataFrame, raw_prefix: str) -> pd.DataFrame:
+        """Gives a raw day saved by an earlier version the layout the cleaners now produce."""
+        if raw_prefix == 'ma':
+            return cls._normalise_market_activity(df)
+        if raw_prefix == 'ss':
+            return cls._normalise_short_selling(df)
+        if raw_prefix == 'wdm':
+            return cls._normalise_wdm(df)
+        return df
+
+    @classmethod
+    def _drop_blank_columns(cls, df: pd.DataFrame) -> pd.DataFrame:
+        """Drops columns a symbol never fills (a WDM day holds every sub-file's columns)."""
+        blank = [c for c in df.columns if c not in ('Date', 'Symbol') and cls._is_blank(df[c]).all()]
+        return df.drop(columns=blank) if blank else df
 
     def update_processed_data(self, df: pd.DataFrame, target_dir: Path, group_col: str = 'Symbol'):
         """Appends new data to per-symbol Parquet files.
@@ -1902,6 +2042,162 @@ class NSEMarketDataDownloader:
             df[col] = parsed.dt.date
         return df
 
+    @staticmethod
+    def _write_parquet_atomic(data, path: Path):
+        """Writes a DataFrame or Arrow table so `path` always holds a complete file.
+
+        The rows go to a temporary file beside `path`, which replaces it only after
+        the writer reports every row written. A crash, or a lock OneDrive or a virus
+        scanner holds on `path`, leaves the previous file untouched.
+        """
+        table = data if isinstance(data, pa.Table) else pa.Table.from_pandas(data, preserve_index=False)
+        temp = path.with_name(path.name + '.tmp')
+        try:
+            written = []
+            pq.write_table(table, temp, compression='zstd', metadata_collector=written)
+            if not written or written[0].num_rows != table.num_rows:
+                raise OSError(f"incomplete write of {path.name}")
+            for attempt in range(REPLACE_ATTEMPTS):
+                try:
+                    os.replace(temp, path)
+                    return
+                except PermissionError:
+                    if attempt == REPLACE_ATTEMPTS - 1:
+                        raise
+                    time.sleep(0.5 * (attempt + 1))
+        finally:
+            temp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _is_text_type(arrow_type) -> bool:
+        return pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type)
+
+    @classmethod
+    def _missing_cells(cls, n: int, arrow_type, object_text: bool) -> pa.ChunkedArray:
+        """What the pandas merge writes for a column a row does not have."""
+        cells = pa.nulls(n, arrow_type)
+        if object_text and cls._is_text_type(arrow_type):
+            # pandas 2 holds text as objects, and the merge's astype(str) turns NaN into 'nan'.
+            cells = pc.fill_null(cells, pa.scalar('nan', arrow_type))
+        return pa.chunked_array([cells], type=arrow_type)
+
+    @classmethod
+    def _append_tables(cls, stored: pa.Table, new_rows: pa.Table) -> Optional[pa.Table]:
+        """Stored rows followed by new rows, typed as the pandas merge would write them.
+
+        Mirrors pd.concat([stored, new]) and the merge's text conversion: a column
+        one side lacks is empty there (the text 'nan' under pandas 2), an integer
+        column new to the file becomes float, and integers join a float column.
+        Returns None when pandas would retype a stored column instead.
+        """
+        object_text = pd.Series(['x']).dtype == object
+        old_schema, new_schema = stored.schema, new_rows.schema
+        if (len(set(old_schema.names)) != len(old_schema.names)
+                or len(set(new_schema.names)) != len(new_schema.names)):
+            return None
+        for name in DATE_COLUMNS:
+            for schema in (old_schema, new_schema):
+                if name in schema.names and not pa.types.is_date32(schema.field(name).type):
+                    return None
+        fields, old_columns, new_columns = [], [stored[c] for c in old_schema.names], []
+        for field in old_schema:
+            if field.name in new_schema.names:
+                new_type = new_schema.field(field.name).type
+                same = new_type.equals(field.type) or (
+                    cls._is_text_type(new_type) and cls._is_text_type(field.type))
+                widened = pa.types.is_floating(field.type) and pa.types.is_integer(new_type)
+                if not (same or widened):
+                    return None
+                new_columns.append(new_rows[field.name].cast(field.type))
+            elif (cls._is_text_type(field.type) or pa.types.is_floating(field.type)
+                  or pa.types.is_date32(field.type)):
+                new_columns.append(cls._missing_cells(new_rows.num_rows, field.type, object_text))
+            else:
+                return None
+            fields.append(field.remove_metadata())
+        for name in [c for c in new_schema.names if c not in old_schema.names]:
+            new_type = new_schema.field(name).type
+            if pa.types.is_integer(new_type):
+                target = pa.float64()
+            elif (cls._is_text_type(new_type) or pa.types.is_floating(new_type)
+                  or pa.types.is_date32(new_type)):
+                target = new_type
+            else:
+                return None
+            fields.append(pa.field(name, target))
+            old_columns.append(cls._missing_cells(stored.num_rows, target, object_text))
+            new_columns.append(new_rows[name].cast(target))
+        schema = pa.schema(fields)
+        new_part = pa.Table.from_arrays(new_columns, schema=schema)
+        if schema.equals(old_schema.remove_metadata()):
+            metadata = old_schema.metadata
+        else:
+            # Columns or types changed: pandas metadata as to_parquet writes it.
+            metadata = pa.Table.from_pandas(new_part.slice(0, 1).to_pandas(), schema=schema,
+                                            preserve_index=False).schema.metadata
+        schema = schema.with_metadata(metadata)
+        return pa.concat_tables([pa.Table.from_arrays(old_columns, schema=schema),
+                                 pa.Table.from_arrays(new_columns, schema=schema)])
+
+    @classmethod
+    def _append_newer_rows(cls, file_path: Path, new_data: pd.DataFrame) -> bool:
+        """Appends rows dated after a stored file's history without loading it into pandas.
+
+        Writes what the pandas merge would write for such rows, but the stored
+        history stays Arrow data instead of being converted to Python objects,
+        re-checked and re-typed on every run. Returns False, with the file
+        untouched, when the pandas merge has to decide: dates overlapping the
+        stored history, or a stored column pandas would retype.
+        """
+        stored = pq.read_table(file_path)
+        if ('Date' not in stored.column_names or stored.num_rows == 0
+                or not pa.types.is_date32(stored.schema.field('Date').type)):
+            return False
+        new_first = new_data['Date'].min()
+        if not isinstance(new_first, datetime.date) or isinstance(new_first, datetime.datetime):
+            return False
+        stored_last = pc.max(stored['Date']).as_py()
+        if stored_last is None or not new_first > stored_last:
+            return False
+        try:
+            new_rows = pa.Table.from_pandas(new_data.sort_values('Date'), preserve_index=False)
+            combined = cls._append_tables(stored, new_rows)
+        except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError):
+            return False
+        if combined is None:
+            return False
+        cls._write_parquet_atomic(combined, file_path)
+        return True
+
+    @staticmethod
+    def _raw_day(name: str):
+        """(day, is_extra_copy) of a raw file name; any other name is a day of its own."""
+        match = RAW_DAY_FILE.match(name)
+        return (match.group('day'), bool(match.group('copy'))) if match else (name, False)
+
+    @staticmethod
+    def _one_copy_per_day(df: pd.DataFrame, file_day: np.ndarray, file_is_copy: np.ndarray) -> pd.DataFrame:
+        """Keeps one raw file's rows per raw day when several copies of a day merge together.
+
+        Copies of a day (sync conflicts) would otherwise be stored twice. Rows are
+        grouped by the day in their file's name, never by their Date column: a
+        short-sale report lists trades dated a week earlier, so two different
+        reports can share a Date and both must be kept. `file_day` and
+        `file_is_copy` map each file's position in the batch (`__raw_file`) to its
+        day and to whether its name marks a copy. The rows come from the original
+        file name when it has any, otherwise from the last copy. The legacy/UDiFF
+        rule runs first, so a UDiFF copy still replaces a legacy original.
+        """
+        if '__raw_file' not in df.columns:
+            return df
+        rank = df['__raw_file'].to_numpy()
+        day = file_day[rank]
+        sources = pd.Series(rank).groupby(day).transform('nunique').to_numpy()
+        preference = file_is_copy[rank] * len(file_day) - rank.astype(np.int64)
+        best = pd.Series(preference).groupby(day).transform('min').to_numpy()
+        keep = (sources <= 1) | (preference == best)
+        return df.loc[keep].drop(columns='__raw_file')
+
     def merge_raw_to_processed(self, raw_dir: Path, raw_prefix: str, target_dir: Path, label: str, group_col: str = 'Symbol'):
         """Merges raw day-parquet files from disk into per-symbol processed files.
 
@@ -1912,11 +2208,18 @@ class NSEMarketDataDownloader:
            progress is preserved if a crash occurs.
         2. Within each mega-batch, read raw files in parallel (READER_THREADS).
         3. Pre-consolidate per-symbol data and cast dtypes once (not per-write).
-        4. Smart dedup: if new dates don't overlap existing processed file,
-           skip drop_duplicates + sort (just append).
+        4. Fast append: rows dated after a symbol's stored history are appended
+           with pyarrow (_append_newer_rows), so the history is not converted
+           to pandas, re-checked and re-typed on every run. Overlapping dates
+           and type changes go through the pandas merge with dedup + sort.
         5. Write per-symbol files in parallel threads (I/O bound, releases GIL).
+           Every write goes to a temporary file that replaces the old file only
+           when complete, so an interrupted run never truncates a file.
         6. Per-mega-batch timeout (MERGE_TIMEOUT_S): if exceeded, the batch is
            skipped and an error is printed, but the script continues.
+        7. Raw days saved by earlier versions are read in the current layout
+           (_normalise_raw_frame), and several copies of one day (sync
+           conflicts) contribute one copy per symbol and day.
         """
         # --- Phase 0: Retry previously failed symbol writes ---
         retry_dir = raw_dir / ".retry"
@@ -1957,7 +2260,7 @@ class NSEMarketDataDownloader:
                                     combined[col] = conv
                                 else:
                                     combined[col] = combined[col].astype(str)
-                        combined.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
+                        self._write_parquet_atomic(combined, file_path)
                         rf.unlink()
                         retry_ok += 1
                     except Exception as e:
@@ -2000,17 +2303,30 @@ class NSEMarketDataDownloader:
         total_files = len(files_to_merge)
         t0 = time.time()
         print(f"  [{label}] Merging {total_files} raw files...", flush=True)
+        copies = [f.name for f in files_to_merge if self._raw_day(f.name)[1]]
+        if copies:
+            print(f"  [{label}] {len(copies)} raw files are extra copies of a day (e.g. sync "
+                  f"conflicts), such as '{copies[0]}'; one copy per symbol and day is merged.",
+                  flush=True)
 
         MERGE_MEGA_BATCH = 500    # Files per mega-batch (memory control)
         MERGE_TIMEOUT_S = 120     # Max seconds per mega-batch before giving up
         READ_CHUNK = 200          # Files per read chunk within a mega-batch
         READER_THREADS = 8        # Parallel readers within each chunk
         total_symbols_written = 0
+        total_appended = 0
 
         for mega_start in range(0, total_files, MERGE_MEGA_BATCH):
             mega_end = min(mega_start + MERGE_MEGA_BATCH, total_files)
             mega_files = files_to_merge[mega_start:mega_end]
             mega_t0 = time.time()
+            # Tag rows with their file only when this batch holds several copies of a day.
+            batch_days = [self._raw_day(f.name)[0] for f in mega_files]
+            tag_sources = len(set(batch_days)) < len(batch_days)
+            file_rank = {f.name: rank for rank, f in enumerate(mega_files)}
+            day_ids = {day: i for i, day in enumerate(dict.fromkeys(batch_days))}
+            file_day = np.array([day_ids[day] for day in batch_days])
+            file_is_copy = np.array([self._raw_day(f.name)[1] for f in mega_files])
 
             try:
                 # --- Phase 1: Read raw files in chunks with parallel I/O ---
@@ -2019,7 +2335,10 @@ class NSEMarketDataDownloader:
 
                 def _read_one(f: Path):
                     try:
-                        return pd.read_parquet(f, engine='pyarrow')
+                        frame = self._normalise_raw_frame(pd.read_parquet(f, engine='pyarrow'), raw_prefix)
+                        if tag_sources:
+                            frame['__raw_file'] = np.int16(file_rank[f.name])
+                        return frame
                     except Exception as e:
                         return e
 
@@ -2095,6 +2414,9 @@ class NSEMarketDataDownloader:
                     merged = self._restore_date_columns(merged)
                     # Two copies of one F&O day (e.g. a sync-conflict file) may differ in layout.
                     merged = self._drop_superseded_legacy_rows(merged)
+                    merged = self._one_copy_per_day(merged, file_day, file_is_copy)
+                    if raw_prefix == 'wdm':
+                        merged = self._drop_blank_columns(merged)
                     for col in merged.columns:
                         if merged[col].dtype == object and col not in DATE_COLUMNS:
                             # Try numeric first (handles mixed float/str columns)
@@ -2115,12 +2437,16 @@ class NSEMarketDataDownloader:
 
                 # --- Phase 2: Write each processed file ONCE, in parallel ---
                 write_errors = []
+                appended = []
 
                 def _merge_and_write(item):
                     name, new_data = item
                     file_path = target_dir / f"{name}.parquet"
                     merged = None
                     try:
+                        if file_path.exists() and self._append_newer_rows(file_path, new_data):
+                            appended.append(name)
+                            return
                         if file_path.exists():
                             existing = pd.read_parquet(file_path, engine='pyarrow')
                             existing = self._restore_date_columns(existing)
@@ -2147,7 +2473,7 @@ class NSEMarketDataDownloader:
                                     merged[col] = conv
                                 else:
                                     merged[col] = merged[col].astype(str)
-                        merged.to_parquet(file_path, engine='pyarrow', compression='zstd', index=False)
+                        self._write_parquet_atomic(merged, file_path)
                         del merged
                     except Exception as e:
                         write_errors.append(f"{name}: {e}")
@@ -2159,8 +2485,7 @@ class NSEMarketDataDownloader:
                             for c in save_df.columns:
                                 if save_df[c].dtype == object and c not in DATE_COLUMNS:
                                     save_df[c] = save_df[c].astype(str)
-                            save_df.to_parquet(retry_dir / f"{name}.parquet",
-                                               engine='pyarrow', compression='zstd', index=False)
+                            self._write_parquet_atomic(save_df, retry_dir / f"{name}.parquet")
                         except Exception:
                             pass  # best-effort retry save
 
@@ -2168,6 +2493,7 @@ class NSEMarketDataDownloader:
                     list(pool.map(_merge_and_write, symbol_new_data.items()))
 
                 total_symbols_written += num_symbols
+                total_appended += len(appended)
                 del symbol_new_data
 
                 if write_errors:
@@ -2183,7 +2509,7 @@ class NSEMarketDataDownloader:
 
                 batch_elapsed = time.time() - mega_t0
                 print(f"  [{label}] Batch {mega_start}-{mega_end} complete in {batch_elapsed:.1f}s "
-                      f"({num_symbols} symbols written).", flush=True)
+                      f"({num_symbols} symbols written, {len(appended)} by fast append).", flush=True)
 
             except TimeoutError:
                 # Already printed message above — just skip this batch
@@ -2206,7 +2532,7 @@ class NSEMarketDataDownloader:
 
         elapsed = time.time() - t0
         print(f"  [{label}] Merge complete: {total_files} files → {total_symbols_written} symbol-writes "
-              f"in {elapsed:.1f}s", flush=True)
+              f"({total_appended} by fast append) in {elapsed:.1f}s", flush=True)
 
     # --- Concurrent download helpers ---
     DOWNLOAD_DELAY = 0.3  # Delay between scheduling downloads (seconds)
@@ -2731,6 +3057,9 @@ class NSEMarketDataDownloader:
         repairs = [
             ('rebuild-collapsed-rows', self._rebuild_collapsed_categories),
             ('redownload-incomplete-indices', self._redownload_incomplete_indices),
+            # Replaces 'rebuild-normalised-reports', whose copy rule could drop short-sale
+            # rows when a sync-conflict copy was present; stores that ran it rebuild again.
+            ('rebuild-report-layouts', self._rebuild_normalised_reports),
         ]
         for name, repair in repairs:
             if name in applied:
@@ -2754,6 +3083,20 @@ class NSEMarketDataDownloader:
                 ("Equity", EQUITY_RAW, "cm", EQUITY_PROCESSED),
                 ("Price Band", PRICEBAND_RAW, "pb", PRICEBAND_PROCESSED),
                 ("Delivery Positions", DELIVERY_RAW, "del", DELIVERY_PROCESSED),
+                ("Market Activity", MARKETACTIVITY_RAW, "ma", MARKETACTIVITY_PROCESSED),
+                ("Short Selling", SHORTSELLING_RAW, "ss", SHORTSELLING_PROCESSED),
+                ("WDM Daily", WDM_RAW, "wdm", WDM_PROCESSED)]:
+            self._rebuild_from_raw(raw_dir, raw_prefix, processed_dir, label)
+
+    def _rebuild_normalised_reports(self):
+        """Rebuilds the categories whose stored layout the merge now corrects.
+
+        Market Activity gained a column per day (named after the date), WDM kept
+        dates in its symbol and column names, and older Short Selling days were
+        stored under UNKNOWN. Their raw files keep every row, and the merge now
+        reads them in the corrected layout.
+        """
+        for label, raw_dir, raw_prefix, processed_dir in [
                 ("Market Activity", MARKETACTIVITY_RAW, "ma", MARKETACTIVITY_PROCESSED),
                 ("Short Selling", SHORTSELLING_RAW, "ss", SHORTSELLING_PROCESSED),
                 ("WDM Daily", WDM_RAW, "wdm", WDM_PROCESSED)]:
@@ -2882,7 +3225,7 @@ class NSEMarketDataDownloader:
                                 df[_c] = _conv
                             else:
                                 df[_c] = df[_c].astype(str)
-                    df.to_parquet(raw_file, engine='pyarrow', compression='zstd', index=False)
+                    self._write_parquet_atomic(df, raw_file)
                     nodata_path.unlink(missing_ok=True)
                     recovered += 1
                     print(f"    Recovered {day}", flush=True)
@@ -3009,10 +3352,8 @@ class NSEMarketDataDownloader:
                                             df[_c] = _conv
                                         else:
                                             df[_c] = df[_c].astype(str)
-                                df.to_parquet(
-                                    raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet",
-                                    engine='pyarrow', compression='zstd', index=False
-                                )
+                                self._write_parquet_atomic(
+                                    df, raw_dir / f"{raw_prefix}_{day.strftime('%Y%m%d')}.parquet")
                             except (OSError, IOError) as e:
                                 print(f"  [{label}] Failed to save raw file for {day}: {e}")
                             batch_results[day] = ('ok', df)
