@@ -898,6 +898,11 @@ contains, in order:
 
 **1. The full technical analysis of the first symbol** \u2014 EMA/SMA crossovers, MACD, RSI &
 ADX, Fibonacci retracements, Bollinger Bands & OBV, Renko, and the technical audit table.
+The six indicator panels show the last calendar year (`TECHNICAL_WINDOW_YEARS = 1`) and
+place one bar per day that has a price, so weekends, holidays and dates with no price
+(such as option-only days) leave no gap and lines stay continuous. Ticks name the first
+trading day of each month. Indicators still warm up on the full history, and Renko keeps
+its own setting: bricks from the full history, last 100 shown.
 
 **2. The regression trendline page of the first symbol**, followed by its **volatility
 profile**: cone, per-window box plots, rolling
@@ -920,9 +925,10 @@ transformations, sample window and exclusions. The **three Japan macro pages**, 
 Schiller pages** and **two India Schiller pages** follow once per PDF. If comparison is
 unavailable, the other report pages remain and the
 reason is printed. This frequency handling applies to the comparison; the first symbol's
-technical and volatility pages still use their existing observation-based windows.
+technical page uses its 1-year window and the volatility page its existing observation-based
+windows.
 
-Regression checks: `python -m unittest test_option_overlay test_comparison test_japan_macro test_valuation_macro test_market_data -v`.
+Regression checks: `python -m unittest test_option_overlay test_comparison test_japan_macro test_valuation_macro test_market_data test_technical_chart -v`.
 
 ---
 

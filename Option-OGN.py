@@ -50,7 +50,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.dates import date2num, AutoDateLocator, ConciseDateFormatter
-from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import FixedLocator, FuncFormatter
 import mplfinance as mpf
 import pandas as pd
 import numpy as np
@@ -168,6 +168,10 @@ TREND_DISTANCE = 12           # Minimum bars between two pivots of the same kind
 TREND_PROMINENCE_PCT = 0.02   # Pivot must clear 2% of the window's high-low range
 TREND_RESISTANCE_COLOUR = '#ef5350'
 TREND_SUPPORT_COLOUR = '#26a69a'
+
+# ── Technical page ────────────────────────────────────────────────────────
+# Whole calendar years shown by the indicator panels; Renko keeps its last 100 bricks.
+TECHNICAL_WINDOW_YEARS = 1
 
 # Comment out any line to drop that panel from the volatility page.
 VOLATILITY_PANELS = [
@@ -683,17 +687,62 @@ def analyze_stock(data, ticker):
 # Main chart builder
 # ---------------------------------------------------------------------------
 
+def technical_window_bars(dates, years=TECHNICAL_WINDOW_YEARS):
+    """Count the bars dated within `years` calendar years of the latest bar."""
+    dates = pd.to_datetime(pd.Series(dates)).dropna()
+    if dates.empty:
+        return 0
+    start = dates.max() - pd.DateOffset(years=years)
+    return int((dates >= start).sum())
+
+
+def _plot_available(ax, x, values, **kwargs):
+    """Plot only the bars that have a value, so a missing day does not break the line."""
+    values = np.asarray(values, dtype=float)
+    present = np.isfinite(values)
+    return ax.plot(x[present], values[present], **kwargs)
+
+
+def _label_trading_days(ax, dates, max_ticks=13):
+    """Date-label an x-axis whose bars sit at consecutive positions 0..N-1.
+
+    Days without data (weekends, holidays) have no position, so they leave no
+    gap. Ticks mark the first bar of each month, or evenly spaced bars when
+    the window covers only a few months.
+    """
+    dates = pd.DatetimeIndex(dates)
+    count = len(dates)
+    if count == 0:
+        return
+    months = dates.to_period('M')
+    ticks = np.flatnonzero(months[1:] != months[:-1]) + 1
+    if len(ticks) < 4:
+        ticks = np.unique(np.linspace(0, count - 1, min(count, 6)).round().astype(int))
+    else:
+        ticks = ticks[::math.ceil(len(ticks) / max_ticks)]
+
+    def label(value, _pos):
+        position = int(round(value))
+        return dates[position].strftime('%d-%b-%y') if 0 <= position < count else ''
+
+    ax.xaxis.set_major_locator(FixedLocator(ticks))
+    ax.xaxis.set_major_formatter(FuncFormatter(label))
+    ax.set_xlim(-1, count)
+
+
 def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     """Generate the multi-panel technical analysis chart.
 
     Args:
         DF:        DataFrame with indicators already computed
-        n:         Number of trailing bars to display
+        n:         Number of trailing price bars shown by the indicator panels
+                   (Renko keeps its own last 100 bricks)
         ticker:    Symbol name
         Dividend:  Expected dividend (for futures fair-value calc)
         pdf_pages: Optional PdfPages object — if set, saves to PDF instead of plt.show()
     """
     data = DF.copy()
+    data = data[data['Close'].notna()]  # rows without a price are skipped
 
     # Compute Renko bricks (plotted later on the main figure)
     renkodata = pd.DataFrame()
@@ -707,17 +756,10 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     n = min(n, len(data))
     data = data.iloc[-n:]
 
-    # ── Try loading options / futures for overlay ──────────────────────
-    Mpdf = None
+    # ── Try loading futures for overlay ───────────────────────────────
+    # Max Pain is not merged in: no panel shows it, and its option-only
+    # dates would add rows without a price.
     Futdf = None
-
-    try:
-        opts_start = data.iloc[0].Date
-        Mpdf = GetMaxPain(ticker, opts_start)
-        if not Mpdf.empty:
-            data = pd.merge(data, Mpdf, on='Date', how='outer')
-    except Exception:
-        pass
 
     try:
         ReadFuturesdf = load_full_futures(ticker)
@@ -748,6 +790,9 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     data.index = pd.to_datetime(data["Date"])
     data.drop("Date", axis=1, inplace=True)
 
+    # Bars sit at consecutive positions, so days without data take no space
+    x = np.arange(len(data))
+
     # ── Build OHLC list for candlestick (date as matplotlib number) ───
     ohlc = []
     for dt, row in data.iterrows():
@@ -776,12 +821,10 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     ax_table = fig2.add_axes((0.74, 0.06, 0.21, 0.42))
     ax_table.axis('off')
 
-    ax_macd.xaxis_date()  # Format x-axis as dates
-
     for col in ["5DMA-E", "9DMA-E", "13DMA-E", "21DMA-E", "48DMA-E"]:
         if col in data.columns:
-            ax_ema.plot(data.index, data[col], label=col)
-    ax_ema.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
+            _plot_available(ax_ema, x, data[col], label=col)
+    _plot_available(ax_ema, x, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
     ax_ema.legend(fontsize=20)
     ax_ema.grid(True)
     ax_ema.tick_params(labelsize=20)
@@ -790,17 +833,17 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     # ── SMA panel ─────────────────────────────────────────────────────
     for col in ["20DMA", "50DMA", "200DMA"]:
         if col in data.columns:
-            ax_sma.plot(data.index, data[col], label=col)
-    ax_sma.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
+            _plot_available(ax_sma, x, data[col], label=col)
+    _plot_available(ax_sma, x, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
     ax_sma.legend(fontsize=20)
     ax_sma.grid(True)
     ax_sma.tick_params(labelsize=20)
     ax_sma.set_title('SMA Crossover', fontsize=30, fontweight='bold', pad=8)
 
     # ── MACD panel ────────────────────────────────────────────────────
-    ax_macd.plot(data.index, data["MACD"], label="MACD")
-    ax_macd.bar(data.index, (data["MACD"] - data["Signal"]) * 3, label="hist")
-    ax_macd.plot(data.index, data["Signal"], label="Signal")
+    _plot_available(ax_macd, x, data["MACD"], label="MACD")
+    ax_macd.bar(x, (data["MACD"] - data["Signal"]) * 3, label="hist")
+    _plot_available(ax_macd, x, data["Signal"], label="Signal")
     ax_macd.legend(fontsize=20)
     ax_macd.grid(True)
     ax_macd.tick_params(labelsize=20)
@@ -811,23 +854,23 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     ax_rsi.axhline(70, color='grey', linestyle='--', label="overbought")
     ax_rsi.axhline(30, color='grey', linestyle='--', label="oversold")
     ax_rsi.axhline(50, color='grey', linestyle=':')
-    ax_rsi.plot(data.index, data["RSI"], label="RSI", color='lightpink')
+    _plot_available(ax_rsi, x, data["RSI"], label="RSI", color='lightpink')
     if 'ADX' in data.columns:
-        ax_rsi.plot(data.index, data["ADX"], label="ADX", color='blue')
+        _plot_available(ax_rsi, x, data["ADX"], label="ADX", color='blue')
     if 'DIplusN' in data.columns:
-        ax_rsi.plot(data.index, data["DIplusN"], label="DI+", color='green')
+        _plot_available(ax_rsi, x, data["DIplusN"], label="DI+", color='green')
     if 'DIminusN' in data.columns:
-        ax_rsi.plot(data.index, data["DIminusN"], label="DI-", color='red')
+        _plot_available(ax_rsi, x, data["DIminusN"], label="DI-", color='red')
     ax_rsi.legend(fontsize=20)
     ax_rsi.grid(True)
     ax_rsi.tick_params(labelsize=20)
     ax_rsi.set_title('RSI & ADX', fontsize=30, fontweight='bold', pad=8)
 
     # ── Bollinger Bands + OBV panel ───────────────────────────────────
-    ax_bba.plot(data.index, data["BB_up"], label="BB_up")
-    ax_bba.plot(data.index, data["BB_dn"], label="BB_dn")
-    ax_bba.plot(data.index, data["MA"], label="MA")
-    ax_bba.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
+    _plot_available(ax_bba, x, data["BB_up"], label="BB_up")
+    _plot_available(ax_bba, x, data["BB_dn"], label="BB_dn")
+    _plot_available(ax_bba, x, data["MA"], label="MA")
+    _plot_available(ax_bba, x, data['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
     ax_bba.legend(fontsize=20)
     ax_bba.grid(True)
     ax_bba.tick_params(labelsize=20)
@@ -835,7 +878,7 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
 
     if 'OBV' in data.columns:
         ax_obv = ax_bba.twinx()
-        ax_obv.plot(data.index, data["OBV"] / 100000, marker="*", label="OBV")
+        _plot_available(ax_obv, x, data["OBV"] / 100000, marker="*", label="OBV")
         ax_obv.set_ylabel('OBV')
         ax_obv.tick_params(labelsize=20)
         ax_obv.grid(visible=False)
@@ -864,7 +907,10 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
 
     # Candlestick overlay on Fibonacci panel using mplfinance-compatible OHLC
     # (Using simple line plot since mplfinance add_plot requires different setup)
-    ax_fibret.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
+    _plot_available(ax_fibret, x, data['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
+
+    # Shared by every indicator panel above (Renko has its own axis)
+    _label_trading_days(ax_macd, data.index)
 
     # ── Renko chart (bottom-left of right column) ─────────────────────
     if not renkodata.empty:
@@ -1290,7 +1336,7 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
 
         # ── Plot ──────────────────────────────────────────────────────
         if 'technical' in REPORT_SECTIONS:
-            display_bars = min(25, len(Indicatordf))
+            display_bars = technical_window_bars(Indicatordf['Date'])
             plot_chart(Indicatordf, display_bars, Scrip, 0, pdf_pages=pdf_pages)
 
         # ── Support / resistance trendlines ───────────────────────────
