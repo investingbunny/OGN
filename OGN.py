@@ -404,7 +404,10 @@ def load_delivery(symbol: str, start: str = None,
 
 def load_wdm(symbol: str, start: str = None,
              end: str = None) -> pd.DataFrame:
-    """Load WDM daily report data (symbol = Debt_{subfile_stem})."""
+    """Load WDM daily report data.
+
+    Symbols: Debt_trd_sett (trades), Debt_add (issues added), Debt_mat (issues matured).
+    """
     df = _load_parquet(WDM_PROCESSED, symbol)
     return _filter_dates(df, start, end)
 

@@ -1314,7 +1314,8 @@ class NSEMarketDataDownloader:
         """Downloads WDM Daily Report (ZIP containing multiple files) for a given date.
 
         The ZIP contains multiple CSV/DAT files.  Each sub-file is read,
-        cleaned, and tagged with Symbol = 'Debt_{filename_stem}'.  All
+        cleaned, and tagged with Symbol = 'Debt_{file name without dates}'
+        (Debt_trd_sett, Debt_add, Debt_mat).  All
         sub-files are concatenated into a single DataFrame so the normal
         merge pipeline can split them back into per-symbol processed files.
 
@@ -1790,7 +1791,7 @@ class NSEMarketDataDownloader:
     def _clean_wdm_subfile(self, df: pd.DataFrame, date: datetime.date, symbol_name: str) -> pd.DataFrame:
         """Standardizes a single sub-file from a WDM Daily ZIP.
 
-        Sets Symbol = symbol_name (e.g. 'Debt_mktwatch') so the merge
+        Sets Symbol = symbol_name (e.g. 'Debt_trd_sett') so the merge
         pipeline writes each sub-file to its own processed parquet.
         Attempts to parse any Date column found; falls back to the
         download date if none exists.
