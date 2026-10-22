@@ -14,8 +14,8 @@ End-to-end pipeline for downloading, storing, and analysing NSE (National Stock 
 | [schiller_macro.py](schiller_macro.py) | US-only Schiller valuations: Robert Shiller's CAPE/real-price/earnings workbook and Multpl valuation histories. |
 | [nifty_macro.py](nifty_macro.py) | Separate India Schiller group: NIFTY valuations, calculated Indian-only CAPE, and explicitly unverified IIM/RBI/index-price-sales sources. |
 | [option_overlay.py](option_overlay.py) | Volume-ranked CE/PE implied-volatility overlays, matched-futures Black-76 IV estimates, and robust same-expiry smile diagnostics. |
-| [date_axis.py](date_axis.py) | Shared chart x-axis: daily data is drawn without gaps for weekends and holidays, with date ticks and labels; slower series keep calendar spacing. |
 | **models.py** + `GarmanKlass.py`, `HodgesTompkins.py`, `Kurtosis.py`, `Parkinson.py`, `Raw.py`, `RogersSatchell.py`, `Skew.py`, `YangZhang.py` | Volatility estimators. One module per model, each exposing `get_estimator(price_data, window, clean)`. |
+| [date_axis.py](date_axis.py) | Shared chart x-axis: daily data is drawn without gaps for weekends and holidays, with date ticks and labels; slower series keep calendar spacing. |
 
 ---
 
