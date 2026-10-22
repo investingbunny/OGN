@@ -10,7 +10,7 @@ End-to-end pipeline for downloading, storing, and analysing NSE (National Stock 
 |---|---|
 | **OGN v2.0-download.py** | Downloads daily market data from NSE across 11 categories (Equity, Derivatives, Indices, Short Selling, Volatility, Market Activity, Price Band, PE Ratio, Corporate Bonds, Delivery Positions, WDM Daily), plus a 12th **Macro** category sourced from FRED and Yahoo Finance. Handles incremental updates, raw→processed merge, deduplication, and error recovery. |
 | **OGN.py** | Data loader module — provides Python functions to read processed Parquet data. Use `from OGN import load_equity, load_futures, load_options, load_index, load_macro` etc. in your own scripts or notebooks. |
-| **Option-OGN.py** | Technical analysis & charting — generates multi-panel charts (MACD, RSI, ADX, Bollinger Bands, Fibonacci, Max Pain, Futures Fair Value, Renko), a volatility-cone page from the standalone estimator models, and an optional statistical comparison against a second symbol. Supports interactive display and PDF export. |
+| **Option-OGN.py** | Technical analysis & charting — generates multi-panel charts (MACD, RSI, ADX, Bollinger Bands, Fibonacci, Max Pain, Futures Fair Value, Renko) with a Buy/Sell/Hold technical audit, a volatility-cone page from the standalone estimator models plus a page explaining it, monthly and weekly option IV pages, and an optional statistical comparison against a second symbol. Supports interactive display and timestamped PDF export. |
 | [schiller_macro.py](schiller_macro.py) | US-only Schiller valuations: Robert Shiller's CAPE/real-price/earnings workbook and Multpl valuation histories. |
 | [nifty_macro.py](nifty_macro.py) | Separate India Schiller group: NIFTY valuations, calculated Indian-only CAPE, and explicitly unverified IIM/RBI/index-price-sales sources. |
 | [option_overlay.py](option_overlay.py) | Volume-ranked CE/PE implied-volatility overlays, matched-futures Black-76 IV estimates, and robust same-expiry smile diagnostics. |
@@ -88,24 +88,30 @@ python Option-OGN.py WTI US02Y__US10Y 250
 # Choose the volatility estimator (default YangZhang)
 python Option-OGN.py --estimator Raw WTI
 
-# Export to PDF — all FnO symbols
+# Export to PDF — all FnO symbols → charts/FnO_Analysis_<stamp>.pdf
 python Option-OGN.py --pdf
 
-# Export to PDF — single symbol → charts/WTI_Analysis.pdf
+# Export to PDF — single symbol → charts/WTI_Analysis_<stamp>.pdf
 python Option-OGN.py --pdf WTI
 
-# Export to PDF — pair → charts/WTI_vs_US02Y__US10Y_Analysis.pdf
+# Export to PDF — pair → charts/WTI_vs_US02Y__US10Y_Analysis_<stamp>.pdf
 python Option-OGN.py --pdf WTI US02Y__US10Y
 
-# Export to PDF — custom output file
+# Export to PDF — custom output file → output_<stamp>.pdf
 python Option-OGN.py --pdf output.pdf
 ```
 
+Every generated PDF name ends with the run time, `<stamp>` = `YYYYMMDD_HHMMSS`
+(for example `NIFTY_Analysis_20261022_185149.pdf`), so a rerun never overwrites an
+earlier report; two runs in the same second get a `_2` suffix.
+
 The report is assembled in this order:
 
-1. **Technical analysis** of the first symbol
-2. **Volatility profile** of the first symbol
-3. **Statistical comparison** — only when a second symbol is given
+1. **Technical analysis** of the first symbol, with the Buy/Sell/Hold technical audit
+2. **Regression trendlines** of the first symbol
+3. **Volatility profile** of the first symbol, then a page explaining each of its graphs
+4. **Option IV pages**, one per expiry, when derivatives are stored
+5. **Statistical comparison** — only when a second symbol is given
 
 See [Volatility Analysis](#volatility-analysis) and [Statistical Comparison](#statistical-comparison)
 below.
@@ -557,6 +563,12 @@ Volatility estimators are annualised (252 trading periods) and shown as percenta
 The cone is the classic read: if the realized line sits above the upper percentile band,
 short-dated volatility is rich relative to its own history.
 
+With `volatility_guide` in `REPORT_SECTIONS`, the page after the volatility profile
+explains each graph drawn on it in one short block (what it shows, how to read it, and
+the report's own numbers as the example, such as today's percentile rank by window or the
+peak of the rolling series). A final block ties them together; it is left out for the
+`Skew`/`Kurtosis` moment estimators, whose wording avoids option-pricing terms.
+
 ### Tuning
 
 At the top of [Option-OGN.py](Option-OGN.py):
@@ -578,10 +590,22 @@ date**. This applies to the first analysed symbol, not the comparison symbol.
 - **Dot height:** annualized IV, not strike or premium. Each dot is labeled with its
   strike and expiry, for example `(24500, 22 Sep)`, with leader lines where needed.
 - **Cone overlay:** observations from the latest underlying date only, located at
-  the remaining weekday tenor. Matching realized-estimator windows are added when
-  enough history exists. Older option observations are never shown as current.
+  the remaining weekday tenor, for monthly expiries (weekly ones have their own pages).
+  Matching realized-estimator windows are added when enough history exists. Older option
+  observations are never shown as current.
 - **Date-series pages:** separate CE/PE panels for each expiry, following the volatility
-  page. Up to five trading dates fit on each page; longer windows are paginated.
+  explanation page. Up to five trading dates fit on each page; longer windows are
+  paginated. Pages cover the **next three monthly expiries** (the last listed expiry of
+  each calendar month) and, when the underlying also lists weekly contracts (such as
+  NIFTY), the **next five expiries of any kind**. An expiry in both sets gets one page;
+  for example, with Tuesday weeklies NIFTY as of 21 Oct 2026 would show 27 Oct, 3, 10, 17
+  and 23 Nov, and 29 Dec. Titles say *Monthly expiry* or *Weekly expiry*; expiries on or
+  before the latest date are left out.
+  `OPTION_MONTHLY_EXPIRIES` and `OPTION_SERIES_EXPIRIES` in
+  [option_overlay.py](option_overlay.py) set the two counts.
+- **How-to-use lines:** under the CE chart, the PE chart and the table, one line says how
+  to read it and quotes the latest date (median IV against the realized mean, PE versus CE
+  IV, and how many top-volume contracts price above realized).
 - **Latest-contract table:** traded contracts, IV, reported/estimated source, realized
   mean, IV-minus-mean in percentage points, smile MAD score, and selection reason.
 - **Black outlines:** qualifying smile outliers, including any already among the
@@ -632,13 +656,22 @@ discounted intrinsic/upper bounds, ambiguous futures matches, and solver failure
 skipped. An invalid settlement quote is not silently replaced after failing price bounds.
 Reported IV can still be used without a matching future or IV solver.
 
+Weekly and long-dated options have **no future with the same expiry**. For a date and
+expiry with no listed future, the forward comes from **put-call parity** on that same
+expiry: `F = K + e^(rT) (C - P)` at the three strikes where the traded call and put
+prices are closest (nearest the money), taking their median. Settlement and close prices
+give separate forwards, so bases still do not mix. A parity forward more than 10% from
+the stored underlying price is rejected. These IVs are labelled *Black-76 parity
+estimate*. A different expiry's future is never substituted, and a date/expiry whose
+futures quotes are ambiguous is still skipped rather than switched to parity.
+
 Black-76 uses ACT/365 calendar time to expiry and the explicit fixed rate above.
 Realized volatility uses 252 observations/year and a matching **weekday** lookback;
 the tenor count omits weekends, not exchange-specific holidays. Daily prices do not
 guarantee synchronous quotes, and no historical yield curve, bid/ask spread, or intraday
 expiry time is inferred. These model estimates assume European-style options and are
-diagnostic, not executable prices. In particular, a weekly expiry without a matching
-future **and** without reported IV is unavailable; a different expiry is not substituted.
+diagnostic, not executable prices. An expiry without a matching future, without a
+call/put pair for the parity forward **and** without reported IV is unavailable.
 
 ### Historical Mean and Outliers
 
@@ -688,6 +721,7 @@ REPORT_SECTIONS = [
     'technical',    # multi-panel indicator chart for the first symbol
   'trendlines',   # price with regression support/resistance
     'volatility',   # volatility cone / rolling / histogram page
+    'volatility_guide',  # one page explaining each volatility graph with this report's numbers
     'option_overlay',  # IV dots and per-expiry pages when derivatives exist
     'comparison',   # statistical comparison, only when a second symbol is given
   'japan_macro',  # Japan appendix once per PDF
@@ -741,7 +775,7 @@ python Option-OGN.py --pdf WTI JPXBYEN      # daily WTI vs quarterly BIS yen len
 The double underscore keeps ratios unambiguous against stored names that contain a single
 underscore — `GLD_SLV` loads the stored Parquet file, while `GLD__SLV` computes the ratio
 fresh from `GLD` and `SLV`. It is also filename-safe, so it survives in the generated PDF
-name (`charts/WTI_vs_US02Y__US10Y_Analysis.pdf`).
+name (`charts/WTI_vs_US02Y__US10Y_Analysis_<stamp>.pdf`).
 
 A ratio is built in memory after its two legs are aligned to their slower native cadence
 with the default aggregation rules below. Division happens after aggregation, zero
@@ -758,7 +792,7 @@ comparison. It is never written to disk. Exactly one `__` is allowed per argumen
 
 ```bash
 python Option-OGN.py GLD SLV 250            # last 250 common trading observations
-python Option-OGN.py --pdf GLD SLV 250      # charts/GLD_vs_SLV_250obs_Analysis.pdf
+python Option-OGN.py --pdf GLD SLV 250      # charts/GLD_vs_SLV_250obs_Analysis_<stamp>.pdf
 python Option-OGN.py --pdf WTI JP10Y 120    # last 120 monthly observations
 python Option-OGN.py --pdf WTI JP10Y --periods 120  # equivalent named option
 python Option-OGN.py GLD SLV                # omitted → full common horizon
@@ -904,11 +938,27 @@ place one bar per day that has a price, so weekends, holidays and dates with no 
 trading day of each month. Indicators still warm up on the full history, and Renko keeps
 its own setting: bricks from the full history, last 100 shown.
 
+Each audit row's **Status** is **Buy** (green), **Sell** (red) or **Hold** (amber), and the
+Verdict column describes that state (for example *Bearish market regime*). The averages are
+the same full-history lines drawn on the page.
+
+| Row | Buy | Sell | Hold |
+|---|---|---|---|
+| 50/200 SMA, 9/21 EMA, 13/48 EMA, 5E/20S, MACD vs Signal, Close vs BB mid | first line above the second | first line below the second | lines within `AUDIT_HOLD_ATR` (0.1) x ATR(20) of each other |
+| RSI 14 | above 60 | below 40 | 40 to 60 |
+| Fib 61.8% (last 60 bars) | close above the 61.8% level | close below the 38.2% level | between them |
+| Volume vs 1.2x avg | surge on an up close | surge on a down close | no surge |
+
+Missing inputs (for example under 200 bars for the 200 SMA) read Hold with *Not enough history*.
+The volume row is left out when the latest bar has no volume. Each row is one indicator's
+reading, not a combined trade signal.
+
 **2. The regression trendline page of the first symbol**, followed by its **volatility
 profile**: cone, per-window box plots, rolling
-estimator with quantile bands, distribution histogram, and a summary table. Eligible
-option IV is overlaid on the cone, with per-expiry CE/PE date-series pages immediately
-afterwards when `option_overlay` is enabled.
+estimator with quantile bands, distribution histogram, and a summary table. The next page
+explains each of those graphs with the report's own numbers. Eligible option IV is overlaid
+on the cone, with per-expiry CE/PE date-series pages after the explanation page when
+`option_overlay` is enabled.
 
 **3. The comparison page**, containing:
 
@@ -928,7 +978,7 @@ reason is printed. This frequency handling applies to the comparison; the first 
 technical page uses its 1-year window and the volatility page its existing observation-based
 windows.
 
-Regression checks: `python -m unittest test_option_overlay test_comparison test_japan_macro test_valuation_macro test_market_data test_technical_chart -v`.
+Regression checks: `python -m unittest test_option_overlay test_comparison test_japan_macro test_valuation_macro test_market_data test_technical_chart test_report_pages -v`.
 
 ---
 

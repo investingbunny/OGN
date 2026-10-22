@@ -26,15 +26,65 @@ OPTION_DATES_PER_PAGE = 5
 OPTION_RATE = 0.065
 OPTION_MIN_RV_OBSERVATIONS = 30
 OPTION_COLOURS = {'CE': '#15803d', 'PE': '#dc2626'}
+OPTION_MONTHLY_EXPIRIES = 3     # Upcoming monthly expiries, one page each
+OPTION_SERIES_EXPIRIES = 5      # Upcoming expiries of any kind, when weekly contracts are listed
+OPTION_PARITY_STRIKES = 3       # Call/put pairs nearest the money behind a parity forward
+OPTION_PARITY_MAX_GAP = 0.10    # Parity forwards this far from the underlying price are rejected
+
+
+def classify_expiries(expiries):
+    """Label each listed expiry Monthly (last one in its calendar month) or Weekly."""
+    listed = pd.DatetimeIndex(pd.to_datetime(pd.Series(expiries), errors='coerce').dropna())
+    listed = listed.normalize().unique().sort_values()
+    if listed.empty:
+        return pd.Series(dtype=object)
+    last = pd.Series(listed, index=listed).groupby(listed.to_period('M')).transform('max')
+    return pd.Series(np.where(listed == pd.DatetimeIndex(last), 'Monthly', 'Weekly'), index=listed)
+
+
+def parity_forwards(options, rate=OPTION_RATE, strikes=OPTION_PARITY_STRIKES):
+    """Forward implied by put-call parity, F = K + exp(rT) (C - P), per date and expiry.
+
+    Uses the strikes where the call and put prices are closest (nearest the money)
+    and takes the median of their forwards. Settlement and close prices give
+    separate forwards so price bases never mix. A forward more than
+    OPTION_PARITY_MAX_GAP from the underlying price, when that is known, is dropped.
+    """
+    rows = []
+    for (date, expiry), group in options.groupby(['Date', 'Expiry'], sort=False):
+        growth = math.exp(rate * (expiry - date).days / 365.0)
+        spot = pd.to_numeric(group.get('Underlying Price', pd.Series(dtype=float)), errors='coerce').dropna().median()
+        row = {'Date': date, 'Expiry': expiry}
+        for price, name in [('Settle Price', 'Parity settlement'), ('Close', 'Parity close')]:
+            sides = {side: group[group['Option type'].eq(side)].set_index('Strike Price')[price]
+                     for side in ('CE', 'PE')}
+            pairs = pd.concat(sides, axis=1, join='inner')
+            pairs = pairs[(pairs > 0).all(axis=1)]
+            forward = np.nan
+            if not pairs.empty:
+                nearest = (pairs['CE'] - pairs['PE']).abs().nsmallest(strikes).index
+                implied = (nearest.to_numpy(dtype=float)
+                           + growth * (pairs.loc[nearest, 'CE'] - pairs.loc[nearest, 'PE']).to_numpy(dtype=float))
+                forward = float(np.median(implied))
+            if not (np.isfinite(forward) and forward > 0) or (
+                    np.isfinite(spot) and spot > 0 and abs(forward / spot - 1) > OPTION_PARITY_MAX_GAP):
+                forward = np.nan
+            row[name] = forward
+        rows.append(row)
+    return pd.DataFrame(rows, columns=['Date', 'Expiry', 'Parity settlement', 'Parity close'])
 
 
 def prepare_option_iv(derivatives, ticker, observation_dates, rate=OPTION_RATE,
                        reported_iv_unit='percent', min_contracts=OPTION_MIN_CONTRACTS):
-    """Read reported IV or infer Black-76 IV from exactly matched futures prices.
+    """Read reported IV or infer Black-76 IV from a same-expiry forward.
 
-    Prices prefer settlement for both legs, then close for both legs. Tenor is
-    actual calendar days / 365 for pricing; expiry day itself is excluded because
-    daily data cannot identify its remaining intraday option lifetime.
+    The forward is the exactly matched futures price; when no future with that
+    date and expiry is listed (weekly and long-dated options), it is the
+    put-call-parity forward of the same expiry's calls and puts. A different
+    expiry is never substituted. Prices prefer settlement for both legs, then
+    close for both legs. Tenor is actual calendar days / 365 for pricing; expiry
+    day itself is excluded because daily data cannot identify its remaining
+    intraday option lifetime. Each row is labelled Monthly or Weekly expiry.
     """
     if reported_iv_unit not in ('percent', 'decimal'):
         raise ValueError('Reported IV unit must be percent or decimal')
@@ -63,6 +113,7 @@ def prepare_option_iv(derivatives, ticker, observation_dates, rate=OPTION_RATE,
     futures = frame[future_mask & ~frame['Option type'].isin(['CE', 'PE'])].copy()
     if 'Instrument' in futures:
         futures = futures.drop_duplicates(['Date', 'Expiry', 'Instrument'], keep='last')
+    listed_futures = set(zip(futures['Date'], futures['Expiry']))
     ambiguous = futures.duplicated(['Date', 'Expiry'], keep=False)
     futures = futures[~ambiguous][['Date', 'Expiry', 'Settle Price', 'Close']].rename(
         columns={'Settle Price': 'Forward settlement', 'Close': 'Forward close'})
@@ -72,6 +123,18 @@ def prepare_option_iv(derivatives, ticker, observation_dates, rate=OPTION_RATE,
     options = options[eligible].drop_duplicates(
         ['Date', 'Expiry', 'Option type', 'Strike Price'], keep='last')
     options = options.merge(futures, on=['Date', 'Expiry'], how='left', validate='many_to_one')
+    # No future listed for this date and expiry: use the same expiry's parity forward.
+    no_future = np.array([key not in listed_futures for key in zip(options['Date'], options['Expiry'])],
+                         dtype=bool)
+    options['Forward source'] = np.where(no_future, 'Put-call parity', 'Futures')
+    if no_future.any():
+        parity = parity_forwards(options[no_future], rate)
+        options = options.merge(parity, on=['Date', 'Expiry'], how='left', validate='many_to_one')
+        borrowed = options['Forward source'].eq('Put-call parity')
+        options.loc[borrowed, 'Forward settlement'] = options.loc[borrowed, 'Parity settlement']
+        options.loc[borrowed, 'Forward close'] = options.loc[borrowed, 'Parity close']
+        options = options.drop(columns=['Parity settlement', 'Parity close'])
+    options['Expiry type'] = options['Expiry'].map(classify_expiries(frame['Expiry']))
     iv_column = next((name for name in ['Implied Volatility', 'IV'] if name in options), None)
     reported = pd.Series(np.nan, index=options.index, dtype=float)
     if iv_column is not None:
@@ -91,7 +154,7 @@ def prepare_option_iv(derivatives, ticker, observation_dates, rate=OPTION_RATE,
         options['Expiry'].to_numpy().astype('datetime64[D]'))
     diagnostics = {
         'eligible_contracts': len(options), 'reported_iv': int(options['IV'].notna().sum()),
-        'estimated_iv': 0, 'missing_forward': 0, 'invalid_premium': 0,
+        'estimated_iv': 0, 'parity_iv': 0, 'missing_forward': 0, 'invalid_premium': 0,
         'solver_failures': 0, 'ambiguous_futures': int(ambiguous.sum()),
         'solver_unavailable': implied_volatility is None,
     }
@@ -132,9 +195,12 @@ def prepare_option_iv(derivatives, ticker, observation_dates, rate=OPTION_RATE,
         except Exception:
             diagnostics['solver_failures'] += 1
             continue
+        parity = contract['Forward source'] == 'Put-call parity'
         options.loc[position, ['IV', 'Premium', 'Forward', 'Price basis', 'IV source']] = [
-            implied, premium, forward, basis, 'Black-76 estimate']
+            implied, premium, forward, basis,
+            'Black-76 parity estimate' if parity else 'Black-76 estimate']
         diagnostics['estimated_iv'] += 1
+        diagnostics['parity_iv'] += int(parity)
     return options[options['IV'].notna()].reset_index(drop=True), diagnostics
 
 
@@ -226,6 +292,26 @@ def select_option_points(chain, top_count=OPTION_TOP_COUNT,
         return frame.assign(**{'Smile IV': np.nan, 'MAD score': np.nan,
                                'Smile supported': False, 'Is outlier': False, 'Selection': ''})
     return pd.concat(output, ignore_index=True)
+
+
+def select_report_expiries(points, monthly_count=OPTION_MONTHLY_EXPIRIES,
+                           series_count=OPTION_SERIES_EXPIRIES):
+    """Upcoming expiries that get a page, in date order.
+
+    Always the next `monthly_count` monthly expiries. When weekly contracts are
+    listed (NIFTY, for example), also the next `series_count` expiries of any
+    kind, monthly ones included; an expiry in both sets gets one page. Upcoming
+    means after the latest observation date.
+    """
+    if points.empty:
+        return []
+    upcoming = points[points['Expiry'] > points['Date'].max()].drop_duplicates('Expiry')
+    kinds = (upcoming.set_index('Expiry')['Expiry type'] if 'Expiry type' in upcoming
+             else pd.Series('Monthly', index=upcoming['Expiry'])).sort_index()
+    chosen = set(kinds.index[kinds.eq('Monthly')][:monthly_count])
+    if kinds.eq('Weekly').any():
+        chosen |= set(kinds.index[:series_count])
+    return sorted(chosen)
 
 
 def option_point_label(row):
@@ -326,6 +412,41 @@ def plot_option_markers(axes, points, x_column, fontsize=10):
     return texts
 
 
+def option_page_notes(latest):
+    """One how-to-use line each for the CE chart, the PE chart and the table, quoting the latest date."""
+    top = latest[latest['Selection'].eq('Top volume')] if 'Selection' in latest else latest
+    if top.empty:
+        top = latest
+    iv = {side: float(top.loc[top['Option type'].eq(side), 'IV'].dropna().median() * 100) for side in ('CE', 'PE')}
+    realized = float(pd.to_numeric(latest['RV mean'], errors='coerce').dropna().median() * 100) \
+        if 'RV mean' in latest else np.nan
+
+    if not np.isfinite(iv['CE']):
+        calls = 'No CE contracts qualify on the latest date.'
+    elif np.isfinite(realized):
+        calls = f"Now {iv['CE']:.1f}% vs {realized:.1f}% ({iv['CE'] - realized:+.1f} pp)."
+    else:
+        calls = f"Now {iv['CE']:.1f}%; no realized benchmark yet."
+    if not np.isfinite(iv['PE']):
+        puts = 'No PE contracts qualify on the latest date.'
+    elif np.isfinite(iv['CE']):
+        puts = f"Now PE {iv['PE']:.1f}% vs CE {iv['CE']:.1f}%."
+    else:
+        puts = f"Now PE {iv['PE']:.1f}%."
+    gaps = pd.to_numeric(top['IV minus RV'], errors='coerce').dropna() if 'IV minus RV' in top else pd.Series(dtype=float)
+    rich = (f'Now {int((gaps > 0).sum())} of {len(gaps)} top-volume contracts price above realized.'
+            if len(gaps) else 'Now: realized benchmark unavailable.')
+    return {
+        'CE': 'How to use: CE dots above the dashed line = calls priced richer than realized moves, '
+              'below = cheaper. ' + calls,
+        'PE': 'How to use: PE IV above CE IV = demand for downside protection; outlined dots = '
+              'strikes off the smile. ' + puts,
+        'table': 'How to use: start with the highest-Contracts strikes (most liquid); IV - mean > 0 = '
+                 'priced above realized history, < 0 = below; treat MAD outliers as quotes to verify, '
+                 'not signals. ' + rich,
+    }
+
+
 def plot_option_history(overlay, ticker, pdf_pages=None):
     """One page per expiry keeps changing daily top-volume selections readable."""
     import matplotlib.pyplot as plt
@@ -342,15 +463,19 @@ def plot_option_history(overlay, ticker, pdf_pages=None):
     for expiry, expiry_points in page_groups:
         figure = plt.figure(figsize=(30, 17), facecolor='white')
         last_date = expiry_points['Date'].max()
-        figure.suptitle(f'{ticker} | Option IV | Expiry {expiry:%d %b %Y}',
+        kind = (f"{expiry_points['Expiry type'].iloc[0]} expiry" if 'Expiry type' in expiry_points
+                else 'Expiry')
+        figure.suptitle(f'{ticker} | Option IV | {kind} {expiry:%d %b %Y}',
                         fontsize=29, fontweight='bold', y=0.975)
         figure.text(0.05, 0.934,
                     f"Top {overlay['top_count']} CE and PE per expiry/date by contracts | "
                     f"{expiry_points['Date'].nunique()} trading dates | "
                     f"{overlay['estimator']} historical mean at matching weekday tenor",
                     fontsize=14, color='#444444')
+        notes = option_page_notes(expiry_points[expiry_points['Date'].eq(last_date)])
         for side, left in [('CE', 0.06), ('PE', 0.55)]:
-            axes = figure.add_axes((left, 0.46, 0.40, 0.42))
+            axes = figure.add_axes((left, 0.485, 0.40, 0.395))
+            figure.text(left, 0.448, notes[side], fontsize=12.5, color='#1f3864', va='top')
             side_points = expiry_points[expiry_points['Option type'].eq(side)]
             axes.set_title(f'{side} | Implied vs realized volatility', fontsize=21, fontweight='bold', pad=12)
             axes.set_ylabel('Annualized volatility', fontsize=14)
@@ -385,7 +510,7 @@ def plot_option_history(overlay, ticker, pdf_pages=None):
                 '--' if pd.isna(contract['MAD score']) else f"{contract['MAD score']:+.2f}",
                 contract['Selection'],
             ])
-        table_axes = figure.add_axes((0.05, 0.12, 0.90, 0.25))
+        table_axes = figure.add_axes((0.05, 0.145, 0.90, 0.225))
         table_axes.axis('off')
         table_axes.set_title(f'Latest selected contracts | {last_date:%d %b %Y}',
                               fontsize=18, fontweight='bold', pad=14)
@@ -402,19 +527,22 @@ def plot_option_history(overlay, ticker, pdf_pages=None):
             if row_number == 0:
                 cell.set_facecolor('#4472c4')
                 cell.set_text_props(color='white', fontweight='bold')
+        figure.text(0.05, 0.133, notes['table'], fontsize=12.5, color='#1f3864', va='top')
         diagnostics = overlay['diagnostics']
-        figure.text(0.05, 0.078,
+        figure.text(0.05, 0.088,
                     f"Full overlay window, all expiries: {diagnostics['reported_iv']} reported IV, "
-                    f"{diagnostics['estimated_iv']} Black-76 estimates; skipped "
-                    f"{diagnostics['missing_forward']} missing matched futures, "
+                    f"{diagnostics['estimated_iv']} Black-76 estimates "
+                    f"({diagnostics.get('parity_iv', 0)} from put-call-parity forwards); skipped "
+                    f"{diagnostics['missing_forward']} without a same-expiry future or parity forward, "
                     f"{diagnostics['invalid_premium']} invalid premiums, "
                     f"{diagnostics['solver_failures']} solver failures. Minimum volume: "
                     f"{overlay['min_contracts']} contracts.", fontsize=11, color='#555555')
-        figure.text(0.05, 0.054,
-                    f"Black-76: annual rate {overlay['rate']:.2%}, ACT/365; realized volatility: 252/year. "
+        figure.text(0.05, 0.064,
+                    f"Black-76: annual rate {overlay['rate']:.2%}, ACT/365; forward = same-expiry futures, else "
+                    'put-call parity at the strikes nearest the money. Realized volatility: 252/year. '
                     'Weekday tenors omit weekends, not exchange holidays. Historical means use no later dates.',
                     fontsize=11, color='#555555')
-        figure.text(0.05, 0.03,
+        figure.text(0.05, 0.04,
                     f"Outlines: |smile residual MAD score| >= {OPTION_MAD_THRESHOLD:g}; "
                     f"up to {overlay['outlier_count']} extra contracts per side/date. "
                     'An IV-minus-realized gap is not itself an outlier, mispricing or a trade signal.',

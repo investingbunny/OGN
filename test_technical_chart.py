@@ -1,4 +1,4 @@
-"""Regression checks for the technical page: a 1-year window on a gap-free trading-day axis."""
+"""Regression checks for the technical page: 1-year gap-free axis and the Buy/Sell/Hold audit."""
 
 import importlib.util
 import unittest
@@ -131,6 +131,71 @@ class TechnicalChartTests(unittest.TestCase):
         self.assertEqual(labels[-1], dates[-1].strftime('%d-%b-%y'))
         self.assertLessEqual(len(labels), 6)
         self.module.plt.close(figure)
+
+    @staticmethod
+    def audit_frame(**last):
+        """70 flat bars (60-bar swing 800-1200, ATR 100); `last` overrides the final bar."""
+        frame = pd.DataFrame({
+            'Close': 1000.0, 'High': 1010.0, 'Low': 990.0, 'Volume': 1000.0, 'ATR': 100.0,
+            '5DMA-E': 1000.0, '9DMA-E': 1000.0, '13DMA-E': 1000.0, '21DMA-E': 1000.0,
+            '48DMA-E': 1000.0, '20DMA': 1000.0, '50DMA': 1000.0, '200DMA': 1000.0, 'MA': 1000.0,
+            'MACD': 0.0, 'Signal': 0.0, 'RSI': 50.0}, index=pd.bdate_range('2026-01-01', periods=70))
+        frame.iloc[20, frame.columns.get_loc('High')] = 1200.0
+        frame.iloc[30, frame.columns.get_loc('Low')] = 800.0
+        for column, value in last.items():
+            frame.iloc[-1, frame.columns.get_loc(column)] = value
+        return frame
+
+    def test_audit_reads_buy_sell_or_hold(self):
+        bullish = self.module.analyze_stock(self.audit_frame(
+            Close=1100.0, Volume=3000.0, **{'50DMA': 1100.0, '9DMA-E': 1050.0, '13DMA-E': 1005.0,
+                                             'MACD': 30.0, 'RSI': 65.0}), 'TEST')
+        self.assertEqual(bullish['Status'].tolist(),
+                         ['Buy', 'Buy', 'Hold', 'Hold', 'Buy', 'Buy', 'Buy', 'Buy', 'Buy'])
+        self.assertEqual(bullish['Verdict'].iloc[0], 'Bullish market regime')
+        self.assertEqual(bullish['Condition'].iloc[5], 'RSI 14 (65)')
+        self.assertEqual(bullish.iloc[7].tolist(), ['Fib 61.8% (1047)', 'Buy', 'Holding above pivot'])
+        self.assertEqual(bullish['Verdict'].iloc[8], 'Volume confirms up day')
+
+        bearish = self.module.analyze_stock(self.audit_frame(
+            Close=900.0, Volume=3000.0, **{'50DMA': 900.0, '9DMA-E': 950.0, '13DMA-E': 995.0,
+                                            '5DMA-E': 990.0, 'MACD': -30.0, 'RSI': 35.0}), 'TEST')
+        self.assertEqual(bearish['Status'].tolist(),
+                         ['Sell', 'Sell', 'Hold', 'Hold', 'Sell', 'Sell', 'Sell', 'Sell', 'Sell'])
+        self.assertEqual(bearish['Verdict'].iloc[0], 'Bearish market regime')
+        self.assertEqual(bearish['Verdict'].iloc[7], 'Below 38.2% (953)')
+        self.assertEqual(bearish['Verdict'].iloc[8], 'Volume confirms down day')
+
+        # Within the band, neutral RSI, between the Fib levels and no volume surge: Hold
+        neutral = self.module.analyze_stock(self.audit_frame(Close=1005.0), 'TEST')
+        self.assertTrue(neutral['Status'].eq('Hold').all())
+        self.assertEqual(neutral['Verdict'].iloc[5], 'Neutral zone (40-60)')
+        self.assertEqual(neutral['Verdict'].iloc[7], 'Between 38.2% and 61.8%')
+
+    def test_audit_band_and_missing_inputs(self):
+        # Hold band = 0.1 x ATR: 10 with the stored ATR of 100, 2 from ATR(20) of these bars (20)
+        frame = self.audit_frame(**{'13DMA-E': 1005.0})
+        self.assertEqual(self.module.analyze_stock(frame, 'TEST')['Status'].iloc[2], 'Hold')
+        self.assertEqual(self.module.analyze_stock(frame.drop(columns='ATR'), 'TEST')['Status'].iloc[2], 'Buy')
+        frame = self.audit_frame(**{'13DMA-E': 1001.0}).drop(columns='ATR')
+        self.assertEqual(self.module.analyze_stock(frame, 'TEST')['Status'].iloc[2], 'Hold')
+        missing = self.module.analyze_stock(self.audit_frame(RSI=np.nan, **{'200DMA': np.nan}), 'TEST')
+        self.assertEqual(missing.iloc[0, 1:].tolist(), ['Hold', 'Not enough history'])
+        self.assertEqual(missing.iloc[5].tolist(), ['RSI 14', 'Hold', 'Not enough history'])
+
+    def test_audit_table_colours_each_status(self):
+        from matplotlib.colors import to_rgba
+        figure = self.run_report(self.prices()).savefig.call_args.args[0]
+        axes = next(ax for ax in figure.axes if ax.get_title().endswith('Technical Audit'))
+        cells = axes.tables[0].get_celld()
+        statuses = [cell.get_text().get_text() for (row, column), cell in cells.items()
+                    if row > 0 and column == 1]
+        self.assertGreaterEqual(len(statuses), 8)
+        for (row, column), cell in cells.items():
+            if row > 0 and column == 1:
+                status = cell.get_text().get_text()
+                self.assertIn(status, self.module.AUDIT_COLOURS)
+                self.assertEqual(cell.get_facecolor(), to_rgba(self.module.AUDIT_COLOURS[status]))
 
 
 if __name__ == '__main__':

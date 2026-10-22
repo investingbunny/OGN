@@ -1,5 +1,6 @@
 """Focused tests for option volume selection, IV diagnostics and chart overlays."""
 
+import math
 import unittest
 import importlib.util
 from pathlib import Path
@@ -143,15 +144,26 @@ class OptionIVTests(unittest.TestCase):
         np.testing.assert_allclose(frame['IV'], [0.22, 0.23])
         self.assertEqual(diagnostic['reported_iv'], 2)
 
-    def test_missing_iv_requires_exact_future_date_expiry_and_ticker(self):
+    def test_mismatched_future_is_never_used_and_parity_forward_fills_in(self):
         for column, value in [('Date', pd.Timestamp('2026-08-31')),
                                ('Expiry', pd.Timestamp('2026-10-27')), ('Symbol', 'BANKNIFTY')]:
             with self.subTest(column=column):
                 derivatives = self.derivatives()
                 derivatives.loc[2, column] = value
+                derivatives.loc[2, ['Settle Price', 'Close']] = 30000.0
                 frame, diagnostic = overlay.prepare_option_iv(derivatives, 'NIFTY', ['2026-09-01'])
-                self.assertTrue(frame.empty)
-                self.assertEqual(diagnostic['missing_forward'], 2)
+                np.testing.assert_allclose(frame['IV'], [0.20, 0.20], atol=1e-10)
+                np.testing.assert_allclose(frame['Forward'], [24500.0, 24500.0])
+                self.assertTrue(frame['IV source'].eq('Black-76 parity estimate').all())
+                self.assertEqual(diagnostic['parity_iv'], 2)
+                self.assertEqual(diagnostic['missing_forward'], 0)
+
+    def test_without_a_future_or_a_call_put_pair_iv_is_unavailable(self):
+        derivatives = self.derivatives().iloc[[0]]
+        frame, diagnostic = overlay.prepare_option_iv(derivatives, 'NIFTY', ['2026-09-01'])
+        self.assertTrue(frame.empty)
+        self.assertEqual(diagnostic['missing_forward'], 1)
+        self.assertEqual(diagnostic['parity_iv'], 0)
 
     def test_invalid_prices_expiry_day_and_ambiguous_futures_are_rejected(self):
         derivatives = self.derivatives()
@@ -301,14 +313,22 @@ class OptionIntegrationTests(unittest.TestCase):
 
     def test_volatility_page_and_expiry_page_receive_overlay(self):
         derivatives = OptionIVTests().derivatives().assign(Date=pd.Timestamp('2026-09-02'))
+        pages = Mock()
         with patch.object(self.module, 'load_derivatives', return_value=derivatives), \
-                patch.object(self.module, 'plot_volatility') as plot, \
-                patch.object(overlay, 'plot_option_history') as history:
+                patch.object(self.module, 'plot_volatility', pages.volatility), \
+                patch.object(self.module, 'plot_volatility_guide', pages.guide), \
+                patch.object(overlay, 'plot_option_history', pages.history):
             result = self.module.volatility_analysis(self.prices(), 'NIFTY')
         self.assertIsNotNone(result['option_overlay'])
         self.assertIn(14, result['cone']['windows'])
-        plot.assert_called_once()
-        history.assert_called_once()
+        self.assertEqual([call[0] for call in pages.mock_calls], ['volatility', 'guide', 'history'])
+        with patch.object(self.module, 'REPORT_SECTIONS', ['volatility', 'option_overlay']), \
+                patch.object(self.module, 'load_derivatives', return_value=derivatives), \
+                patch.object(self.module, 'plot_volatility'), \
+                patch.object(self.module, 'plot_volatility_guide') as guide, \
+                patch.object(overlay, 'plot_option_history'):
+            self.module.volatility_analysis(self.prices(), 'NIFTY')
+        guide.assert_not_called()
 
     def test_cli_exposes_explicit_pricing_and_selection_settings(self):
         arguments = ['Option-OGN.py', '--pdf', 'NIFTY', '--option-dates', '10',
@@ -323,6 +343,143 @@ class OptionIntegrationTests(unittest.TestCase):
         self.assertEqual(parameters['option_rate'], 0.055)
         self.assertEqual(parameters['option_iv_unit'], 'decimal')
         self.assertIsNone(parameters['days'])
+
+
+class WeeklyExpiryTests(unittest.TestCase):
+    """NIFTY-style listing as of 21 Oct 2026: the last listed expiry of each month is the monthly."""
+    AS_OF = pd.Timestamp('2026-10-21')
+    LISTED = pd.to_datetime(['2026-10-27', '2026-11-03', '2026-11-10', '2026-11-17', '2026-11-24',
+                             '2026-12-01', '2026-12-29'])
+    MONTHLY = pd.to_datetime(['2026-10-27', '2026-11-24', '2026-12-29'])
+
+    @classmethod
+    def setUpClass(cls):
+        import matplotlib
+        matplotlib.use('Agg')
+        spec = importlib.util.spec_from_file_location('ogn_weekly_test', Path(__file__).with_name('Option-OGN.py'))
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    def chain(self, dates, expiries, forward=24600.0, iv=0.15, spot=np.nan):
+        """Black-76 calls and puts on a mild smile at one forward; futures only for monthly expiries."""
+        rows = []
+        for date in pd.to_datetime(dates):
+            for expiry in expiries:
+                lifetime = (expiry - date).days / 365
+                for strike in np.arange(23600.0, 25700.0, 100.0):
+                    smile = iv + 2.0 * math.log(strike / forward) ** 2 + 0.0005 * math.sin(strike / 100)
+                    for side, flag in [('CE', 'c'), ('PE', 'p')]:
+                        premium = black(flag, forward, strike, lifetime, 0.065, smile)
+                        rows.append({'Date': date, 'Expiry': expiry, 'Symbol': 'NIFTY', 'Instrument': 'IDO',
+                                     'Option type': side, 'Strike Price': strike,
+                                     'Contracts': 2000 - abs(strike - forward), 'Settle Price': premium,
+                                     'Close': premium, 'Underlying Price': spot, 'Model IV': smile})
+                if expiry in self.MONTHLY:
+                    rows.append({'Date': date, 'Expiry': expiry, 'Symbol': 'NIFTY', 'Instrument': 'IDF',
+                                 'Option type': 'XX', 'Strike Price': 0, 'Contracts': 100,
+                                 'Settle Price': forward, 'Close': forward, 'Underlying Price': spot})
+        return pd.DataFrame(rows)
+
+    def test_last_listed_expiry_of_each_month_is_monthly(self):
+        kinds = overlay.classify_expiries(list(self.LISTED) + [self.LISTED[1], pd.Timestamp('2027-03-30')])
+        monthly = kinds[kinds.eq('Monthly')].index.strftime('%d %b').tolist()
+        self.assertEqual(monthly, ['27 Oct', '24 Nov', '29 Dec', '30 Mar'])
+        self.assertEqual(kinds[kinds.eq('Weekly')].index.strftime('%d %b').tolist(),
+                         ['03 Nov', '10 Nov', '17 Nov', '01 Dec'])
+
+    def test_weekly_iv_uses_the_same_expiry_parity_forward(self):
+        expiries = pd.to_datetime(['2026-10-27', '2026-11-03', '2026-11-24'])
+        frame, diagnostic = overlay.prepare_option_iv(self.chain([self.AS_OF], expiries), 'NIFTY', [self.AS_OF])
+        weekly = frame[frame['Expiry'].eq(expiries[1])]
+        self.assertEqual(len(weekly), 42)
+        np.testing.assert_allclose(weekly['IV'], weekly['Model IV'], atol=1e-6)
+        np.testing.assert_allclose(weekly['Forward'], 24600.0, rtol=1e-9)
+        self.assertTrue(weekly['IV source'].eq('Black-76 parity estimate').all())
+        self.assertTrue(weekly['Expiry type'].eq('Weekly').all())
+        monthly = frame[~frame['Expiry'].eq(expiries[1])]
+        self.assertTrue(monthly['IV source'].eq('Black-76 estimate').all())
+        self.assertTrue(monthly['Expiry type'].eq('Monthly').all())
+        self.assertEqual(diagnostic['parity_iv'], 42)
+        self.assertEqual(diagnostic['estimated_iv'], 126)
+
+    def test_parity_forward_far_from_the_underlying_is_rejected(self):
+        expiries = pd.to_datetime(['2026-10-27', '2026-11-03', '2026-11-24'])
+        chain = self.chain([self.AS_OF], expiries, spot=30000.0)
+        frame, diagnostic = overlay.prepare_option_iv(chain, 'NIFTY', [self.AS_OF])
+        self.assertFalse(frame['Expiry'].eq(expiries[1]).any())
+        self.assertEqual(diagnostic['missing_forward'], 42)
+        self.assertEqual(diagnostic['parity_iv'], 0)
+
+    def test_pages_cover_next_three_monthly_and_next_five_expiries(self):
+        listed = list(self.LISTED) + [pd.Timestamp('2027-03-30')]
+        kinds = overlay.classify_expiries(listed + [pd.Timestamp('2026-10-20')])
+        points = pd.DataFrame({'Date': self.AS_OF, 'Expiry': listed})
+        points = pd.concat([points, pd.DataFrame({'Date': [pd.Timestamp('2026-10-19')],
+                                                  'Expiry': [pd.Timestamp('2026-10-20')]})])
+        points['Expiry type'] = points['Expiry'].map(kinds)
+        pages = overlay.select_report_expiries(points)
+        self.assertEqual([f'{expiry:%d %b}' for expiry in pages],
+                         ['27 Oct', '03 Nov', '10 Nov', '17 Nov', '24 Nov', '29 Dec'])
+        monthly_only = points[points['Expiry type'].eq('Monthly')]
+        self.assertEqual([f'{expiry:%d %b}' for expiry in overlay.select_report_expiries(monthly_only)],
+                         ['27 Oct', '24 Nov', '29 Dec'])
+
+    def test_one_liners_quote_latest_iv_against_realized(self):
+        latest = pd.DataFrame({'Option type': ['CE', 'CE', 'PE'], 'IV': [0.14, 0.16, 0.18],
+                               'RV mean': 0.17, 'IV minus RV': [-0.03, -0.01, 0.01],
+                               'Selection': 'Top volume'})
+        notes = overlay.option_page_notes(latest)
+        self.assertTrue(all(note.startswith('How to use:') for note in notes.values()))
+        self.assertIn('Now 15.0% vs 17.0% (-2.0 pp).', notes['CE'])
+        self.assertIn('Now PE 18.0% vs CE 15.0%.', notes['PE'])
+        self.assertIn('Now 1 of 3 top-volume contracts price above realized.', notes['table'])
+        missing = overlay.option_page_notes(latest.assign(**{'RV mean': np.nan, 'IV minus RV': np.nan}))
+        self.assertIn('no realized benchmark yet', missing['CE'])
+        self.assertIn('realized benchmark unavailable', missing['table'])
+
+    def test_overlay_pages_add_weekly_series_and_cone_keeps_monthly(self):
+        import matplotlib.pyplot as plt
+        dates = pd.bdate_range(end=self.AS_OF, periods=300)
+        close = 24600 + np.random.default_rng(7).normal(0, 80, len(dates)).cumsum()
+        prices = pd.DataFrame({'Open': close - 5, 'High': close + 50, 'Low': close - 55,
+                               'Close': close, 'Volume': 100}, index=dates)
+        chain = self.chain(dates[-2:], self.LISTED)
+        with patch.object(self.module, 'load_derivatives', return_value=chain):
+            profile = self.module.build_volatility_option_overlay(prices, 'NIFTY', 'YangZhang', date_count=2)
+        self.assertEqual([f'{expiry:%d %b}' for expiry in profile['expiries']],
+                         ['27 Oct', '03 Nov', '10 Nov', '17 Nov', '24 Nov', '29 Dec'])
+        self.assertEqual(sorted(pd.to_datetime(profile['points']['Expiry'].unique())), profile['expiries'])
+        weekly = profile['points'][profile['points']['Expiry type'].eq('Weekly')]
+        self.assertTrue(weekly['IV source'].eq('Black-76 parity estimate').all())
+        cone = self.module._cone_option_points(profile)
+        self.assertEqual(sorted(pd.to_datetime(cone['Expiry'].unique())), list(self.MONTHLY))
+
+        document = Mock()
+        self.assertEqual(overlay.plot_option_history(profile, 'NIFTY', pdf_pages=document), 6)
+        figures = [call.args[0] for call in document.savefig.call_args_list]
+        titles = [figure.get_suptitle() for figure in figures]
+        self.assertEqual(titles[:2], ['NIFTY | Option IV | Monthly expiry 27 Oct 2026',
+                                      'NIFTY | Option IV | Weekly expiry 03 Nov 2026'])
+        self.assertTrue(titles[-1].endswith('Monthly expiry 29 Dec 2026'))
+
+        # Each one-liner sits clear of the charts' tick labels, the table and the footers.
+        figure = figures[1]
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        notes = [text for text in figure.texts if text.get_text().startswith('How to use:')]
+        self.assertEqual(len(notes), 3)
+        others = [text.get_window_extent(renderer) for text in figure.texts if text not in notes]
+        table_axes = figure.axes[2]
+        others += [table_axes.title.get_window_extent(renderer),
+                   table_axes.tables[0].get_window_extent(renderer)]
+        for axes in figure.axes[:2]:
+            others += [label.get_window_extent(renderer) for label in axes.get_xticklabels() if label.get_text()]
+        boxes = [note.get_window_extent(renderer) for note in notes]
+        for position, box in enumerate(boxes):
+            self.assertGreaterEqual(box.x0, 0)
+            self.assertLessEqual(box.x1, figure.bbox.x1)
+            self.assertFalse(any(box.overlaps(other) for other in others + boxes[position + 1:]))
+        self.assertFalse(plt.get_fignums())
 
 
 if __name__ == '__main__':

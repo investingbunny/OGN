@@ -11,9 +11,10 @@ multi-panel technical analysis charts including:
   - Renko charts
   - Support / resistance regression trendlines (scipy pivots + numpy polyfit)
 
-Report pages: technical -> trendlines -> volatility -> comparison, then separate
-Japan, US Schiller and India Schiller appendices once per PDF.
-Edit REPORT_SECTIONS to drop any of them.
+Report pages: technical -> trendlines -> volatility -> volatility guide -> option IV
+(next 3 monthly expiries, plus the next 5 expiries when weekly contracts are listed)
+-> comparison, then separate Japan, US Schiller and India Schiller appendices once
+per PDF. Edit REPORT_SECTIONS to drop any of them.
 
 Usage:
     python Option-OGN.py                          # analyse all FnO symbols (interactive)
@@ -28,9 +29,11 @@ Usage:
     python Option-OGN.py --trend-distance 20 GLD   # demand 20 bars between pivots
     python Option-OGN.py --trend-prominence 5 GLD  # absolute prominence, in price units
     python Option-OGN.py --trend-prominence-pct 5 GLD  # auto-scale off 5% of the range
-    python Option-OGN.py --pdf                     # all FnO symbols -> charts/FnO_Analysis.pdf
-    python Option-OGN.py --pdf WTI                 # single symbol -> charts/WTI_Analysis.pdf
-    python Option-OGN.py --pdf output.pdf          # custom output file
+    python Option-OGN.py --pdf                     # all FnO symbols -> charts/FnO_Analysis_<stamp>.pdf
+    python Option-OGN.py --pdf WTI                 # single symbol -> charts/WTI_Analysis_<stamp>.pdf
+    python Option-OGN.py --pdf output.pdf          # custom output file -> output_<stamp>.pdf
+
+PDF names carry a _YYYYMMDD_HHMMSS stamp (<stamp>), so a rerun never overwrites a report.
 
 @author: HRTR
 """
@@ -155,6 +158,7 @@ REPORT_SECTIONS = [
     'technical',    # multi-panel indicator chart for the first symbol
     'trendlines',   # candlestick page with support / resistance regression lines
     'volatility',   # volatility cone / rolling / histogram page
+    'volatility_guide',  # one page explaining each volatility graph with this report's numbers
     'option_overlay',
     'comparison',   # statistical comparison, only when a second symbol is given
     'japan_macro',
@@ -172,6 +176,13 @@ TREND_SUPPORT_COLOUR = '#26a69a'
 # ── Technical page ────────────────────────────────────────────────────────
 # Whole calendar years shown by the indicator panels; Renko keeps its last 100 bricks.
 TECHNICAL_WINDOW_YEARS = 1
+
+# Technical audit: each row reads Buy, Sell or Hold. Two lines closer than this
+# fraction of ATR(20) are too close to call, so they read Hold.
+AUDIT_HOLD_ATR = 0.1
+AUDIT_RSI_SELL, AUDIT_RSI_BUY = 40, 60   # RSI between the two reads Hold
+AUDIT_VOLUME_SURGE = 1.2                 # Volume must beat its 20-bar average by this factor
+AUDIT_COLOURS = {'Buy': '#c6efce', 'Sell': '#ffc7ce', 'Hold': '#ffeb9c'}
 
 # Comment out any line to drop that panel from the volatility page.
 VOLATILITY_PANELS = [
@@ -227,6 +238,21 @@ def business_days(start, end):
         np.asarray(s, dtype='datetime64[D]'),
         np.asarray(e, dtype='datetime64[D]'),
     )
+
+
+def timestamped_path(path, moment=None):
+    """`path` with _YYYYMMDD_HHMMSS before its suffix, so a rerun never overwrites a report.
+
+    A file already holding that name (two runs in one second) gets a _2, _3 ... counter.
+    """
+    path = Path(path)
+    stamp = (moment or datetime.datetime.now()).strftime('%Y%m%d_%H%M%S')
+    candidate = path.with_name(f'{path.stem}_{stamp}{path.suffix}')
+    counter = 2
+    while candidate.exists():
+        candidate = path.with_name(f'{path.stem}_{stamp}_{counter}{path.suffix}')
+        counter += 1
+    return candidate
 
 
 # ---------------------------------------------------------------------------
@@ -595,11 +621,41 @@ def PlotRenko(DF, num_bars=100, ax=None):
 # Technical audit table (crossover / momentum / fractal analysis)
 # ---------------------------------------------------------------------------
 
+def _number(value):
+    """Float for a scalar cell, NaN when it is missing or not numeric."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def _audit_side(gap, tolerance):
+    """Buy above +tolerance, Sell below -tolerance, Hold inside the band or when unknown."""
+    if not np.isfinite(gap):
+        return 'Hold'
+    if gap > tolerance:
+        return 'Buy'
+    if gap < -tolerance:
+        return 'Sell'
+    return 'Hold'
+
+
 def analyze_stock(data, ticker):
     """Run a multi-factor technical audit on the indicator DataFrame.
 
     Evaluates crossover signals, momentum, volatility, and fractal
-    Fibonacci structure.  Returns a DataFrame with columns:
+    Fibonacci structure.  Each row's Status is Buy, Sell or Hold:
+
+      - Line pairs (SMA/EMA crossovers, MACD vs Signal, Close vs BB mid):
+        Buy when the first line is above the second by more than
+        AUDIT_HOLD_ATR x ATR(20), Sell when below by more, else Hold.
+      - RSI: Buy above 60, Sell below 40, Hold in between.
+      - Fibonacci (last 60 bars): Buy above the 61.8% level, Sell below
+        the 38.2% level, Hold in between.
+      - Volume: only a bar above 1.2x its 20-bar average counts, as Buy on
+        an up close and Sell on a down close; otherwise Hold.
+
+    Missing inputs read Hold.  Returns a DataFrame with columns:
         Condition, Status, Verdict
 
     Args:
@@ -611,7 +667,16 @@ def analyze_stock(data, ticker):
     # Ensure we work with a copy to avoid side-effects
     df = data.copy()
 
-    # Compute any extra EMAs/SMAs that the audit needs but may not exist yet
+    # Use the indicator columns already computed on full history (the lines drawn
+    # on the page), under the short names used here
+    ema_map = {'5DMA-E': 'EMA5', '9DMA-E': 'EMA9', '13DMA-E': 'EMA13',
+               '21DMA-E': 'EMA21', '48DMA-E': 'EMA48'}
+    sma_map = {'20DMA': 'SMA20', '50DMA': 'SMA50', '200DMA': 'SMA200'}
+    for old, new in {**ema_map, **sma_map}.items():
+        if old in df.columns and new not in df.columns:
+            df[new] = df[old]
+
+    # Compute any EMAs/SMAs that are still missing
     for span, col in [(5, 'EMA5'), (9, 'EMA9'), (13, 'EMA13'),
                       (21, 'EMA21'), (48, 'EMA48')]:
         if col not in df.columns:
@@ -622,63 +687,86 @@ def analyze_stock(data, ticker):
             src = df['Close'] if 'Close' in df.columns else df.iloc[:, 0]
             df[col] = src.rolling(window=window).mean()
 
-    # Map existing indicator column names to the short names used here
-    ema_map = {'5DMA-E': 'EMA5', '9DMA-E': 'EMA9', '13DMA-E': 'EMA13',
-               '21DMA-E': 'EMA21', '48DMA-E': 'EMA48'}
-    sma_map = {'20DMA': 'SMA20', '50DMA': 'SMA50', '200DMA': 'SMA200'}
-    for old, new in {**ema_map, **sma_map}.items():
-        if old in df.columns and new not in df.columns:
-            df[new] = df[old]
-
     # --- Fractal Fibonacci (last 60 bars ≈ 3 months) ---
     recent = df.tail(60)
     swing_high = recent['High'].max() if 'High' in recent.columns else recent['Close'].max()
     swing_low = recent['Low'].min() if 'Low' in recent.columns else recent['Close'].min()
     fib618 = swing_high - (0.382 * (swing_high - swing_low))
+    fib382 = swing_high - (0.618 * (swing_high - swing_low))
+
+    # --- Hold band: a fraction of the typical daily range ---
+    atr = _number(df['ATR'].iloc[-1]) if 'ATR' in df.columns else np.nan
+    if not atr > 0 and {'High', 'Low', 'Close'}.issubset(df.columns):
+        atr = _number(ATR(df, 20)['ATR'].iloc[-1])
+    tolerance = AUDIT_HOLD_ATR * atr if atr > 0 else 0.0
 
     # --- Current bar values ---
     curr = df.iloc[-1]
-    vol_avg = df['Volume'].rolling(20).mean().iloc[-1] if 'Volume' in df.columns else 0
+    close = _number(curr.get('Close'))
+    volume = (pd.to_numeric(df['Volume'], errors='coerce') if 'Volume' in df.columns
+              else pd.Series(0.0, index=df.index))
+    vol_avg = volume.rolling(20).mean().iloc[-1]
 
     results = []
 
-    # 1. Crossover categories
-    results.append(["Inst: 50/200 SMA",
-                    "Yes" if curr.get('SMA50', np.nan) > curr.get('SMA200', np.nan) else "No",
-                    "Bullish Market Regime"])
-    results.append(["Mom: 9/21 EMA",
-                    "Yes" if curr.get('EMA9', np.nan) > curr.get('EMA21', np.nan) else "No",
-                    "Short-term acceleration"])
-    results.append(["Trend: 13/48 EMA",
-                    "Yes" if curr.get('EMA13', np.nan) > curr.get('EMA48', np.nan) else "No",
-                    "Confirmed trend run"])
-    results.append(["Hybrid: 5E / 20S",
-                    "Yes" if curr.get('EMA5', np.nan) > curr.get('SMA20', np.nan) else "No",
-                    "Price aggressive vs mean"])
+    # 1. Crossovers, MACD and the Bollinger midline: line A versus line B
+    pairs = [
+        ("Inst: 50/200 SMA", 'SMA50', 'SMA200',
+         ("Bullish market regime", "Bearish market regime", "Regime at a crossover")),
+        ("Mom: 9/21 EMA", 'EMA9', 'EMA21',
+         ("Short-term acceleration", "Short-term deceleration", "Momentum flat")),
+        ("Trend: 13/48 EMA", 'EMA13', 'EMA48',
+         ("Confirmed uptrend", "Confirmed downtrend", "Trend at a crossover")),
+        ("Hybrid: 5E / 20S", 'EMA5', 'SMA20',
+         ("Price aggressive vs mean", "Price weak vs mean", "Price at its mean")),
+        ("MACD vs Signal", 'MACD', 'Signal',
+         ("Momentum engine firing", "Momentum engine stalling", "MACD at a crossover")),
+    ]
+    for condition, first, second, readings in pairs:
+        gap = _number(curr.get(first)) - _number(curr.get(second))
+        status = _audit_side(gap, tolerance)
+        reading = dict(zip(('Buy', 'Sell', 'Hold'), readings))[status]
+        results.append([condition, status, reading if np.isfinite(gap) else "Not enough history"])
 
-    # 2. Momentum & volatility
-    macd_val = curr.get('MACD', np.nan)
-    sig_val = curr.get('Signal', np.nan)
-    results.append(["MACD > Signal",
-                    "Yes" if macd_val > sig_val else "No",
-                    "Momentum engine firing"])
-    rsi_val = curr.get('RSI', np.nan)
-    results.append(["RSI > 60",
-                    "Yes" if rsi_val > 60 else "No",
-                    "Super-Bullish zone"])
-    sma20_val = curr.get('SMA20', curr.get('MA', np.nan))
-    results.append(["Close > BB Mid",
-                    "Yes" if curr['Close'] > sma20_val else "No",
-                    "Bullish volatility channel"])
+    # 2. Momentum zone
+    rsi_val = _number(curr.get('RSI'))
+    if not np.isfinite(rsi_val):
+        results.append(["RSI 14", "Hold", "Not enough history"])
+    elif rsi_val > AUDIT_RSI_BUY:
+        results.append([f"RSI 14 ({rsi_val:.0f})", "Buy", f"Bullish zone (> {AUDIT_RSI_BUY})"])
+    elif rsi_val < AUDIT_RSI_SELL:
+        results.append([f"RSI 14 ({rsi_val:.0f})", "Sell", f"Bearish zone (< {AUDIT_RSI_SELL})"])
+    else:
+        results.append([f"RSI 14 ({rsi_val:.0f})", "Hold",
+                        f"Neutral zone ({AUDIT_RSI_SELL}-{AUDIT_RSI_BUY})"])
+
+    midline = _number(curr.get('SMA20', curr.get('MA', np.nan)))
+    status = _audit_side(close - midline, tolerance)
+    results.append(["Close vs BB Mid", status,
+                    {'Buy': "Bullish volatility channel", 'Sell': "Bearish volatility channel",
+                     'Hold': "At the channel midline"}[status]])
 
     # 3. Fractal structure & filters
-    results.append([f"Fib > 61.8% ({fib618:.0f})",
-                    "Yes" if curr['Close'] > fib618 else "No",
-                    "Holding above pivot"])
+    if not np.isfinite(close) or not np.isfinite(fib618):
+        results.append(["Fib 61.8%", "Hold", "Not enough history"])
+    elif close > fib618:
+        results.append([f"Fib 61.8% ({fib618:.0f})", "Buy", "Holding above pivot"])
+    elif close < fib382:
+        results.append([f"Fib 61.8% ({fib618:.0f})", "Sell", f"Below 38.2% ({fib382:.0f})"])
+    else:
+        results.append([f"Fib 61.8% ({fib618:.0f})", "Hold", "Between 38.2% and 61.8%"])
+
     if vol_avg > 0:
-        results.append(["Volume > 1.2× avg",
-                        "Yes" if curr.get('Volume', 0) > (vol_avg * 1.2) else "No",
-                        "Big players confirming"])
+        previous = _number(df['Close'].iloc[-2]) if len(df) > 1 else np.nan
+        change = close - previous
+        surge = volume.iloc[-1] > vol_avg * AUDIT_VOLUME_SURGE
+        if surge and change > 0:
+            results.append(["Volume vs 1.2× avg", "Buy", "Volume confirms up day"])
+        elif surge and change < 0:
+            results.append(["Volume vs 1.2× avg", "Sell", "Volume confirms down day"])
+        else:
+            results.append(["Volume vs 1.2× avg", "Hold",
+                            "Surge on a flat close" if surge else "No volume surge"])
 
     return pd.DataFrame(results, columns=["Condition", "Status", "Verdict"])
 
@@ -924,27 +1012,28 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     # ── Technical Audit Table (bottom-right) ──────────────────────────
     try:
         report = analyze_stock(data, ticker)
-        # Build colour list: green for "Yes", red for "No"
-        cell_colours = []
-        for _, row in report.iterrows():
-            status_colour = '#c6efce' if row['Status'] == 'Yes' else '#ffc7ce'
-            cell_colours.append(['#f2f2f2', status_colour, '#f2f2f2'])
+        # Status cell: green Buy, red Sell, amber Hold
+        cell_colours = [['#f2f2f2', AUDIT_COLOURS[status], '#f2f2f2']
+                        for status in report['Status']]
 
         tbl = ax_table.table(
             cellText=report.values,
             colLabels=report.columns,
             cellColours=cell_colours,
             colColours=['#4472c4'] * 3,
+            colWidths=[0.34, 0.16, 0.50],
             cellLoc='center',
             loc='upper center',
         )
         tbl.auto_set_font_size(False)
         tbl.set_fontsize(23)
         tbl.scale(1.0, 6.0)  # Stretch rows for readability
-        # Style header row
+        # Style header row; Buy/Sell/Hold in bold
         for (r, c), cell in tbl.get_celld().items():
             if r == 0:
                 cell.set_text_props(color='white', fontweight='bold')
+            elif c == 1:
+                cell.set_text_props(fontweight='bold')
             cell.set_edgecolor('#cccccc')
         ax_table.set_title(f"{ticker} — Technical Audit", fontsize=30,
                            fontweight='bold', pad=8)
@@ -1226,7 +1315,8 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
     Args:
         scrip_list:           List of symbols to analyse (default: NSEFnOList)
         single_scrip:         If set, analyse only this one symbol
-        pdf_path:             If set, save all charts to this PDF file
+        pdf_path:             If set, save all charts to this PDF file, with a
+                              _YYYYMMDD_HHMMSS stamp added before .pdf
         compare_with:         If set, append a statistical comparison of the
                               analysed symbol against this second series
         days:                 Window in aligned observations (legacy parameter name)
@@ -1243,6 +1333,9 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         option_outliers:      Additional qualifying MAD outliers per side/expiry/date
         option_rate:          Annual decimal rate for Black-76 IV estimates
         option_iv_unit:       Unit of source-reported IV: percent or decimal
+
+    Returns:
+        The saved PDF path (timestamped), or None for interactive charts.
     """
     if single_scrip:
         symbols = [single_scrip]
@@ -1256,6 +1349,7 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
     if pdf_path:
         matplotlib.use('Agg')
         from pathlib import Path
+        pdf_path = str(timestamped_path(pdf_path))
         Path(pdf_path).parent.mkdir(parents=True, exist_ok=True)
         pdf_pages = PdfPages(pdf_path)
         print(f"  Saving charts to: {pdf_path}")
@@ -1381,6 +1475,7 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         finally:
             pdf_pages.close()
         print(f"\n  PDF saved: {pdf_path}")
+    return pdf_path
 
 
 # ---------------------------------------------------------------------------
@@ -2322,6 +2417,7 @@ def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None,
     owns_pdf = False
     if pdf_pages is None and pdf_path:
         from pathlib import Path
+        pdf_path = str(timestamped_path(pdf_path))
         Path(pdf_path).parent.mkdir(parents=True, exist_ok=True)
         pdf_pages = PdfPages(pdf_path)
         owns_pdf = True
@@ -2382,21 +2478,30 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
                                                  min_contracts=min_contracts)
     if points.empty:
         print(f"  [options] No valid IV points: {diagnostics['eligible_contracts']} eligible contracts, "
-              f"{diagnostics['missing_forward']} missing exact-expiry futures, "
+              f"{diagnostics['missing_forward']} without a same-expiry future or parity forward, "
               f"{diagnostics['invalid_premium']} invalid premiums, "
               f"{diagnostics['solver_failures']} solver failures.")
         if diagnostics['solver_unavailable']:
             print('  [options] Install vollib to estimate missing IV; reported IV can be used directly.')
         return None
+    # Next monthly expiries, plus the next expiries of any kind when weeklies are listed
+    expiries = option_overlay.select_report_expiries(points)
+    points = points[points['Expiry'].isin(expiries)].reset_index(drop=True)
+    if points.empty:
+        print('  [options] No upcoming expiries with valid IV points.')
+        return None
     points = option_overlay.attach_realized_benchmarks(
         points, history, lambda available, tenor: get_volatility_estimator(available, estimator, tenor))
-    print(f"  [options] {len(points)} selected points across {points['Expiry'].nunique()} expiries and "
+    kinds = points.drop_duplicates('Expiry')['Expiry type'].value_counts()
+    print(f"  [options] {len(points)} selected points across {len(expiries)} upcoming expiries "
+          f"({kinds.get('Monthly', 0)} monthly, {kinds.get('Weekly', 0)} weekly) and "
           f"{points['Date'].nunique()} dates; {diagnostics['reported_iv']} reported IV, "
-          f"{diagnostics['estimated_iv']} Black-76 estimates. Rate {rate:.2%}, ACT/365.")
+          f"{diagnostics['estimated_iv']} Black-76 estimates ({diagnostics['parity_iv']} via put-call "
+          f"parity). Rate {rate:.2%}, ACT/365.")
     return {'points': points, 'diagnostics': diagnostics, 'as_of': dates[-1],
             'estimator': estimator, 'top_count': option_overlay.OPTION_TOP_COUNT,
             'outlier_count': outlier_count, 'min_contracts': min_contracts, 'rate': rate,
-            'reported_iv_unit': reported_iv_unit}
+            'reported_iv_unit': reported_iv_unit, 'expiries': expiries}
 
 
 def get_volatility_estimator(price_data, estimator=DEFAULT_ESTIMATOR,
@@ -2483,6 +2588,39 @@ def _volatility_formatter(profile):
     return lambda x: f"{x * 100:.0f}%"
 
 
+def _percentile_rank(series, value):
+    """Share of readings at or below `value`, in percent."""
+    series = pd.Series(series).dropna()
+    return float((series <= value).mean() * 100) if len(series) else np.nan
+
+
+def _ordinal(number):
+    """39 -> '39th', 41 -> '41st', 12 -> '12th'."""
+    number = int(round(number))
+    suffix = 'th' if 10 <= number % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(number % 10, 'th')
+    return f'{number}{suffix}'
+
+
+def _volatility_reading(percentile):
+    """Plain-English band for the latest reading's percentile rank."""
+    if percentile >= 80:
+        return 'Elevated - rich vs its own history'
+    if percentile <= 20:
+        return 'Depressed - cheap vs its own history'
+    return 'Middle of its historical range'
+
+
+def _cone_option_points(options):
+    """Latest-date option IV drawn on the cone: monthly expiries only, weeklies have their own pages."""
+    if options is None:
+        return pd.DataFrame()
+    points = options['points']
+    latest = points[points['Date'].eq(options['as_of'])]
+    if 'Expiry type' in latest.columns:
+        latest = latest[latest['Expiry type'].eq('Monthly')]
+    return latest
+
+
 def plot_volatility(profile, ticker, pdf_pages=None):
     """Render the volatility page: cone, box, rolling series and distribution."""
     cone = profile['cone']
@@ -2523,7 +2661,7 @@ def plot_volatility(profile, ticker, pdf_pages=None):
         ax_cone.legend(fontsize=13)
         ax_cone.set_title('Volatility Cone', fontsize=20, fontweight='bold', pad=8)
         if options is not None:
-            latest = options['points'][options['points']['Date'].eq(options['as_of'])]
+            latest = _cone_option_points(options)
             if not latest.empty:
                 option_overlay.plot_option_markers(ax_cone, latest, 'Tenor sessions', fontsize=9)
                 ax_cone.set_xlabel('Lookback / expiry tenor (weekday sessions)', fontsize=13)
@@ -2587,17 +2725,12 @@ def plot_volatility(profile, ticker, pdf_pages=None):
         ax_table = figure.add_axes((0.53, 0.06, 0.42, 0.17))
         ax_table.axis('off')
         latest = rolling.iloc[-1]
-        percentile = float((rolling <= latest).mean() * 100)
-        if percentile >= 80:
-            reading = 'Elevated - rich vs its own history'
-        elif percentile <= 20:
-            reading = 'Depressed - cheap vs its own history'
-        else:
-            reading = 'Middle of its historical range'
+        percentile = _percentile_rank(rolling, latest)
+        reading = _volatility_reading(percentile)
         rows = [
             ['Estimator', estimator],
             [f'Latest ({profile["rolling_window"]}d)', label(latest)],
-            ['Percentile rank', f"{percentile:.0f}th - {reading}"],
+            ['Percentile rank', f"{_ordinal(percentile)} - {reading}"],
             ['Median', label(rolling.median())],
             ['Min / Max', f"{label(rolling.min())}  /  {label(rolling.max())}"],
             ['Observations', f"{len(rolling):,}"],
@@ -2614,16 +2747,171 @@ def plot_volatility(profile, ticker, pdf_pages=None):
                 cell.set_text_props(fontweight='bold')
         ax_table.set_title('Summary', fontsize=20, fontweight='bold', pad=8)
 
+    notes = []
     if options is not None:
-        figure.text(0.05, 0.017,
-                    f"Option IV: CE green, PE red; (strike, expiry) labels; outlined smile-MAD outliers. "
-                    f"Black-76 estimates use {options['rate']:.2%} ACT/365; realized volatility uses 252/year. "
-                    'Date-series pages follow by expiry.', fontsize=11, color='#555555')
+        notes.append("Option IV: CE green, PE red; (strike, expiry) labels; outlined smile-MAD outliers. "
+                     f"Black-76 estimates use {options['rate']:.2%} ACT/365; realized volatility uses 252/year. "
+                     'The cone shows monthly expiries.')
+    if 'volatility_guide' in REPORT_SECTIONS:
+        notes.append('Next page: how to read each graph.')
+    if options is not None:
+        notes.append('Per-expiry option IV pages follow.')
+    if notes:
+        figure.text(0.05, 0.017, ' '.join(notes), fontsize=11, color='#555555')
     if pdf_pages:
         pdf_pages.savefig(figure)
         plt.close(figure)
     else:
         plt.show()
+
+
+def _volatility_guide_blocks(profile, ticker):
+    """(title, [(label, text), ...]) for each graph drawn on the volatility page."""
+    has = lambda name: name in VOLATILITY_PANELS
+    cone, rolling = profile['cone'], profile['rolling']
+    label = _volatility_formatter(profile)
+    estimator, moment = profile['estimator'], profile['is_moment']
+    noun = estimator if moment else 'volatility'
+    lower, upper = (round(q * 100) for q in profile['quantiles'])
+    windows, window = cone['windows'], profile['rolling_window']
+    blocks = []
+
+    if has('cone'):
+        focus = window if window in windows else windows[-1]
+        i = windows.index(focus)
+        today = cone['realized'][i]
+        if today > cone['top_q'][i]:
+            place = f'above the {upper}th percentile, so high for that window'
+        elif today < cone['bottom_q'][i]:
+            place = f'below the {lower}th percentile, so low for that window'
+        else:
+            place = f'between the {lower}th and {upper}th percentiles, so normal'
+        example = (f"{focus}-day: min {label(cone['min'][i])}, median {label(cone['median'][i])}, "
+                   f"max {label(cone['max'][i])}; today {label(today)} sits {place}.")
+        if not moment and len(windows) > 1:
+            short, long = cone['realized'][0], cone['realized'][-1]
+            example += (f" {windows[0]}-day {label(short)} vs {windows[-1]}-day {label(long)}: recent "
+                        f"moves are {'larger' if short > long else 'smaller'} than the longer-run pace.")
+        blocks.append(('Volatility Cone', [
+            ('Shows', f'The range of {estimator} {noun} for each look-back window ({windows[0]} to '
+                      f'{windows[-1]} days): max, {upper}th percentile, median, mean, {lower}th '
+                      'percentile and min over the whole history. Red stars are today.'),
+            ('Read', 'Short windows swing far more than long ones, so the cone narrows to the right. '
+                     'A star near the top of the cone is high for that window, near the bottom low.'),
+            ('Here', example)]))
+
+    if has('box'):
+        ranks = ', '.join(f'{w}d {_ordinal(_percentile_rank(series, series.iloc[-1]))}'
+                          for w, series in zip(windows, cone['series']))
+        blocks.append(('Distribution by window', [
+            ('Shows', "Each window's full history as a box plot: the box spans the 25th to 75th "
+                      "percentile, the notch marks the median, whiskers reach 1.5 box-heights and '+' "
+                      'marks extreme readings. Red stars are today.'),
+            ('Read', f"Many '+' marks above a box mean {noun} arrives in bursts. A star outside its "
+                     'box is unusual for that window.'),
+            ('Here', f"Today's percentile rank by window: {ranks}.")]))
+
+    if has('rolling') and not rolling.empty:
+        latest = rolling.iloc[-1]
+        prior = rolling.iloc[-1 - window] if len(rolling) > window else rolling.iloc[0]
+        peak_at = rolling.idxmax()
+        when = f' in {peak_at:%b %Y}' if isinstance(peak_at, (pd.Timestamp, datetime.date)) else ''
+        direction = 'up' if latest > prior else 'down' if latest < prior else 'unchanged'
+        blocks.append((f'Rolling {estimator} ({window}-day window)', [
+            ('Shows', f'{window}-day {noun} through time (red), with the {upper}th percentile, median '
+                      f'and {lower}th percentile of its last {window} readings (blue, black, green).'),
+            ('Read', f'Red above blue: {noun} is rising faster than its recent range; red below green: '
+                     'it is calming. Tall spikes mark stress events.'),
+            ('Here', f'Peak {label(rolling.max())}{when}; today {label(latest)}, {direction} from '
+                     f'{label(prior)} {window} sessions ago.')]))
+
+    if has('histogram') and not rolling.empty:
+        low, high = rolling.quantile([0.10, 0.90])
+        spread = rolling.std()
+        tail = float((rolling > rolling.mean() + 2 * spread).mean() * 100) if spread > 0 else 0.0
+        blocks.append(('Distribution of estimator values', [
+            ('Shows', f'How often each {window}-day level has occurred (bars), a normal curve fitted '
+                      "to them (dashed green) and today's level (red line)."),
+            ('Read', 'Bars stretching right of the curve mean spikes come more often than a normal '
+                     'model predicts, so plan for them.'),
+            ('Here', f'80% of readings lie between {label(low)} and {label(high)}; {tail:.1f}% sit more '
+                     'than 2 SD above the mean, against 2.3% for a normal curve. Today '
+                     f'{label(rolling.iloc[-1])}, median {label(rolling.median())}.')]))
+
+    if has('summary') and not rolling.empty:
+        percentile = _percentile_rank(rolling, rolling.iloc[-1])
+        reading = _volatility_reading(percentile).lower()
+        if moment:
+            reading = reading.split(' - ')[0]  # rich/cheap describes option pricing, not moments
+        blocks.append(('Summary', [
+            ('Shows', "Today's value, its percentile rank in its own history, the median, the "
+                      'extremes and the number of readings.'),
+            ('Read', 'A rank of 80th or higher is elevated and 20th or lower depressed'
+                     + ('; options then tend to look rich or cheap against history.' if not moment
+                        else '; anything in between is normal.')),
+            ('Here', f'{label(rolling.iloc[-1])} at the {_ordinal(percentile)} percentile of '
+                     f'{len(rolling):,} readings: {reading}.')]))
+
+    cone_points = _cone_option_points(profile.get('option_overlay'))
+    if has('cone') and not cone_points.empty:
+        nearest = cone_points['Expiry'].min()
+        near = cone_points[cone_points['Expiry'].eq(nearest)]
+        sides = {side: near.loc[near['Option type'].eq(side), 'IV'].dropna().median() for side in ('CE', 'PE')}
+        realized = near['RV mean'].dropna().median()
+        benchmark = (f'{label(realized)} realized mean' if np.isfinite(realized)
+                     else 'no realized benchmark yet')
+        blocks.append(('Option IV on the cone', [
+            ('Shows', "Today's option IV, calls green and puts red, placed at each monthly expiry's "
+                      'remaining weekday tenor; outlined dots are smile outliers.'),
+            ('Read', 'IV above the realized lines at the same tenor means options price more movement '
+                     'than history has delivered; below them, less.'),
+            ('Here', f"{nearest:%d %b} expiry, {int(near['Tenor sessions'].iloc[0])} sessions: median "
+                     + ', '.join(f'{side} {label(value)}' for side, value in sides.items()
+                                 if np.isfinite(value))
+                     + f' vs {benchmark}.')]))
+
+    if not moment and not rolling.empty:
+        percentile = _percentile_rank(rolling, rolling.iloc[-1])
+        blocks.append(('Putting it together', [
+            ('Now', f"{ticker}'s {window}-day volatility is {label(rolling.iloc[-1])}, the "
+                    f'{_ordinal(percentile)} percentile: {_volatility_reading(percentile).lower()}.'),
+            ('Why', f'Volatility tends to drift back toward its median ({label(rolling.median())}), '
+                    'so extreme readings rarely last.'),
+            ('Use', 'Before calling option premiums rich or cheap, compare their IV with the cone '
+                    'at the same tenor.')]))
+    return blocks
+
+
+def plot_volatility_guide(profile, ticker, pdf_pages=None):
+    """Page after the volatility profile: what each graph shows, using this report's numbers."""
+    blocks = _volatility_guide_blocks(profile, ticker)
+    if not blocks:
+        return 0
+    figure = plt.figure(figsize=(30, 17))
+    figure.suptitle(f"{ticker}   Volatility Profile - how to read it   |   "
+                    f"{profile['estimator']} estimator", fontsize=32, fontweight='bold', y=0.975)
+    figure.text(0.05, 0.925, "One block per graph on the previous page: what it shows, how to read "
+                "it, and this report's numbers as the example.", fontsize=17, color='#444444')
+    rows = math.ceil(len(blocks) / 2)
+    size, wrap = (20, 82) if rows <= 3 else (17, 96)  # A fourth row needs smaller text
+    top = 0.88
+    row_height = (top - 0.02) / rows
+    for index, (title, items) in enumerate(blocks):
+        left = 0.05 + (index % 2) * 0.475
+        y = top - (index // 2) * row_height
+        figure.text(left, y, title, fontsize=size + 6, fontweight='bold', color='#1f3864', va='top')
+        y -= 0.042
+        for name, text in items:
+            figure.text(left, y, name, fontsize=size, fontweight='bold', color='#555555', va='top')
+            body = figure.text(left + 0.055, y, textwrap.fill(text, wrap), fontsize=size,
+                               va='top', linespacing=1.3)
+            y -= body.get_window_extent().height / figure.bbox.height + 0.01
+    if pdf_pages:
+        pdf_pages.savefig(figure)
+        plt.close(figure)
+    else:
+        plt.show()
+    return len(blocks)
 
 
 def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
@@ -2648,7 +2936,7 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
             print(f'  [options unavailable] {type(error).__name__}: {error}')
     windows = list(VOLATILITY_WINDOWS)
     if options is not None:
-        latest = options['points'][options['points']['Date'].eq(options['as_of'])]
+        latest = _cone_option_points(options)
         windows = sorted(set(windows) | set(latest.loc[latest['RV count'] > 0, 'Tenor sessions'].astype(int)))
     profile = compute_volatility_profile(price_data, estimator=estimator, windows=windows)
     if profile is None:
@@ -2666,6 +2954,8 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
 
     profile['option_overlay'] = options
     plot_volatility(profile, ticker, pdf_pages=pdf_pages)
+    if 'volatility_guide' in REPORT_SECTIONS:
+        plot_volatility_guide(profile, ticker, pdf_pages=pdf_pages)
     if options is not None:
         option_overlay.plot_option_history(options, ticker, pdf_pages=pdf_pages)
     return profile
@@ -2845,10 +3135,12 @@ def main():
         python Option-OGN.py --trend-distance 20 GLD  # demand 20 bars between pivots
         python Option-OGN.py --trend-prominence 5 GLD # absolute prominence, price units
         python Option-OGN.py --trend-prominence-pct 5 GLD  # auto-scale off 5% of range
-        python Option-OGN.py --pdf                    # all FnO -> charts/FnO_Analysis.pdf
-        python Option-OGN.py --pdf WTI                # -> charts/WTI_Analysis.pdf
-        python Option-OGN.py --pdf WTI US02Y__US10Y   # -> charts/WTI_vs_US02Y__US10Y_Analysis.pdf
-        python Option-OGN.py --pdf output.pdf         # custom output file
+        python Option-OGN.py --pdf                    # all FnO -> charts/FnO_Analysis_<stamp>.pdf
+        python Option-OGN.py --pdf WTI                # -> charts/WTI_Analysis_<stamp>.pdf
+        python Option-OGN.py --pdf WTI US02Y__US10Y   # -> charts/WTI_vs_US02Y__US10Y_Analysis_<stamp>.pdf
+        python Option-OGN.py --pdf output.pdf         # custom output file -> output_<stamp>.pdf
+
+    <stamp> is the run time as YYYYMMDD_HHMMSS, so reruns never overwrite a report.
     """
     args = sys.argv[1:]
     use_pdf = '--pdf' in args
