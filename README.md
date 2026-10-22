@@ -193,8 +193,11 @@ only when complete, so an interrupted run, or a file briefly locked by OneDrive 
 scanner, never leaves a truncated file behind.
 
 If several raw files hold the same day (for example a sync-conflict copy such as
-`cm_20240315 (1).parquet`), the merge names them in its log and keeps one copy per symbol
-and day: the UDiFF copy where the layouts differ, otherwise the original file.
+`cm_20240315 (1).parquet` or `cm_20240315-DESKTOP-ABC.parquet`), the merge reports them in
+its log and keeps one file's rows per symbol and day: the UDiFF copy where the layouts
+differ, otherwise the original file. "Day" here is the date in the file name, so rows from
+two different days' files are never compared (a short-sale report lists trades dated a week
+earlier). Copies are never deleted or renamed; a copy whose rows were not used stays in `Raw`.
 
 ### Report layouts
 

@@ -2170,27 +2170,32 @@ class NSEMarketDataDownloader:
 
     @staticmethod
     def _raw_day(name: str):
-        """(day, is_extra_copy) of a raw file name; other names count as their own copy."""
+        """(day, is_extra_copy) of a raw file name; any other name is a day of its own."""
         match = RAW_DAY_FILE.match(name)
-        return (match.group('day'), bool(match.group('copy'))) if match else (name, True)
+        return (match.group('day'), bool(match.group('copy'))) if match else (name, False)
 
     @staticmethod
-    def _one_copy_per_day(df: pd.DataFrame) -> pd.DataFrame:
-        """Keeps one raw file's rows per day when several copies of a day merge together.
+    def _one_copy_per_day(df: pd.DataFrame, file_day: np.ndarray, file_is_copy: np.ndarray) -> pd.DataFrame:
+        """Keeps one raw file's rows per raw day when several copies of a day merge together.
 
-        Copies of a day (sync conflicts) would otherwise be stored twice. The rows
-        come from the original file name when it has any, otherwise from the last
-        copy. The legacy/UDiFF rule runs first, so a UDiFF copy still replaces a
-        legacy original.
+        Copies of a day (sync conflicts) would otherwise be stored twice. Rows are
+        grouped by the day in their file's name, never by their Date column: a
+        short-sale report lists trades dated a week earlier, so two different
+        reports can share a Date and both must be kept. `file_day` and
+        `file_is_copy` map each file's position in the batch (`__raw_file`) to its
+        day and to whether its name marks a copy. The rows come from the original
+        file name when it has any, otherwise from the last copy. The legacy/UDiFF
+        rule runs first, so a UDiFF copy still replaces a legacy original.
         """
         if '__raw_file' not in df.columns:
             return df
-        days = df.groupby('Date', dropna=False)
-        sources = days['__raw_file'].transform('nunique')
-        preference = df['__copy'] * 1_000_000 - df['__raw_file']
-        best = preference.groupby(df['Date'], dropna=False).transform('min')
+        rank = df['__raw_file'].to_numpy()
+        day = file_day[rank]
+        sources = pd.Series(rank).groupby(day).transform('nunique').to_numpy()
+        preference = file_is_copy[rank] * len(file_day) - rank.astype(np.int64)
+        best = pd.Series(preference).groupby(day).transform('min').to_numpy()
         keep = (sources <= 1) | (preference == best)
-        return df.loc[keep].drop(columns=['__raw_file', '__copy'])
+        return df.loc[keep].drop(columns='__raw_file')
 
     def merge_raw_to_processed(self, raw_dir: Path, raw_prefix: str, target_dir: Path, label: str, group_col: str = 'Symbol'):
         """Merges raw day-parquet files from disk into per-symbol processed files.
@@ -2318,6 +2323,9 @@ class NSEMarketDataDownloader:
             batch_days = [self._raw_day(f.name)[0] for f in mega_files]
             tag_sources = len(set(batch_days)) < len(batch_days)
             file_rank = {f.name: rank for rank, f in enumerate(mega_files)}
+            day_ids = {day: i for i, day in enumerate(dict.fromkeys(batch_days))}
+            file_day = np.array([day_ids[day] for day in batch_days])
+            file_is_copy = np.array([self._raw_day(f.name)[1] for f in mega_files])
 
             try:
                 # --- Phase 1: Read raw files in chunks with parallel I/O ---
@@ -2328,8 +2336,7 @@ class NSEMarketDataDownloader:
                     try:
                         frame = self._normalise_raw_frame(pd.read_parquet(f, engine='pyarrow'), raw_prefix)
                         if tag_sources:
-                            frame['__raw_file'] = file_rank[f.name]
-                            frame['__copy'] = int(self._raw_day(f.name)[1])
+                            frame['__raw_file'] = np.int16(file_rank[f.name])
                         return frame
                     except Exception as e:
                         return e
@@ -2406,7 +2413,7 @@ class NSEMarketDataDownloader:
                     merged = self._restore_date_columns(merged)
                     # Two copies of one F&O day (e.g. a sync-conflict file) may differ in layout.
                     merged = self._drop_superseded_legacy_rows(merged)
-                    merged = self._one_copy_per_day(merged)
+                    merged = self._one_copy_per_day(merged, file_day, file_is_copy)
                     if raw_prefix == 'wdm':
                         merged = self._drop_blank_columns(merged)
                     for col in merged.columns:
@@ -3049,7 +3056,9 @@ class NSEMarketDataDownloader:
         repairs = [
             ('rebuild-collapsed-rows', self._rebuild_collapsed_categories),
             ('redownload-incomplete-indices', self._redownload_incomplete_indices),
-            ('rebuild-normalised-reports', self._rebuild_normalised_reports),
+            # Replaces 'rebuild-normalised-reports', whose copy rule could drop short-sale
+            # rows when a sync-conflict copy was present; stores that ran it rebuild again.
+            ('rebuild-report-layouts', self._rebuild_normalised_reports),
         ]
         for name, repair in repairs:
             if name in applied:

@@ -547,6 +547,21 @@ class ReportLayoutTests(unittest.TestCase):
                 rows = len(day_frame(DAY(2024, 1, 2)))
                 self.assertEqual(result.groupby('Date').size().tolist(), [rows, rows])
 
+    def test_copy_rule_never_compares_different_days(self):
+        # A short-sale report lists trades dated a week earlier, so two reports can hold the
+        # same symbol and date. A copy of another day in the same merge must not drop either.
+        def short_sales(date, quantity):
+            return pd.DataFrame({'Security Name': ['YES BANK LIMITED'], 'Symbol': ['YESBANK'],
+                                 'Date': [date], 'Qty Short Sold': [quantity]})
+
+        short_sales(DAY(2016, 6, 7), 100).to_parquet(self.raw / 'ss_20160614.parquet', index=False)
+        short_sales(DAY(2016, 6, 7), 200).to_parquet(self.raw / 'ss_20160615.parquet', index=False)
+        for name in ('ss_20160616.parquet', 'ss_20160616 (1).parquet'):
+            short_sales(DAY(2016, 6, 9), 300).to_parquet(self.raw / name, index=False)
+        self.assertIn('1 raw files are extra copies of a day', self.merge('ss'))
+        result = pd.read_parquet(self.processed / 'YESBANK.parquet')
+        self.assertEqual(sorted(result['Qty Short Sold']), [100, 200, 300])
+
 
 class IndicesCleanerTests(unittest.TestCase):
     @classmethod
@@ -703,7 +718,7 @@ class RepairTests(unittest.TestCase):
     def test_fresh_install_has_nothing_to_repair(self):
         self.assertEqual(self.migrate(), '')
         self.assertEqual(json.loads(self.record.read_text()),
-                         ['rebuild-collapsed-rows', 'rebuild-normalised-reports',
+                         ['rebuild-collapsed-rows', 'rebuild-report-layouts',
                           'redownload-incomplete-indices'])
         self.assertEqual([path for path in self.root.rglob('*') if path.is_file()], [self.record])
 
@@ -758,7 +773,7 @@ class RepairTests(unittest.TestCase):
         with patch.object(Path, 'unlink', locked):
             self.assertIn('resumes on the next run', self.migrate())
         self.assertEqual(json.loads(self.record.read_text()),
-                         ['rebuild-normalised-reports', 'redownload-incomplete-indices'])
+                         ['rebuild-report-layouts', 'redownload-incomplete-indices'])
         self.assertTrue((raw / '.merged_cm.txt').exists())
         self.migrate()
         self.assertFalse((processed / 'PFC.parquet').exists())
@@ -783,7 +798,9 @@ class RepairTests(unittest.TestCase):
         self.assertEqual((processed / 'NIFTY500.parquet').read_bytes(), before)
 
     def test_dated_layouts_are_rebuilt_from_raw(self):
-        self.record.write_text(json.dumps(['rebuild-collapsed-rows', 'redownload-incomplete-indices']))
+        # 'rebuild-normalised-reports' is the earlier id of this repair; stores that ran it rebuild again.
+        self.record.write_text(json.dumps(['rebuild-collapsed-rows', 'rebuild-normalised-reports',
+                                           'redownload-incomplete-indices']))
         stores = {
             'ma': (self.module.MARKETACTIVITY_RAW, self.module.MARKETACTIVITY_PROCESSED,
                    dated_market_activity(DAY(2024, 1, 2)), 'MARKET.parquet'),
