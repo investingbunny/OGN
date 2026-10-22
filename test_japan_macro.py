@@ -1,5 +1,6 @@
 """Offline checks for Japan macro sources, calculations and report integration."""
 
+import contextlib
 import datetime
 import io
 import importlib.util
@@ -265,7 +266,7 @@ class JapanReportTests(unittest.TestCase):
         cls.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.module)
 
-    def test_report_renders_all_tickers_and_explicit_gaps(self):
+    def test_report_keeps_pages_with_data_and_drops_empty_ones(self):
         module = self.module
         definition = japan.JAPAN_SERIES['JP10Y']
         today = pd.Timestamp.today().normalize()
@@ -275,27 +276,52 @@ class JapanReportTests(unittest.TestCase):
         document = Mock()
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(module, 'MACRO_PROCESSED', Path(directory)), \
-            patch.object(japan.requests, 'get', side_effect=AssertionError('Charts must not download')):
+            patch.object(japan.requests, 'get', side_effect=AssertionError('Charts must not download')), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
             frame.to_parquet(Path(directory) / 'JP10Y.parquet', index=False)
             result = module.plot_japan_macro(pdf_pages=document)
         self.assertEqual(result['JP10Y'], 'plotted')
         self.assertEqual(result['JPPMI'], 'unavailable')
         self.assertEqual(result['JPCARRY'], 'unavailable')
-        self.assertEqual(document.savefig.call_count, len(japan.JAPAN_REPORT_GROUPS))
+        self.assertEqual(set(result), set(japan.JAPAN_SERIES))
+        # Only the page holding JP10Y has data; its other series still show why they are missing.
+        self.assertEqual(document.savefig.call_count, 1)
         text = '\n'.join(label.get_text() for call in document.savefig.call_args_list
                          for label in call.args[0].texts)
-        for symbol in japan.JAPAN_SERIES:
+        kept, *dropped = japan.JAPAN_REPORT_GROUPS
+        for symbol in kept[1]:
             self.assertIn(symbol + ' | ', text)
+        for _, symbols in dropped:
+            self.assertTrue(all(symbol + ' | ' not in text for symbol in symbols))
+            self.assertIn(', '.join(symbols), output.getvalue())
+        self.assertIn('Past 1 year', text)
+        self.assertIn('Japan 1/1', text)
         self.assertIn('Observed ', text)
         self.assertIn('not publication timestamps', text)
         self.assertFalse(module.plt.get_fignums())
+
+    def test_report_with_no_data_in_range_has_no_pages(self):
+        module = self.module
+        definition = japan.JAPAN_SERIES['JP10Y']
+        stale = pd.DataFrame({'Date': pd.to_datetime(['2020-01-01', '2020-02-01']), 'Value': [1.0, 1.1],
+                              'Unit': definition['unit'], 'Series': definition['series']})
+        document = Mock()
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(module, 'MACRO_PROCESSED', Path(directory)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            stale.to_parquet(Path(directory) / 'JP10Y.parquet', index=False)
+            result = module.plot_japan_macro(pdf_pages=document)
+            document.savefig.assert_not_called()
+            self.assertEqual(set(result.values()), {'unavailable'})
+            module.plot_japan_macro(pdf_pages=document, years=10)
+        self.assertEqual(document.savefig.call_count, 1)
 
     def test_daily_panels_skip_non_trading_days_and_monthly_keep_calendar(self):
         from matplotlib.dates import date2num
         module = self.module
         today = pd.Timestamp.today().normalize()
         daily_dates = pd.bdate_range(end=today - pd.Timedelta(days=3), periods=60)
-        monthly_dates = pd.date_range(end=today - pd.Timedelta(days=40), periods=24, freq='MS')
+        monthly_dates = pd.date_range(end=today - pd.Timedelta(days=40), periods=10, freq='MS')
         frames = {}
         for symbol, dates in (('JPUSDJPY', daily_dates), ('JP10Y', monthly_dates)):
             definition = japan.JAPAN_SERIES[symbol]
@@ -323,7 +349,7 @@ class JapanReportTests(unittest.TestCase):
                 patch.object(module, 'plot_japan_macro') as render, \
                 tempfile.TemporaryDirectory() as directory:
             module.FnOAnalysis(scrip_list=['GLD', 'SLV'], pdf_path=str(Path(directory) / 'report.pdf'))
-            render.assert_called_once_with(pdf_pages=document.return_value)
+            render.assert_called_once_with(pdf_pages=document.return_value, years=module.REPORT_YEARS)
             document.return_value.close.assert_called_once()
             render.reset_mock()
             with patch.object(module, 'REPORT_SECTIONS', []):

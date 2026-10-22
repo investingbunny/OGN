@@ -1,8 +1,10 @@
 """Offline regressions for market valuation sources and separate Indian CAPE."""
 
 import unittest
+import contextlib
 import datetime
 import importlib.util
+import io
 import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -282,11 +284,23 @@ class ValuationReportTests(unittest.TestCase):
         cls.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.module)
 
+    def monthly(self, registry, symbol, periods=8):
+        definition = registry[symbol]
+        today = pd.Timestamp.today().normalize()
+        dates = pd.date_range(end=today - pd.Timedelta(days=20), periods=periods, freq='MS')
+        return pd.DataFrame({'Date': dates, 'Value': np.linspace(30.0, 31.6, periods),
+                             'Unit': definition['unit'], 'Series': definition['series']})
+
     def test_indian_and_us_pages_keep_tickers_separate(self):
         module = self.module
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(module, 'MACRO_PROCESSED', Path(directory)), \
-                patch.object(schiller_macro.requests, 'get', side_effect=AssertionError('Charts must be offline')):
+                patch.object(schiller_macro.requests, 'get', side_effect=AssertionError('Charts must be offline')), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.monthly(schiller_macro.SCHILLER_SERIES, 'SCHCAPE').to_parquet(
+                Path(directory) / 'SCHCAPE.parquet', index=False)
+            self.monthly(nifty_macro.NIFTY_SERIES, 'NIFTYPE').to_parquet(
+                Path(directory) / 'NIFTYPE.parquet', index=False)
             us_document = Mock()
             india_document = Mock()
             us = module.plot_schiller_macro(pdf_pages=us_document)
@@ -294,8 +308,9 @@ class ValuationReportTests(unittest.TestCase):
         self.assertEqual(set(us), set(schiller_macro.SCHILLER_SERIES))
         self.assertEqual(set(india), set(nifty_macro.NIFTY_SERIES))
         self.assertTrue(set(us).isdisjoint(india))
-        self.assertEqual(us_document.savefig.call_count, 2)
-        self.assertEqual(india_document.savefig.call_count, 2)
+        # Each group's second page has no data in the report range and is left out.
+        self.assertEqual(us_document.savefig.call_count, 1)
+        self.assertEqual(india_document.savefig.call_count, 1)
         us_text = '\n'.join(text.get_text() for call in us_document.savefig.call_args_list
                             for text in call.args[0].texts)
         india_text = '\n'.join(text.get_text() for call in india_document.savefig.call_args_list
@@ -307,6 +322,36 @@ class ValuationReportTests(unittest.TestCase):
         self.assertIn('US Schiller', us_text)
         self.assertFalse(module.plt.get_fignums())
 
+    def test_us_schiller_axes_have_a_light_grid_and_finer_labels(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(module, 'MACRO_PROCESSED', Path(directory)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.monthly(schiller_macro.SCHILLER_SERIES, 'SCHCAPE', periods=11).to_parquet(
+                Path(directory) / 'SCHCAPE.parquet', index=False)
+            self.monthly(nifty_macro.NIFTY_SERIES, 'NIFTYPE', periods=11).to_parquet(
+                Path(directory) / 'NIFTYPE.parquet', index=False)
+            us_document, india_document = Mock(), Mock()
+            module.plot_schiller_macro(pdf_pages=us_document)
+            module.plot_india_schiller(pdf_pages=india_document)
+        us, india = (next(axes for axes in document.savefig.call_args.args[0].axes if axes.get_lines())
+                     for document in (us_document, india_document))
+        for axes in (us, india):
+            axes.figure.canvas.draw()
+        for gridlines in (us.xaxis.get_gridlines(), us.yaxis.get_gridlines()):
+            self.assertTrue(gridlines and all(line.get_visible() for line in gridlines))
+            self.assertEqual(gridlines[0].get_color(), '#c8c8c8')
+        self.assertFalse(any(line.get_visible() for line in india.xaxis.get_gridlines()))
+        us_x = [label.get_text() for label in us.get_xticklabels()]
+        us_y = [label.get_text() for label in us.get_yticklabels()]
+        india_x = [label.get_text() for label in india.get_xticklabels()]
+        india_y = [label.get_text() for label in india.get_yticklabels()]
+        self.assertGreaterEqual(len(us_x), 10)
+        self.assertGreater(len(us_x), len(india_x))
+        self.assertGreater(len(us_y), len(india_y))
+        self.assertEqual(len(set(us_y)), len(us_y))
+        self.assertTrue(all('.' in label for label in us_y), us_y)
+
     def test_new_appendices_are_once_per_report_and_can_be_disabled(self):
         module = self.module
         with patch.object(module, 'REPORT_SECTIONS', ['schiller_macro', 'india_schiller']), \
@@ -316,8 +361,8 @@ class ValuationReportTests(unittest.TestCase):
                 patch.object(module, 'plot_india_schiller') as india, \
                 tempfile.TemporaryDirectory() as directory:
             module.FnOAnalysis(scrip_list=['WTI', 'GLD'], pdf_path=str(Path(directory) / 'report.pdf'))
-            us.assert_called_once_with(pdf_pages=document.return_value)
-            india.assert_called_once_with(pdf_pages=document.return_value)
+            us.assert_called_once_with(pdf_pages=document.return_value, years=module.REPORT_YEARS)
+            india.assert_called_once_with(pdf_pages=document.return_value, years=module.REPORT_YEARS)
             us.reset_mock()
             india.reset_mock()
             with patch.object(module, 'REPORT_SECTIONS', []):

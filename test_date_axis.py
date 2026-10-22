@@ -139,6 +139,7 @@ class ChartTests(unittest.TestCase):
         for mode in string_modes():
             with self.subTest(mode=mode), mode(), \
                     patch.object(self.module, 'REPORT_SECTIONS', ['technical']), \
+                    patch.object(self.module, 'report_start', return_value=pd.Timestamp('2026-08-03')), \
                     patch.object(self.module, 'load_analysis_frame', return_value=(prices.copy(), 'test')), \
                     patch.object(self.module, 'GetMaxPain', return_value=option_day), \
                     patch.object(self.module, 'PdfPages') as document, \
@@ -147,7 +148,7 @@ class ChartTests(unittest.TestCase):
                 figure = document.return_value.savefig.call_args.args[0]
                 figure.canvas.draw()
                 ax_macd = figure.axes[0]
-                expected = np.arange(25, dtype=float)
+                expected = np.arange(23, dtype=float)   # 3 Aug - 4 Sep less two holidays
                 centres = sorted(bar.get_x() + bar.get_width() / 2 for bar in ax_macd.patches)
                 np.testing.assert_allclose(centres, expected)
                 for axes in figure.axes:
@@ -157,7 +158,7 @@ class ChartTests(unittest.TestCase):
                 labels = [label.get_text() for label in ax_macd.get_xticklabels()]
                 self.assertEqual(labels[0], '03 Aug\n2026')
                 self.assertTrue(all(label.endswith(('Aug', 'Sep')) for label in labels[1:]), labels)
-                self.assertEqual(ax_macd.format_xdata(24), f'{last_price_day:%Y-%m-%d}')
+                self.assertEqual(ax_macd.format_xdata(22), f'{last_price_day:%Y-%m-%d}')
                 plt.close(figure)
 
     def test_rolling_volatility_panel_has_no_gaps(self):

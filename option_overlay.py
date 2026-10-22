@@ -237,8 +237,11 @@ def option_point_label(row):
     return f'({strike}, {expiry.day} {expiry:%b})'
 
 
-def attach_realized_benchmarks(points, price_data, estimator_function):
-    """Compare IV to same-tenor realized history available on the observation date."""
+def attach_realized_benchmarks(points, price_data, estimator_function, start=None):
+    """Compare IV to same-tenor realized history available on the observation date.
+
+    With `start`, only realized values from that date on enter the benchmark.
+    """
     result = points.copy()
     result['RV mean'] = np.nan
     result['RV std'] = np.nan
@@ -261,6 +264,8 @@ def attach_realized_benchmarks(points, price_data, estimator_function):
         values = estimator_function(available, int(tenor))
         values = pd.to_numeric(values, errors='coerce')
         values = values[np.isfinite(values) & (values >= 0)]
+        if start is not None:
+            values = values[pd.DatetimeIndex(values.index) >= pd.Timestamp(start)]
         if len(values) < OPTION_MIN_RV_OBSERVATIONS:
             continue
         result.loc[group.index, ['RV mean', 'RV std', 'RV count']] = [
@@ -354,10 +359,12 @@ def plot_option_history(overlay, ticker, pdf_pages=None):
         page_span = dates.x(dates.dates)[[0, -1]] + np.array([-0.5, 0.5])
         figure.suptitle(f'{ticker} | Option IV | Expiry {expiry:%d %b %Y}',
                         fontsize=29, fontweight='bold', y=0.975)
+        benchmark_start = overlay.get('benchmark_start')
+        since = f" since {benchmark_start:%d %b %Y}" if benchmark_start is not None else ""
         figure.text(0.05, 0.934,
                     f"Top {overlay['top_count']} CE and PE per expiry/date by contracts | "
                     f"{expiry_points['Date'].nunique()} trading dates | "
-                    f"{overlay['estimator']} historical mean at matching weekday tenor",
+                    f"{overlay['estimator']} historical mean at matching weekday tenor{since}",
                     fontsize=14, color='#444444')
         for side, left in [('CE', 0.06), ('PE', 0.55)]:
             axes = figure.add_axes((left, 0.46, 0.40, 0.42))
