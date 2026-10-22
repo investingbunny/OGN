@@ -14,6 +14,7 @@ End-to-end pipeline for downloading, storing, and analysing NSE (National Stock 
 | [schiller_macro.py](schiller_macro.py) | US-only Schiller valuations: Robert Shiller's CAPE/real-price/earnings workbook and Multpl valuation histories. |
 | [nifty_macro.py](nifty_macro.py) | Separate India Schiller group: NIFTY valuations, calculated Indian-only CAPE, and explicitly unverified IIM/RBI/index-price-sales sources. |
 | [option_overlay.py](option_overlay.py) | Volume-ranked CE/PE implied-volatility overlays, matched-futures Black-76 IV estimates, and robust same-expiry smile diagnostics. |
+| [date_axis.py](date_axis.py) | Shared chart x-axis: daily data is drawn without gaps for weekends and holidays, with date ticks and labels; slower series keep calendar spacing. |
 | **models.py** + `GarmanKlass.py`, `HodgesTompkins.py`, `Kurtosis.py`, `Parkinson.py`, `Raw.py`, `RogersSatchell.py`, `Skew.py`, `YangZhang.py` | Volatility estimators. One module per model, each exposing `get_estimator(price_data, window, clean)`. |
 
 ---
@@ -97,6 +98,14 @@ The report is assembled in this order:
 
 See [Volatility Analysis](#volatility-analysis) and [Statistical Comparison](#statistical-comparison)
 below.
+
+**Date axes skip days without data.** Charts of daily data — the technical panels, the
+trendline page, the rolling volatility panel, option IV dates, daily comparisons and daily
+macro series — place consecutive observations next to each other, so weekends and exchange
+holidays leave no gap. Ticks fall on the first trading day of a week, month, quarter or year,
+and in interactive mode the cursor readout shows the date. Weekly, monthly and quarterly
+series keep calendar spacing: they have no weekend gaps, and a missing period stays visible.
+The shared logic is in [date_axis.py](date_axis.py).
 
 ### 5. Use as a library
 

@@ -49,7 +49,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.patches
 from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.dates import date2num, AutoDateLocator, ConciseDateFormatter
 from matplotlib.ticker import FuncFormatter
 import mplfinance as mpf
 import pandas as pd
@@ -63,6 +62,7 @@ import japan_macro
 import nifty_macro
 import schiller_macro
 import option_overlay
+from date_axis import DateAxis
 
 # Optional: stocktrends for Renko (pip install stocktrends)
 try:
@@ -748,10 +748,11 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     data.index = pd.to_datetime(data["Date"])
     data.drop("Date", axis=1, inplace=True)
 
-    # ── Build OHLC list for candlestick (date as matplotlib number) ───
-    ohlc = []
-    for dt, row in data.iterrows():
-        ohlc.append([date2num(dt), row['Open'], row['High'], row['Low'], row['Close']])
+    # Price rows on a trading-day axis: weekends, holidays and dates merged in
+    # without a price (option-only days) take no space on the chart.
+    chart = data[data['Close'].notna()]
+    dates = DateAxis(chart.index)
+    x = dates.x(chart.index)
 
     # ── Figure 2: main analysis panels (7-panel layout) ────────────
     fig2 = plt.figure(figsize=(54, 30))  # Increased from (48, 27)
@@ -776,12 +777,12 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     ax_table = fig2.add_axes((0.74, 0.06, 0.21, 0.42))
     ax_table.axis('off')
 
-    ax_macd.xaxis_date()  # Format x-axis as dates
+    dates.format(ax_macd, max_ticks=10)  # shared by every panel above
 
     for col in ["5DMA-E", "9DMA-E", "13DMA-E", "21DMA-E", "48DMA-E"]:
-        if col in data.columns:
-            ax_ema.plot(data.index, data[col], label=col)
-    ax_ema.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
+        if col in chart.columns:
+            ax_ema.plot(x, chart[col], label=col)
+    ax_ema.plot(x, chart['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
     ax_ema.legend(fontsize=20)
     ax_ema.grid(True)
     ax_ema.tick_params(labelsize=20)
@@ -789,18 +790,18 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
 
     # ── SMA panel ─────────────────────────────────────────────────────
     for col in ["20DMA", "50DMA", "200DMA"]:
-        if col in data.columns:
-            ax_sma.plot(data.index, data[col], label=col)
-    ax_sma.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
+        if col in chart.columns:
+            ax_sma.plot(x, chart[col], label=col)
+    ax_sma.plot(x, chart['Close'], color='black', linestyle=':', linewidth=2.5, label=f"{ticker} Price", zorder=10)
     ax_sma.legend(fontsize=20)
     ax_sma.grid(True)
     ax_sma.tick_params(labelsize=20)
     ax_sma.set_title('SMA Crossover', fontsize=30, fontweight='bold', pad=8)
 
     # ── MACD panel ────────────────────────────────────────────────────
-    ax_macd.plot(data.index, data["MACD"], label="MACD")
-    ax_macd.bar(data.index, (data["MACD"] - data["Signal"]) * 3, label="hist")
-    ax_macd.plot(data.index, data["Signal"], label="Signal")
+    ax_macd.plot(x, chart["MACD"], label="MACD")
+    ax_macd.bar(x, (chart["MACD"] - chart["Signal"]) * 3, label="hist")
+    ax_macd.plot(x, chart["Signal"], label="Signal")
     ax_macd.legend(fontsize=20)
     ax_macd.grid(True)
     ax_macd.tick_params(labelsize=20)
@@ -811,31 +812,31 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
     ax_rsi.axhline(70, color='grey', linestyle='--', label="overbought")
     ax_rsi.axhline(30, color='grey', linestyle='--', label="oversold")
     ax_rsi.axhline(50, color='grey', linestyle=':')
-    ax_rsi.plot(data.index, data["RSI"], label="RSI", color='lightpink')
-    if 'ADX' in data.columns:
-        ax_rsi.plot(data.index, data["ADX"], label="ADX", color='blue')
-    if 'DIplusN' in data.columns:
-        ax_rsi.plot(data.index, data["DIplusN"], label="DI+", color='green')
-    if 'DIminusN' in data.columns:
-        ax_rsi.plot(data.index, data["DIminusN"], label="DI-", color='red')
+    ax_rsi.plot(x, chart["RSI"], label="RSI", color='lightpink')
+    if 'ADX' in chart.columns:
+        ax_rsi.plot(x, chart["ADX"], label="ADX", color='blue')
+    if 'DIplusN' in chart.columns:
+        ax_rsi.plot(x, chart["DIplusN"], label="DI+", color='green')
+    if 'DIminusN' in chart.columns:
+        ax_rsi.plot(x, chart["DIminusN"], label="DI-", color='red')
     ax_rsi.legend(fontsize=20)
     ax_rsi.grid(True)
     ax_rsi.tick_params(labelsize=20)
     ax_rsi.set_title('RSI & ADX', fontsize=30, fontweight='bold', pad=8)
 
     # ── Bollinger Bands + OBV panel ───────────────────────────────────
-    ax_bba.plot(data.index, data["BB_up"], label="BB_up")
-    ax_bba.plot(data.index, data["BB_dn"], label="BB_dn")
-    ax_bba.plot(data.index, data["MA"], label="MA")
-    ax_bba.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
+    ax_bba.plot(x, chart["BB_up"], label="BB_up")
+    ax_bba.plot(x, chart["BB_dn"], label="BB_dn")
+    ax_bba.plot(x, chart["MA"], label="MA")
+    ax_bba.plot(x, chart['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
     ax_bba.legend(fontsize=20)
     ax_bba.grid(True)
     ax_bba.tick_params(labelsize=20)
     ax_bba.set_title('Bollinger Bands & OBV', fontsize=30, fontweight='bold', pad=8)
 
-    if 'OBV' in data.columns:
+    if 'OBV' in chart.columns:
         ax_obv = ax_bba.twinx()
-        ax_obv.plot(data.index, data["OBV"] / 100000, marker="*", label="OBV")
+        ax_obv.plot(x, chart["OBV"] / 100000, marker="*", label="OBV")
         ax_obv.set_ylabel('OBV')
         ax_obv.tick_params(labelsize=20)
         ax_obv.grid(visible=False)
@@ -864,7 +865,7 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
 
     # Candlestick overlay on Fibonacci panel using mplfinance-compatible OHLC
     # (Using simple line plot since mplfinance add_plot requires different setup)
-    ax_fibret.plot(data.index, data['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
+    ax_fibret.plot(x, chart['Close'], color='black', linestyle=':', linewidth=2.5, label='Close Price', zorder=10)
 
     # ── Renko chart (bottom-left of right column) ─────────────────────
     if not renkodata.empty:
@@ -2082,7 +2083,9 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
                 fontsize=12, color='#555555', va='top')
 
     # --- Raw levels on twin axes (units rarely match) ---
-    ax_raw.plot(aligned.index, aligned[label_a], color='tab:blue', linewidth=1.8,
+    dates = DateAxis(aligned.index)
+    x = dates.x(aligned.index)
+    ax_raw.plot(x, aligned[label_a], color='tab:blue', linewidth=1.8,
                 label=f"{label_a}  ({desc_a})")
     unit_a = results['units'].get(label_a, '')
     unit_b = results['units'].get(label_b, '')
@@ -2091,13 +2094,14 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
     ax_raw.tick_params(axis='y', labelcolor='tab:blue', labelsize=13)
     ax_raw.tick_params(axis='x', labelsize=13)
     ax_raw_twin = ax_raw.twinx()
-    ax_raw_twin.plot(aligned.index, aligned[label_b], color='tab:red', linewidth=1.8,
+    ax_raw_twin.plot(x, aligned[label_b], color='tab:red', linewidth=1.8,
                      label=f"{label_b}  ({desc_b})")
     ax_raw_twin.set_ylabel(f"{label_b} ({unit_b})" if unit_b else label_b,
                            fontsize=14, color='tab:red')
     ax_raw_twin.tick_params(axis='y', labelcolor='tab:red', labelsize=13)
     ax_raw_twin.grid(visible=False)
     ax_raw.grid(True, alpha=0.3)
+    dates.format(ax_raw)
     ax_raw.set_title(
         f"Levels  |  {aligned.index.min():%d-%b-%Y} to {aligned.index.max():%d-%b-%Y}"
         f"  |  {len(aligned):,} aligned observations",
@@ -2110,8 +2114,9 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
     for column, colour in ((label_a, 'tab:blue'), (label_b, 'tab:red')):
         values = aligned[column]
         rebased = values / values.iloc[0] * 100.0 if positive_levels else _comp_zscore(values)
-        ax_norm.plot(aligned.index, rebased, color=colour, linewidth=1.8, label=column)
+        ax_norm.plot(x, rebased, color=colour, linewidth=1.8, label=column)
     ax_norm.axhline(100 if positive_levels else 0, color='grey', linestyle='--', linewidth=1)
+    dates.format(ax_norm)
     ax_norm.legend(fontsize=14)
     ax_norm.grid(True, alpha=0.3)
     ax_norm.tick_params(labelsize=13)
@@ -2124,8 +2129,9 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
     if spread is not None and not spread.empty:
         mean = spread.mean()
         sigma = spread.std()
-        ax_spread.plot(spread.index, spread, color='tab:purple', linewidth=1.5,
+        ax_spread.plot(dates.x(spread.index), spread, color='tab:purple', linewidth=1.5,
                        label='Spread (residual)')
+        dates.format(ax_spread)
         ax_spread.axhline(mean, color='black', linestyle='-', linewidth=1.2, label='mean')
         ax_spread.axhline(mean + 2 * sigma, color='tab:red', linestyle='--',
                           linewidth=1.2, label='+2 sigma')
@@ -2503,14 +2509,17 @@ def plot_volatility(profile, ticker, pdf_pages=None):
     if has('rolling') and not rolling.empty:
         ax_roll = figure.add_axes((0.05, 0.31, 0.90, 0.17))
         w = profile['rolling_window']
-        ax_roll.plot(rolling.index, rolling, color='tab:red', linewidth=1.4,
+        dates = DateAxis(rolling.index)
+        x = dates.x(rolling.index)
+        ax_roll.plot(x, rolling, color='tab:red', linewidth=1.4,
                      label=f"Realized ({w}d)")
-        ax_roll.plot(rolling.index, rolling.rolling(w).quantile(upper),
+        ax_roll.plot(x, rolling.rolling(w).quantile(upper),
                      color='tab:blue', linewidth=1, label=f"{int(upper * 100)}th Prctl")
-        ax_roll.plot(rolling.index, rolling.rolling(w).median(),
+        ax_roll.plot(x, rolling.rolling(w).median(),
                      color='black', linewidth=1, label='Median')
-        ax_roll.plot(rolling.index, rolling.rolling(w).quantile(lower),
+        ax_roll.plot(x, rolling.rolling(w).quantile(lower),
                      color='tab:green', linewidth=1, label=f"{int(lower * 100)}th Prctl")
+        dates.format(ax_roll, max_ticks=12)
         ax_roll.yaxis.set_major_formatter(FuncFormatter(lambda v, _: label(v)))
         ax_roll.grid(True, alpha=0.3)
         ax_roll.tick_params(labelsize=13)
@@ -2690,18 +2699,19 @@ def _plot_macro_group_pages(group_label, registry, report_groups, subtitle, foot
                 summaries[symbol] = 'unavailable'
             else:
                 colour = colours[(page_number - 1) % len(colours)]
+                dates = DateAxis(frame['Date'])
+                x = dates.x(frame['Date'])
                 if symbol == 'JPPOLRATE':
-                    axes.step(frame['Date'], frame['Value'], where='post', color=colour, linewidth=1.6)
+                    axes.step(x, frame['Value'], where='post', color=colour, linewidth=1.6)
                 else:
-                    axes.plot(frame['Date'], frame['Value'], color=colour, linewidth=1.6)
+                    axes.plot(x, frame['Value'], color=colour, linewidth=1.6)
                 latest = frame.iloc[-1]
-                axes.scatter([latest['Date']], [latest['Value']], color=colour, s=30, zorder=3)
+                axes.scatter([x[-1]], [latest['Value']], color=colour, s=30, zorder=3)
                 axes.grid(axis='y', color='#d5dadd', alpha=0.6)
                 axes.spines[['top', 'right']].set_visible(False)
                 axes.spines[['left', 'bottom']].set_color('#bcc3c7')
-                locator = AutoDateLocator(minticks=3, maxticks=6)
-                axes.xaxis.set_major_locator(locator)
-                axes.xaxis.set_major_formatter(ConciseDateFormatter(locator))
+                # Daily series skip non-trading days; slower ones keep calendar spacing.
+                dates.format(axes, max_ticks=6)
                 axes.yaxis.set_major_formatter(FuncFormatter(
                     lambda value, position: f'{value:,.2f}' if abs(value) < 10 else f'{value:,.0f}'))
                 axes.tick_params(labelsize=10)

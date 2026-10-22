@@ -225,6 +225,33 @@ class OptionPlotTests(unittest.TestCase):
                             for cell in figure.axes[2].tables[0].get_celld().values()))
         self.assertFalse(plt.get_fignums())
 
+    def test_history_page_skips_weekends_and_holidays(self):
+        fixture = OptionSelectionTests()
+        dates = pd.to_datetime(['2026-08-28', '2026-08-31', '2026-09-02'])   # Fri, Mon, Wed (Tue holiday)
+        frames = [fixture.chain().assign(**{'Date': date, 'Option type': side})
+                  for date in dates for side in ['CE', 'PE']]
+        selected = overlay.select_option_points(pd.concat(frames, ignore_index=True))
+        selected['IV source'] = 'Reported'
+        selected['RV mean'] = 0.16
+        selected['RV std'] = 0.02
+        selected['IV minus RV'] = selected['IV'] - selected['RV mean']
+        profile = {'points': selected, 'top_count': 5, 'outlier_count': 2,
+                   'rate': 0.065, 'min_contracts': 10, 'estimator': 'YangZhang',
+                   'diagnostics': {'reported_iv': len(selected), 'estimated_iv': 0,
+                                   'missing_forward': 0, 'invalid_premium': 0, 'solver_failures': 0}}
+        document = Mock()
+        overlay.plot_option_history(profile, 'NIFTY', pdf_pages=document)
+        figure = document.savefig.call_args.args[0]
+        figure.canvas.draw()
+        for axes in figure.axes[:2]:
+            realized = next(line for line in axes.get_lines() if line.get_label() == 'Historical realized mean')
+            self.assertEqual(realized.get_xdata().tolist(), [0.0, 1.0, 2.0])
+            markers = np.concatenate([collection.get_offsets()[:, 0] for collection in axes.collections
+                                      if collection.get_label() in ('CE IV', 'PE IV')])
+            self.assertEqual(sorted(set(markers)), [0.0, 1.0, 2.0])
+            self.assertEqual([label.get_text() for label in axes.get_xticklabels()],
+                             ['28 Aug', '31 Aug', '02 Sep'])
+
     def test_dense_five_date_labels_stay_inside_axes_without_overlaps(self):
         import matplotlib.pyplot as plt
         fixture = OptionSelectionTests()

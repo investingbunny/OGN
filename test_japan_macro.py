@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pandas as pd
 
 import japan_macro as japan
@@ -288,6 +289,31 @@ class JapanReportTests(unittest.TestCase):
         self.assertIn('Observed ', text)
         self.assertIn('not publication timestamps', text)
         self.assertFalse(module.plt.get_fignums())
+
+    def test_daily_panels_skip_non_trading_days_and_monthly_keep_calendar(self):
+        from matplotlib.dates import date2num
+        module = self.module
+        today = pd.Timestamp.today().normalize()
+        daily_dates = pd.bdate_range(end=today - pd.Timedelta(days=3), periods=60)
+        monthly_dates = pd.date_range(end=today - pd.Timedelta(days=40), periods=24, freq='MS')
+        frames = {}
+        for symbol, dates in (('JPUSDJPY', daily_dates), ('JP10Y', monthly_dates)):
+            definition = japan.JAPAN_SERIES[symbol]
+            frames[symbol] = pd.DataFrame({'Date': dates, 'Value': np.linspace(1.0, 2.0, len(dates)),
+                                           'Unit': definition['unit'], 'Series': definition['series']})
+        document = Mock()
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(module, 'MACRO_PROCESSED', Path(directory)), \
+                patch.object(japan.requests, 'get', side_effect=AssertionError('Charts must not download')):
+            for symbol, frame in frames.items():
+                frame.to_parquet(Path(directory) / f'{symbol}.parquet', index=False)
+            module.plot_japan_macro(pdf_pages=document)
+        lines = {len(line.get_xdata()): line.get_xdata()
+                 for call in document.savefig.call_args_list
+                 for axes in call.args[0].axes for line in axes.get_lines()
+                 if len(line.get_xdata()) in (len(daily_dates), len(monthly_dates))}
+        np.testing.assert_array_equal(lines[len(daily_dates)], np.arange(len(daily_dates), dtype=float))
+        np.testing.assert_allclose(lines[len(monthly_dates)], date2num(monthly_dates.to_numpy()))
 
     def test_appendix_once_per_pdf_and_section_toggle(self):
         module = self.module

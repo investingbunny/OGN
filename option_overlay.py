@@ -9,6 +9,8 @@ from scipy.stats import median_abs_deviation
 from statsmodels.robust.norms import HuberT
 from statsmodels.robust.robust_linear_model import RLM
 
+from date_axis import DateAxis
+
 try:
     from vollib.black.implied_volatility import implied_volatility
 except ImportError:
@@ -267,15 +269,21 @@ def attach_realized_benchmarks(points, price_data, estimator_function):
     return result
 
 
-def plot_option_markers(axes, points, x_column, fontsize=10):
-    """Draw side-coloured IV dots, outlined anomalies and collision-adjusted labels."""
+def plot_option_markers(axes, points, x_column, fontsize=10, date_axis=None):
+    """Draw side-coloured IV dots, outlined anomalies and collision-adjusted labels.
+
+    With x_column 'Date', a DateAxis places the dates (gap-free for trading
+    days); without one they go on a calendar date axis.
+    """
     from adjustText import adjust_text
     from matplotlib.dates import date2num
 
     if points.empty:
         return []
     frame = points.reset_index(drop=True)
-    if x_column == 'Date':
+    if x_column == 'Date' and date_axis is not None:
+        positions = date_axis.x(frame['Date'])
+    elif x_column == 'Date':
         positions = np.asarray(date2num(pd.to_datetime(frame['Date']).to_numpy()))
         axes.xaxis_date()
     else:
@@ -329,7 +337,6 @@ def plot_option_markers(axes, points, x_column, fontsize=10):
 def plot_option_history(overlay, ticker, pdf_pages=None):
     """One page per expiry keeps changing daily top-volume selections readable."""
     import matplotlib.pyplot as plt
-    from matplotlib.dates import DateFormatter, DayLocator
     from matplotlib.ticker import PercentFormatter
 
     points = overlay['points']
@@ -342,6 +349,9 @@ def plot_option_history(overlay, ticker, pdf_pages=None):
     for expiry, expiry_points in page_groups:
         figure = plt.figure(figsize=(30, 17), facecolor='white')
         last_date = expiry_points['Date'].max()
+        # Both sides share the page's trading dates, without weekend or holiday gaps.
+        dates = DateAxis(expiry_points['Date'])
+        page_span = dates.x(dates.dates)[[0, -1]] + np.array([-0.5, 0.5])
         figure.suptitle(f'{ticker} | Option IV | Expiry {expiry:%d %b %Y}',
                         fontsize=29, fontweight='bold', y=0.975)
         figure.text(0.05, 0.934,
@@ -357,21 +367,21 @@ def plot_option_history(overlay, ticker, pdf_pages=None):
             axes.grid(alpha=0.25)
             axes.tick_params(labelsize=12)
             axes.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
-            axes.xaxis.set_major_locator(DayLocator(interval=max(1, (last_date - expiry_points['Date'].min()).days // 7)))
-            axes.xaxis.set_major_formatter(DateFormatter('%d %b'))
+            dates.format(axes, max_ticks=OPTION_DATES_PER_PAGE, date_format='%d %b')
             if side_points.empty:
+                axes.set_xlim(*page_span)
                 axes.text(0.5, 0.5, 'No eligible contracts with valid IV',
                           transform=axes.transAxes, ha='center', va='center', fontsize=15)
                 continue
             baseline = side_points.drop_duplicates('Date').sort_values('Date')
             usable = baseline.dropna(subset=['RV mean', 'RV std'])
             if not usable.empty:
-                axes.plot(usable['Date'], usable['RV mean'], color='#222222', linestyle='--',
+                axes.plot(dates.x(usable['Date']), usable['RV mean'], color='#222222', linestyle='--',
                           linewidth=1.6, label='Historical realized mean')
-                axes.fill_between(usable['Date'], (usable['RV mean'] - usable['RV std']).clip(lower=0),
+                axes.fill_between(dates.x(usable['Date']), (usable['RV mean'] - usable['RV std']).clip(lower=0),
                                   usable['RV mean'] + usable['RV std'], color='#b5b5b5', alpha=0.18,
                                   label='Realized mean +/- 1 SD')
-            plot_option_markers(axes, side_points, 'Date', fontsize=10)
+            plot_option_markers(axes, side_points, 'Date', fontsize=10, date_axis=dates)
         latest = expiry_points[expiry_points['Date'].eq(last_date)].sort_values(
             ['Option type', 'Selection', 'Contracts'], ascending=[True, True, False])
         rows = []
