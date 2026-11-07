@@ -18,8 +18,10 @@ Usage:
 """
 
 import datetime
+import re
 import warnings
 from pathlib import Path
+from typing import NamedTuple, Optional
 
 import pandas as pd
 import numpy as np
@@ -169,6 +171,100 @@ def list_symbols(directory: Path) -> list:
     return sorted(p.stem for p in directory.glob("*.parquet"))
 
 
+# ---------------------------------------------------------------------------
+# Report windows: 250d, 350d-25d, Jan2026, Jan2026-Mar2026
+# ---------------------------------------------------------------------------
+
+_WINDOW_COUNTS = re.compile(r'(\d+)d(?:-(\d+)d)?', re.IGNORECASE)
+_WINDOW_MONTHS = re.compile(r'([a-z]+)(\d{4})(?:-([a-z]+)(\d{4}))?', re.IGNORECASE)
+_MONTH_NAMES = ('january', 'february', 'march', 'april', 'may', 'june', 'july',
+                'august', 'september', 'october', 'november', 'december')
+
+
+class ReportWindow(NamedTuple):
+    """The period a report or listing covers.
+
+    Count windows are trading days, i.e. observations at the analysed cadence: the
+    latest `last`, minus the newest `skip`. Month windows cover the calendar dates
+    `start` to `end` inclusive.
+    """
+    label: str
+    last: Optional[int] = None
+    skip: int = 0
+    start: Optional[pd.Timestamp] = None
+    end: Optional[pd.Timestamp] = None
+
+    @property
+    def size(self):
+        """Observations a count window asks for; None for month windows."""
+        return None if self.last is None else self.last - self.skip
+
+    def through_end(self, dates):
+        """Boolean mask of ascending `dates` up to the window's end."""
+        dates = pd.DatetimeIndex(dates)
+        if self.end is not None:
+            return np.asarray(dates < self.end + pd.Timedelta(days=1))
+        keep = np.ones(len(dates), dtype=bool)
+        keep[max(len(dates) - self.skip, 0):] = False
+        return keep
+
+    def from_start(self, frame):
+        """Rows from the window's start, for a frame already cut at its end."""
+        if self.start is not None:
+            return frame[np.asarray(pd.DatetimeIndex(frame.index) >= self.start)]
+        return frame.iloc[-self.size:]
+
+    def select(self, frame):
+        """Rows of a date-indexed, ascending frame or Series inside the window."""
+        return self.from_start(frame[self.through_end(frame.index)])
+
+
+def _month_start(name, year):
+    """First day of month `name` (Jan or January, any case) in `year`, or None."""
+    name = name.lower()
+    for number, month in enumerate(_MONTH_NAMES, 1):
+        if name in (month, month[:3]):
+            return pd.Timestamp(int(year), number, 1)
+    return None
+
+
+def parse_report_window(text):
+    """Parse 250d, 350d-25d, Jan2026 or Jan2026-Mar2026; None when `text` is not a window."""
+    match = _WINDOW_COUNTS.fullmatch(text)
+    if match:
+        last, skip = int(match.group(1)), int(match.group(2) or 0)
+        if last <= 0:
+            raise ValueError(f"observations must be positive, got {text}.")
+        if last <= skip:
+            raise ValueError(f"{text}: the first count must exceed the second, e.g. 350d-25d.")
+        return ReportWindow(f'{last}d' + (f'-{skip}d' if skip else ''), last=last, skip=skip)
+    match = _WINDOW_MONTHS.fullmatch(text)
+    if match:
+        first = _month_start(match.group(1), match.group(2))
+        final = _month_start(match.group(3), match.group(4)) if match.group(3) else first
+        if first is not None and final is not None:
+            if final < first:
+                raise ValueError(f"{text}: the months must run forward, e.g. Jan2026-Mar2026.")
+            label = '-'.join(dict.fromkeys(
+                f'{_MONTH_NAMES[month.month - 1][:3].title()}{month.year}' for month in (first, final)))
+            return ReportWindow(label, start=first, end=final + pd.offsets.MonthEnd(0))
+    return None
+
+
+def as_report_window(value):
+    """A ReportWindow from None, a ReportWindow, window text, or a count of trailing observations."""
+    if value is None or isinstance(value, ReportWindow):
+        return value
+    if isinstance(value, str):
+        window = parse_report_window(value.strip())
+        if window is None:
+            raise ValueError(f"Unknown window '{value}': use 250d, 350d-25d, Jan2026 or Jan2026-Mar2026.")
+        return window
+    if value <= 0:
+        raise ValueError(f"observations must be positive, got {value}.")
+    return ReportWindow(f'{int(value)}d', last=int(value))
+
+
 LATEST_ROWS = 10  # Default count for latest_parquet_rows and `Option-OGN.py List`
 
 
@@ -179,16 +275,17 @@ def _naive_dates(values) -> pd.Series:
         return pd.to_datetime(values, errors='coerce', utc=True).dt.tz_convert(None)
 
 
-def latest_parquet_rows(path, rows: int = LATEST_ROWS):
+def latest_parquet_rows(path, rows: int = LATEST_ROWS, window: Optional[ReportWindow] = None):
     """Return the latest `rows` rows of any Parquet file, its row count and its ordering column.
 
     "Latest" follows a column named Date (any case) when the file has one, using NSE's
     BizDt instead wherever a row carries a valid one (see corrected_dates): a stable sort
     keeps each date's stored row order, and rows without a valid date rank oldest.
-    Otherwise the file's last rows are used. Only the row groups holding the chosen rows
-    are read, so a large file is never loaded whole. Returned Date and Expiry columns hold
-    the corrected dates; frame.attrs['corrected_dates'] maps each changed column to
-    (reference column, rows changed).
+    Otherwise the file's last rows are used. A ReportWindow replaces `rows` with every
+    row on the window's dates, counting trading days (distinct dates) for 250d or 350d-25d.
+    Only the row groups holding the chosen rows are read, so a large file is never loaded
+    whole. Returned Date and Expiry columns hold the corrected dates;
+    frame.attrs['corrected_dates'] maps each changed column to (reference column, rows changed).
 
     Returns:
         (DataFrame indexed by each row's 0-based position in the file,
@@ -196,7 +293,7 @@ def latest_parquet_rows(path, rows: int = LATEST_ROWS):
     """
     import pyarrow.parquet as pq
 
-    if rows <= 0:
+    if window is None and rows <= 0:
         raise ValueError(f"rows must be positive, got {rows}.")
     path = Path(path)
     if path.is_dir():
@@ -211,6 +308,7 @@ def latest_parquet_rows(path, rows: int = LATEST_ROWS):
         order = next((name for name in names if name.lower() == 'date'), None)
         reference = _nse_reference(names, order or 'Date')
         positions = np.arange(max(total - rows, 0), total)
+        dates = None
         if (order or reference) and total:
             stored = parquet.read(columns=[name for name in (order, reference) if name]).to_pandas(
                 date_as_object=False, ignore_metadata=True)  # A stored Date index stays a column
@@ -222,11 +320,19 @@ def latest_parquet_rows(path, rows: int = LATEST_ROWS):
             except (TypeError, ValueError):
                 dates = None
             if dates is None or dates.isna().all():
-                order = None
+                order, dates = None, None
             else:
                 order = order or reference
                 # NaT is the smallest int64, so rows without a date rank oldest.
-                positions = np.argsort(dates.to_numpy().view('int64'), kind='stable')[-rows:]
+                positions = np.argsort(dates.to_numpy().view('int64'), kind='stable')
+                if window is None:
+                    positions = positions[-rows:]
+                else:
+                    days = pd.DatetimeIndex(np.unique(dates.dropna().to_numpy()))
+                    chosen = window.select(pd.Series(0, index=days)).index
+                    positions = positions[np.isin(dates.to_numpy()[positions], chosen.to_numpy())]
+        if window is not None and dates is None and total:
+            raise ValueError(f"{path.name} has no usable Date column; give a row count instead of {window.label}.")
 
         sizes = np.array([parquet.metadata.row_group(group).num_rows
                           for group in range(parquet.metadata.num_row_groups)], dtype='int64')

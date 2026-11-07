@@ -744,6 +744,25 @@ class LatestRowsTests(unittest.TestCase):
         latest, _, order = OGN.latest_parquet_rows(raw, 2)
         self.assertEqual((order, latest.index.tolist()), ('BizDt', [1, 0]))
 
+    def test_windows_take_every_row_on_their_trading_days(self):
+        frame = pd.DataFrame({
+            'Date': [DAY(2026, 1, 30), DAY(2026, 2, 2), DAY(2026, 1, 30), DAY(2026, 3, 2), DAY(2026, 2, 2),
+                     DAY(2026, 1, 29)],
+            'BizDt': [None, None, None, '2026-02-03', None, None],  # stored day-first: really 3 Feb
+            'Strike Price': [100.0, 100.0, 110.0, 120.0, 110.0, 100.0]})
+        path = self.write(frame, row_group_size=2)
+        window = OGN.parse_report_window
+        latest, total, order = OGN.latest_parquet_rows(path, window=window('2d'))
+        self.assertEqual((total, order, latest.index.tolist()), (6, 'Date', [1, 4, 3]))
+        self.assertEqual(latest['Date'].dt.strftime('%Y-%m-%d').tolist(), ['2026-02-02', '2026-02-02', '2026-02-03'])
+        self.assertEqual(latest.attrs['corrected_dates'], {'Date': ('BizDt', 1)})
+        self.assertEqual(OGN.latest_parquet_rows(path, window=window('3d-1d'))[0].index.tolist(), [0, 2, 1, 4])
+        self.assertEqual(OGN.latest_parquet_rows(path, window=window('Jan2026'))[0].index.tolist(), [5, 0, 2])
+        self.assertTrue(OGN.latest_parquet_rows(path, window=window('Mar2026'))[0].empty)
+        undated = self.write(pd.DataFrame({'Close': [1.0, 2.0]}), 'undated.parquet')
+        with self.assertRaisesRegex(ValueError, 'no usable Date column; give a row count instead of 2d'):
+            OGN.latest_parquet_rows(undated, window=window('2d'))
+
     def test_only_row_groups_holding_the_latest_rows_are_read(self):
         frame = pd.DataFrame({'Date': pd.date_range('2024-01-01', periods=6).date, 'Value': range(6)})
         path = self.write(frame, row_group_size=2)

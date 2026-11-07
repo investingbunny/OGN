@@ -104,11 +104,14 @@ Unavailable sections print a reason without removing other pages.
 ```powershell
 python Option-OGN.py List "<path>\ABB.parquet"            # latest 10 rows
 python Option-OGN.py List "<path>\ABB.parquet" 50         # latest 50 rows
-python Option-OGN.py --pdf List "<path>\ABB.parquet" 50   # also charts\ABB_latest50_rows_<stamp>.pdf
+python Option-OGN.py List "<path>\ABB.parquet" 5d         # every row on the latest 5 trading days
+python Option-OGN.py --pdf List "<path>\NIFTY.parquet" 100d  # also charts\NIFTY_100d_rows_<stamp>.pdf
 python Option-OGN.py --pdf List "<path>\ABB.parquet" 50 abb.pdf # custom PDF base name
 ```
 
-Works on any Parquet file. With a `Date` column (any case), rows are the newest dates (corrected as in
+Works on any Parquet file. A bare number counts rows; a [window](#analysis-cli) (`100d`, `350d-25d`,
+`Jan2026`, `Jan2026-Mar2026`) takes every row on its trading days (distinct dates), so `5d` of an
+option-chain file holds all its contracts. With a `Date` column (any case), rows are the newest dates (corrected as in
 [Correct Dates](#correct-dates)); same-date rows keep file order and undated rows rank oldest. Without
 usable dates, the last rows in file order are shown. All columns are printed, wrapped to the console
 width; the first column is the row's 0-based file position. Only row groups holding those rows are read.
@@ -146,7 +149,8 @@ gold_silver = load_macro("GLD_SLV")
 ```
 
 Other loaders include `load_options` and `load_derivatives`; see [OGN.py](OGN.py).
-`latest_parquet_rows(path, rows)` returns `(rows, total_rows, date_column)` for any Parquet file.
+`latest_parquet_rows(path, rows, window=None)` returns `(rows, total_rows, date_column)` for any Parquet
+file; `parse_report_window('100d')` builds the window.
 
 ## Technical & Volatility Pages
 
@@ -168,14 +172,21 @@ no latest volume: omit volume row. Trendlines use scipy pivots and numpy regress
 
 ### Max Pain & PCR Page
 
-Drawn when the symbol has stored options, from the latest option date on or before the range's last
-day (within a month), for the nearest unexpired expiry:
+Drawn when the symbol has stored options. "Latest options" are those of the last option date on or
+before the range's last day (within a month), for the nearest unexpired expiry.
 
 - **Max pain:** stacked call (blue) and put (red) pain per strike in Rs crore; pain = open interest x
   intrinsic value if the expiry settled at that strike. An arrow marks the minimum (max pain) and a
   dotted line the spot. Up to 41 strikes around max pain and spot are drawn; all strikes are used.
-- **PCR gauge:** put OI / call OI for that expiry; the needle is the put share of OI, green (calls)
-  left, red (puts) right, PCR 1 upright. Shows OI totals, all-expiry OI PCR and traded-volume PCR.
+  - If an expiry settled within the range (up to 70 days back), the chart area splits: on top, that
+    expiry's chain on the trading day before it, with that day's spot and the expiry-day close (dashed,
+    % vs max pain); below, the latest options with their spot.
+  - Otherwise, e.g. a short range without an expiry, the latest options fill the chart area.
+- **PCR gauges** (latest options): put OI / call OI, first for all expiries together, then one gauge per
+  expiry, nearest first (the max-pain expiry is marked; a single listed expiry gets one gauge). Right of
+  the charts: one column for up to 3 gauges, then 2 columns (2x2, 2x3, 2x4); at most 8, so beyond 7
+  expiries the nearest 7 are drawn and `All expiries` still covers every one. Needles show the put share
+  of OI: green (calls) left, red (puts) right, PCR 1 upright; each gauge adds OI totals and volume PCR.
 
 Computed with pandas/numpy (TA-Lib has no option-chain functions) and drawn with matplotlib.
 

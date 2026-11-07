@@ -154,6 +154,7 @@ class TechnicalChartTests(unittest.TestCase):
         self.run_report(frame, days='350d-25d', REPORT_SECTIONS=['trendlines', 'max_pain', 'technical'], **pages)
         self.assertEqual(order, ['plot_chart', 'max_pain_analysis', 'trendline_analysis'])
         self.assertEqual(pages['max_pain_analysis'].call_args.args[:2], ('TEST', frame['Date'].iloc[-26]))
+        self.assertEqual(pages['max_pain_analysis'].call_args.kwargs['start'], frame['Date'].iloc[-350])
         pages['max_pain_analysis'].side_effect = ValueError('no TEST options in the month to 22 Oct 2026')
         with patch.object(self.module.sys, 'stdout', new_callable=io.StringIO) as output:
             self.run_report(frame, REPORT_SECTIONS=['max_pain'], max_pain_analysis=pages['max_pain_analysis'])

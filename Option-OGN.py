@@ -36,7 +36,7 @@ Usage:
     python Option-OGN.py --pdf WTI                 # single symbol -> charts/WTI_Analysis_<stamp>.pdf
     python Option-OGN.py --pdf output.pdf          # custom output file -> output_<stamp>.pdf
     python Option-OGN.py List "<file>.parquet" 20  # latest 20 rows of any Parquet file
-    python Option-OGN.py --pdf List "<file>.parquet" 20  # ... also saved as a PDF
+    python Option-OGN.py --pdf List "<file>.parquet" 100d  # every row on the latest 100 trading days, + PDF
 
 PDF names carry a _YYYYMMDD_HHMMSS stamp (<stamp>), so a rerun never overwrites a report;
 each PDF's full path is printed once it is saved.
@@ -46,7 +46,6 @@ each PDF's full path is printed once it is saved.
 
 import io
 import os
-import re
 import sys
 import math
 import shutil
@@ -56,7 +55,6 @@ import contextlib
 import textwrap
 from functools import reduce
 from pathlib import Path
-from typing import NamedTuple, Optional
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -137,6 +135,9 @@ from OGN import (
     _naive_dates,
     latest_parquet_rows,
     LATEST_ROWS,
+    ReportWindow,
+    parse_report_window,
+    as_report_window,
     EQUITY_PROCESSED,
     DERIVATIVES_PROCESSED,
     INDICES_PROCESSED,
@@ -175,8 +176,8 @@ REPORT_SECTIONS = [
     'volatility_guide',  # one page explaining each volatility graph with this report's numbers
     'option_overlay',
     'comparison',   # statistical comparison, only when a second symbol is given
-    'japan_macro',
-    'schiller_macro',
+    # 'japan_macro',
+    # 'schiller_macro',
     'india_schiller',
 ]
 
@@ -336,11 +337,21 @@ def GetMaxPain(scrip, start_date):
 
 # ── Max pain and put-call ratio page ──────────────────────────────────────
 MAX_PAIN_STRIKES = 41                    # Strikes drawn around max pain; the calculation uses all
+MAX_PAIN_LOOKBACK_DAYS = 70              # Days searched back for the last expiry that has settled
 MAX_PAIN_CALL = ('#c6d9f1', '#4f81bd')   # Bar fill and edge
 MAX_PAIN_PUT = ('#f2c4c4', '#c0504d')
+MAX_PAIN_CLOSE_COLOUR = '#7b2cbf'        # Expiry-day close line
+MAX_PAIN_LABEL_BOX = dict(boxstyle='square,pad=0.15', facecolor='white', edgecolor='none', alpha=0.85)  # Lines pass behind labels
+MAX_PAIN_SINGLE = (0.055, 0.2, 0.56, 0.64)                                   # Latest chain alone
+MAX_PAIN_HALVES = ((0.055, 0.6, 0.56, 0.245), (0.055, 0.19, 0.56, 0.245))   # Last expiry above latest
 PCR_GAUGE_TICKS = (0.25, 0.5, 0.75, 1, 1.5, 2, 4)
 PCR_GAUGE_COLOURS = ('#1a7f37', '#a7d7a9', '#f4f4f4', '#f1a8a3', '#c62828')  # Calls green .. puts red
 PCR_CALL_COLOUR, PCR_PUT_COLOUR = '#1a7f37', '#c62828'
+PCR_GAUGE_AREA = (0.645, 0.09, 0.34, 0.79)  # Left, bottom, width, height right of the max pain chart
+PCR_GAUGE_PAD = 0.03                        # Clear margin on each side of a gauge, as a fraction of its cell
+PCR_GAUGE_MAX = 8                           # All expiries plus the nearest 7: two columns of four rows
+PCR_GAUGE_ASPECT = 2.64 / 2.44              # Width / height of one gauge drawing
+PCR_GAUGE_FULL_SIZE = 8.8                   # Drawing height, in inches, at which gauge fonts are full size
 
 
 def _strike_label(strike):
@@ -355,21 +366,33 @@ def _ratio_text(value):
     return 'no calls' if np.isinf(value) else f'{value:.2f}'
 
 
-def option_positioning(symbol, as_of):
-    """Max pain and put-call ratios for the nearest expiry on the last option date up to `as_of`.
+def option_positioning(symbol, as_of, start=None):
+    """Max pain and put-call ratios of the latest option chain up to `as_of`, plus the last expiry.
 
-    Ratios use open interest unless named otherwise: `pcr` for that expiry, `pcr_all`
-    across every unexpired expiry that day, `pcr_volume` from traded contracts.
+    The latest chain is the last option date on or before `as_of` (within a month), for the
+    nearest expiry after that date, which has not settled yet. Ratios use open interest
+    unless named otherwise: `pcr` for that expiry, `pcr_all` across every listed expiry,
+    `pcr_volume` from traded contracts; `all_expiries` and `expiries` (nearest first) repeat
+    them together and per expiry. `expired` holds the latest expiry from `start` (the report
+    range's first day) up to that date: its chain on the trading day before expiry and the
+    underlying's close on expiry day, or None when no expiry falls in the range.
     """
     as_of = pd.Timestamp(as_of).normalize()
-    frame = load_derivatives(symbol, start=f'{as_of - pd.Timedelta(days=31):%Y-%m-%d}', end=f'{as_of:%Y-%m-%d}')
+    earliest = as_of - pd.Timedelta(days=MAX_PAIN_LOOKBACK_DAYS)
+    if start is not None:
+        earliest = max(earliest, pd.Timestamp(start).normalize())
+    frame = load_derivatives(symbol, start=f'{earliest - pd.Timedelta(days=10):%Y-%m-%d}', end=f'{as_of:%Y-%m-%d}')
     side = (frame['Option type'].astype(str).str.strip().str.upper()
             if 'Option type' in frame.columns else pd.Series('', index=frame.index))
     options = frame[side.isin(['CE', 'PE'])].assign(Side=side)
-    if options.empty:
+    recent = options[options['Date'] >= as_of - pd.Timedelta(days=31)]
+    if recent.empty:
         raise ValueError(f"no {symbol} options in the month to {as_of:%d %b %Y}")
-    day = options['Date'].max()
-    listed = options[(options['Date'] == day) & (options['Expiry'] >= day)]
+    day = recent['Date'].max()
+    on_day = options[options['Date'] == day]
+    listed = on_day[on_day['Expiry'] > day]
+    if listed.empty:
+        listed = on_day[on_day['Expiry'] == day]
     if listed.empty:
         raise ValueError(f"no unexpired {symbol} options on {day:%d %b %Y}")
     expiry = listed['Expiry'].min()
@@ -381,19 +404,38 @@ def option_positioning(symbol, as_of):
     def ratio(put, call):
         return put / call if call > 0 else (np.inf if put > 0 else np.nan)
 
-    calls, puts = chain[chain['Side'] == 'CE'], chain[chain['Side'] == 'PE']
-    call_oi, put_oi = total(calls, 'Open Int'), total(puts, 'Open Int')
-    if not call_oi + put_oi > 0:
+    def summary(rows):
+        calls, puts = rows[rows['Side'] == 'CE'], rows[rows['Side'] == 'PE']
+        call_oi, put_oi = total(calls, 'Open Int'), total(puts, 'Open Int')
+        return {'call_oi': call_oi, 'put_oi': put_oi, 'pcr': ratio(put_oi, call_oi),
+                'pcr_volume': ratio(total(puts, 'Contracts'), total(calls, 'Contracts'))}
+
+    def price(rows):
+        return (float(pd.to_numeric(rows['Underlying Price'], errors='coerce').median())
+                if 'Underlying Price' in rows.columns and len(rows) else np.nan)
+
+    def snapshot(rows):
+        curve = max_pain_curve(rows[rows['Side'] == 'CE'], rows[rows['Side'] == 'PE'])
+        return {'curve': curve, 'max_pain': curve['Total'].idxmin(), 'spot': price(rows)}
+
+    nearest = summary(chain)
+    if not nearest['call_oi'] + nearest['put_oi'] > 0:
         raise ValueError(f"no open interest on the {symbol} {expiry:%d %b %Y} expiry")
-    curve = max_pain_curve(calls, puts)
-    spot = (float(pd.to_numeric(chain['Underlying Price'], errors='coerce').median())
-            if 'Underlying Price' in chain.columns else np.nan)
-    return {'as_of': as_of, 'date': day, 'expiry': expiry, 'curve': curve,
-            'max_pain': curve['Total'].idxmin(), 'spot': spot, 'call_oi': call_oi, 'put_oi': put_oi,
-            'pcr': ratio(put_oi, call_oi),
-            'pcr_all': ratio(total(listed[listed['Side'] == 'PE'], 'Open Int'),
-                             total(listed[listed['Side'] == 'CE'], 'Open Int')),
-            'pcr_volume': ratio(total(puts, 'Contracts'), total(calls, 'Contracts'))}
+    expired = None
+    settled = options.loc[(options['Expiry'] >= earliest) & (options['Expiry'] <= day), 'Expiry']
+    if not settled.empty:
+        settled = settled.max()
+        before = options[(options['Expiry'] == settled) & (options['Date'] < settled)]
+        prior = before[before['Date'] == before['Date'].max()]
+        held = summary(prior)
+        if held['call_oi'] + held['put_oi'] > 0:
+            expired = {'date': prior['Date'].iloc[0], 'expiry': settled, **snapshot(prior),
+                       'close': price(frame[frame['Date'] == settled])}
+    consolidated = summary(listed)
+    return {'as_of': as_of, 'date': day, 'expiry': expiry, **snapshot(chain), **nearest,
+            'pcr_all': consolidated['pcr'], 'all_expiries': consolidated,
+            'expiries': [{'expiry': when, **summary(rows)} for when, rows in listed.groupby('Expiry')],
+            'expired': expired}
 
 
 def _max_pain_window(curve, max_pain, spot):
@@ -410,11 +452,33 @@ def _max_pain_window(curve, max_pain, spot):
     return curve.iloc[first:first + MAX_PAIN_STRIKES]
 
 
-def _draw_pcr_gauge(ax, positioning):
+def _gauge_layout(count):
+    """(columns, rows) for `count` gauges: one column up to three, then two columns."""
+    columns = 1 if count <= 3 else 2
+    return columns, math.ceil(count / columns)
+
+
+def _pcr_gauges(positioning):
+    """(title, figures) per gauge - all expiries, then each expiry nearest first - and expiries left out."""
+    expiries = positioning['expiries']
+    if len(expiries) == 1:
+        return [(f"Expiry {expiries[0]['expiry']:%d %b %Y} (only expiry)", expiries[0])], 0
+    shown = expiries[:PCR_GAUGE_MAX - 1]
+    gauges = [('All expiries', positioning['all_expiries'])]
+    gauges += [(f"Expiry {item['expiry']:%d %b %Y}"
+                + (' (max pain)' if item['expiry'] == positioning['expiry'] else ''), item) for item in shown]
+    return gauges, len(expiries) - len(shown)
+
+
+def _draw_pcr_gauge(ax, title, figures, scale=1.0):
     """Semicircular gauge: the needle sits at puts' share of open interest.
 
     Calls dominate on the green left, puts on the red right; PCR 1 points straight up.
+    Fonts follow `scale`, so smaller gauges in a grid keep the same proportions.
     """
+    def size(points):
+        return max(points * scale, 7)
+
     cmap = matplotlib.colors.LinearSegmentedColormap.from_list('pcr', PCR_GAUGE_COLOURS)
     for step in range(90):
         ax.add_patch(matplotlib.patches.Wedge((0, 0), 1.0, 178 - 2 * step, 180 - 2 * step, width=0.3,
@@ -422,75 +486,127 @@ def _draw_pcr_gauge(ax, positioning):
     for value in PCR_GAUGE_TICKS:
         angle = np.radians(180 * (1 - value / (1 + value)))
         direction = np.array([np.cos(angle), np.sin(angle)])
-        ax.plot(*zip(direction * 1.0, direction * 1.07), color='#454c50', linewidth=2)
-        ax.text(*(direction * 1.17), f'{value:g}', ha='center', va='center', fontsize=17, color='#373d41')
-    pcr = positioning['pcr']
-    angle = np.radians(180 * (1 - (1.0 if np.isinf(pcr) else pcr / (1 + pcr))))
-    tip = np.array([np.cos(angle), np.sin(angle)]) * 0.86
-    side = np.array([-np.sin(angle), np.cos(angle)]) * 0.04
-    ax.add_patch(matplotlib.patches.Polygon([tip, side, -side], closed=True, color='#2b2f33', zorder=4))
+        ax.plot(*zip(direction * 1.0, direction * 1.07), color='#454c50', linewidth=max(2 * scale, 1))
+        ax.text(*(direction * 1.17), f'{value:g}', ha='center', va='center', fontsize=size(17), color='#373d41')
+    pcr = figures['pcr']
+    if not np.isnan(pcr):  # No needle without any open interest
+        angle = np.radians(180 * (1 - (1.0 if np.isinf(pcr) else pcr / (1 + pcr))))
+        tip = np.array([np.cos(angle), np.sin(angle)]) * 0.86
+        side = np.array([-np.sin(angle), np.cos(angle)]) * 0.04
+        ax.add_patch(matplotlib.patches.Polygon([tip, side, -side], closed=True, color='#2b2f33', zorder=4))
     ax.add_patch(matplotlib.patches.Circle((0, 0), 0.08, color='#2b2f33', zorder=5))
-    ax.text(-0.85, -0.1, 'CALLS', ha='center', va='top', fontsize=20, fontweight='bold', color=PCR_CALL_COLOUR)
-    ax.text(0.85, -0.1, 'PUTS', ha='center', va='top', fontsize=20, fontweight='bold', color=PCR_PUT_COLOUR)
+    ax.text(-0.85, -0.1, 'CALLS', ha='center', va='top', fontsize=size(20), fontweight='bold', color=PCR_CALL_COLOUR)
+    ax.text(0.85, -0.1, 'PUTS', ha='center', va='top', fontsize=size(20), fontweight='bold', color=PCR_PUT_COLOUR)
     colour = PCR_CALL_COLOUR if pcr < 1 else PCR_PUT_COLOUR if pcr > 1 else '#454c50'
-    ax.text(0, -0.2, f'PCR {_ratio_text(pcr)}', ha='center', va='top', fontsize=44, fontweight='bold', color=colour)
-    ax.text(0, -0.52, f"Put OI {positioning['put_oi']:,.0f}   /   Call OI {positioning['call_oi']:,.0f}",
-            ha='center', va='top', fontsize=17, color='#373d41')
-    ax.text(0, -0.66, f"All expiries {_ratio_text(positioning['pcr_all'])}   |   "
-            f"Volume {_ratio_text(positioning['pcr_volume'])}", ha='center', va='top', fontsize=17, color='#555b60')
+    ax.text(0, -0.2, f'PCR {_ratio_text(pcr)}', ha='center', va='top', fontsize=size(44), fontweight='bold',
+            color=colour)
+    ax.text(0, -0.52, f"Put OI {figures['put_oi']:,.0f}   /   Call OI {figures['call_oi']:,.0f}",
+            ha='center', va='top', fontsize=size(17), color='#373d41')
+    ax.text(0, -0.66, f"Volume PCR {_ratio_text(figures['pcr_volume'])}", ha='center', va='top',
+            fontsize=size(17), color='#555b60')
+    ax.text(0, 1.36, title, ha='center', va='bottom', fontsize=size(22), fontweight='bold', color='#24282b')
     ax.set_xlim(-1.32, 1.32)
-    ax.set_ylim(-0.82, 1.3)
+    ax.set_ylim(-0.82, 1.62)
     ax.set_aspect('equal')
+    ax.set_anchor('C')
     ax.set_axis_off()
-    ax.set_title('Put-Call Ratio (open interest)', fontsize=24, fontweight='bold', pad=6)
 
 
-def plot_max_pain(positioning, ticker, pdf_pages=None):
-    """One page: call and put pain by strike with max pain marked, beside a PCR gauge."""
-    shown = _max_pain_window(positioning['curve'], positioning['max_pain'], positioning['spot'])
+def _draw_max_pain_chart(ax, snapshot, title, compact=False, xlabel=True):
+    """Stacked call and put pain by strike: max pain arrowed, the spot and any expiry close as lines."""
+    shown = _max_pain_window(snapshot['curve'], snapshot['max_pain'], snapshot['spot'])
     strikes = shown.index.to_numpy(float)
     x = np.arange(len(shown))
     call, put = shown['Call pain'].to_numpy() / 1e7, shown['Put pain'].to_numpy() / 1e7  # Rs crore
     top = float((call + put).max()) or 1.0
-
-    figure = plt.figure(figsize=(30, 17), facecolor='white')
-    figure.suptitle(f"{ticker}   Max Pain & Put-Call Ratio   |   options of {positioning['date']:%d %b %Y}   |   "
-                    f"expiry {positioning['expiry']:%d %b %Y}", fontsize=32, fontweight='bold', y=0.975)
-    ax = figure.add_axes((0.055, 0.2, 0.56, 0.64))
+    size = 0.82 if compact else 1.0
     ax.bar(x, call, width=0.72, color=MAX_PAIN_CALL[0], edgecolor=MAX_PAIN_CALL[1], linewidth=1.2, label='Call pain')
     ax.bar(x, put, width=0.72, bottom=call, color=MAX_PAIN_PUT[0], edgecolor=MAX_PAIN_PUT[1], linewidth=1.2,
            label='Put pain')
-    ax.set_ylim(0, top * 1.12)
+    ax.set_ylim(0, top * 1.2)
     ax.set_xlim(-0.7, len(x) - 0.3)
-    at = int(np.flatnonzero(strikes == positioning['max_pain'])[0])
+    at = int(np.flatnonzero(strikes == snapshot['max_pain'])[0])
     align = 'left' if at < len(x) / 4 else 'right' if at > 3 * len(x) / 4 else 'center'
-    ax.annotate(f"Max pain {_strike_label(positioning['max_pain'])}", xy=(at, call[at] + put[at]),
-                xytext=(at, call[at] + put[at] + top * 0.3), ha=align, va='bottom', fontsize=21,
-                fontweight='bold', color='#2b3fd6', arrowprops=dict(arrowstyle='-|>', color='#2b3fd6', lw=2.5))
-    spot = positioning['spot']
-    if np.isfinite(spot) and strikes[0] <= spot <= strikes[-1]:
-        where = float(np.interp(spot, strikes, x))
-        ax.axvline(where, color='#d62728', linestyle=':', linewidth=3)
-        ax.text(where + 0.25, top * 1.1, f'Spot {spot:,.2f}', color='#d62728', fontsize=19, va='top')
+    ax.annotate(f"Max pain {_strike_label(snapshot['max_pain'])}", xy=(at, call[at] + put[at]),
+                xytext=(at, call[at] + put[at] + top * 0.3), ha=align, va='bottom', fontsize=21 * size,
+                fontweight='bold', color='#2b3fd6', bbox=MAX_PAIN_LABEL_BOX,
+                arrowprops=dict(arrowstyle='-|>', color='#2b3fd6', lw=2.5))
+    marks = [(snapshot['spot'], f"Spot {snapshot['spot']:,.2f} ({snapshot['date']:%d %b})", '#d62728', ':')]
+    close = snapshot.get('close', np.nan)
+    if np.isfinite(close):
+        gap = (close - snapshot['max_pain']) / snapshot['max_pain']
+        marks.append((close, f"Expiry close {close:,.2f} ({snapshot['expiry']:%d %b}), {gap:+.1%} vs max pain",
+                       MAX_PAIN_CLOSE_COLOUR, '--'))
+    for level, (price, label, colour, style) in enumerate(marks):
+        if np.isfinite(price) and strikes[0] <= price <= strikes[-1]:
+            where = float(np.interp(price, strikes, x))
+            ax.axvline(where, color=colour, linestyle=style, linewidth=3)
+            right = where <= (len(x) - 1) / 2  # The roomier side of the line
+            ax.text(where + (0.25 if right else -0.25), top * (1.17 - 0.09 * level), label, color=colour,
+                    fontsize=19 * size, va='top', ha='left' if right else 'right', bbox=MAX_PAIN_LABEL_BOX)
     ax.set_xticks(x)
     ax.set_xticklabels([_strike_label(strike) for strike in strikes], rotation=90,
-                       fontsize=14 if len(x) <= 30 else 11)
-    ax.tick_params(axis='y', labelsize=14)
-    ax.set_xlabel('Strike (settlement price at expiry)', fontsize=18, fontweight='bold')
-    ax.set_ylabel('Pain value (Rs crore)', fontsize=18, fontweight='bold')
+                       fontsize=(14 if len(x) <= 30 else 11) * (0.9 if compact else 1.0))
+    ax.tick_params(axis='y', labelsize=14 * size)
+    if xlabel:
+        ax.set_xlabel('Strike (settlement price at expiry)', fontsize=18 * size, fontweight='bold')
+    ax.set_ylabel('Pain value (Rs crore)', fontsize=18 * size, fontweight='bold')
     ax.grid(axis='y', color='#d5dadd', alpha=0.7)
     ax.set_axisbelow(True)
     ax.spines[['top', 'right']].set_visible(False)
-    ax.set_title(f"Max Pain: {ticker} {positioning['date']:%d-%m-%Y}", fontsize=24, fontweight='bold', pad=48)
-    ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.0), ncol=2, fontsize=17, frameon=False)
+    ax.set_title(title, fontsize=24 * size, fontweight='bold', pad=48 * size)
+    ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.0), ncol=2, fontsize=17 * size, frameon=False)
 
-    _draw_pcr_gauge(figure.add_axes((0.65, 0.27, 0.32, 0.58)), positioning)
+
+def plot_max_pain(positioning, ticker, pdf_pages=None):
+    """One page of max pain beside PCR gauges for the latest option chain.
+
+    With a settled expiry in the report range, the left side splits in two: that expiry's
+    chain on the day before it settled, with its close, above the latest chain.
+    """
+    figure = plt.figure(figsize=(30, 17), facecolor='white')
+    figure.suptitle(f"{ticker}   Max Pain & Put-Call Ratio   |   options of {positioning['date']:%d %b %Y}",
+                    fontsize=32, fontweight='bold', y=0.975)
+    latest = (f"Max Pain: {ticker} {positioning['date']:%d-%m-%Y}, latest options, "
+              f"expiry {positioning['expiry']:%d %b %Y}")
+    expired = positioning.get('expired')
+    if expired:
+        upper, lower = MAX_PAIN_HALVES
+        _draw_max_pain_chart(figure.add_axes(upper), expired,
+                             f"Max Pain: {ticker} {expired['date']:%d-%m-%Y}, the day before the "
+                             f"{expired['expiry']:%d %b %Y} expiry", compact=True, xlabel=False)
+        _draw_max_pain_chart(figure.add_axes(lower), positioning, latest, compact=True)
+    else:
+        _draw_max_pain_chart(figure.add_axes(MAX_PAIN_SINGLE), positioning, latest)
+
+    gauges, hidden = _pcr_gauges(positioning)
+    left, bottom, width, height = PCR_GAUGE_AREA
+    columns, rows = _gauge_layout(len(gauges))
+    cell_width, cell_height = width / columns, height / rows
+    inner_width, inner_height = cell_width * (1 - 2 * PCR_GAUGE_PAD), cell_height * (1 - 2 * PCR_GAUGE_PAD)
+    figure_width, figure_height = figure.get_size_inches()
+    drawing = min(inner_height * figure_height, inner_width * figure_width / PCR_GAUGE_ASPECT)
+    scale = min(1.0, drawing / PCR_GAUGE_FULL_SIZE)
+    for number, (title, figures) in enumerate(gauges):
+        row, column = divmod(number, columns)
+        if row == rows - 1 and len(gauges) % columns:
+            column = (columns - 1) / 2  # Centre a lone gauge on the last row
+        _draw_pcr_gauge(figure.add_axes((left + (column + PCR_GAUGE_PAD) * cell_width,
+                                         bottom + (rows - 1 - row + PCR_GAUGE_PAD) * cell_height,
+                                         inner_width, inner_height)), title, figures, scale)
+    figure.text(left + width / 2, bottom + height + 0.01,
+                f"Put-Call Ratio (open interest)   |   {positioning['date']:%d %b %Y}", ha='center',
+                va='bottom', fontsize=24, fontweight='bold', color='#24282b')
     notes = [
         'Max pain: the expiry settlement price at which in-the-money options are worth least, so option writers '
         'pay out least. Pain = open interest x intrinsic value; each bar stacks call and put pain.',
-        f"PCR: put open interest / call open interest on the {positioning['expiry']:%d %b %Y} expiry. "
-        'Above 1 (red) more puts, below 1 (green) more calls. A positioning snapshot, not a forecast.',
+        'PCR: put open interest / call open interest'
+        + (' of the only expiry. ' if len(gauges) == 1 else ' for all expiries, then each expiry, nearest first. ')
+        + 'Above 1 (red) more puts, below 1 (green) more calls. A positioning snapshot, not a forecast.',
     ]
+    if hidden:
+        notes.append(f"PCR gauges show the nearest {len(gauges) - 1} of {len(positioning['expiries'])} expiries; "
+                     'All expiries includes every one.')
     if positioning['date'] != positioning['as_of']:
         notes.append(f"Latest options on or before {positioning['as_of']:%d %b %Y}, the end of the report's range.")
     figure.text(0.055, 0.075, '\n'.join(notes), fontsize=14, color='#454c50', va='top', linespacing=1.5)
@@ -503,13 +619,19 @@ def plot_max_pain(positioning, ticker, pdf_pages=None):
         plt.show()
 
 
-def max_pain_analysis(ticker, as_of, pdf_pages=None):
-    """Compute and render the max pain and put-call ratio page for the options of `as_of`."""
+def max_pain_analysis(ticker, as_of, start=None, pdf_pages=None):
+    """Compute and render the max pain and put-call ratio page for a report range ending `as_of`."""
     try:
-        positioning = option_positioning(ticker, as_of)
+        positioning = option_positioning(ticker, as_of, start=start)
     except FileNotFoundError:
         print(f"  [max pain] No stored derivatives for {ticker}.")
         return None
+    expired = positioning['expired']
+    if expired:
+        close = (f"expiry close {expired['close']:,.2f}" if np.isfinite(expired['close'])
+                 else 'no expiry-day close stored')
+        print(f"  [max pain] {expired['date']:%Y-%m-%d}, the day before the {expired['expiry']:%Y-%m-%d} expiry: "
+              f"max pain {_strike_label(expired['max_pain'])}, {close}")
     print(f"  [max pain] {positioning['date']:%Y-%m-%d}, expiry {positioning['expiry']:%Y-%m-%d}: "
           f"max pain {_strike_label(positioning['max_pain'])}, spot {positioning['spot']:,.2f}, "
           f"PCR {_ratio_text(positioning['pcr'])} (all expiries {_ratio_text(positioning['pcr_all'])})")
@@ -1493,100 +1615,6 @@ def trendline_analysis(price_data, ticker, bars=TREND_BARS,
 
 
 # ---------------------------------------------------------------------------
-# Report windows: 250d, 350d-25d, Jan2026, Jan2026-Mar2026
-# ---------------------------------------------------------------------------
-
-_WINDOW_COUNTS = re.compile(r'(\d+)d(?:-(\d+)d)?', re.IGNORECASE)
-_WINDOW_MONTHS = re.compile(r'([a-z]+)(\d{4})(?:-([a-z]+)(\d{4}))?', re.IGNORECASE)
-_MONTH_NAMES = ('january', 'february', 'march', 'april', 'may', 'june', 'july',
-                'august', 'september', 'october', 'november', 'december')
-
-
-class ReportWindow(NamedTuple):
-    """The period a report covers.
-
-    Count windows are trading days, i.e. observations at the analysed cadence: the
-    latest `last`, minus the newest `skip`. Month windows cover the calendar dates
-    `start` to `end` inclusive.
-    """
-    label: str
-    last: Optional[int] = None
-    skip: int = 0
-    start: Optional[pd.Timestamp] = None
-    end: Optional[pd.Timestamp] = None
-
-    @property
-    def size(self):
-        """Observations a count window asks for; None for month windows."""
-        return None if self.last is None else self.last - self.skip
-
-    def through_end(self, dates):
-        """Boolean mask of ascending `dates` up to the window's end."""
-        dates = pd.DatetimeIndex(dates)
-        if self.end is not None:
-            return np.asarray(dates < self.end + pd.Timedelta(days=1))
-        keep = np.ones(len(dates), dtype=bool)
-        keep[max(len(dates) - self.skip, 0):] = False
-        return keep
-
-    def from_start(self, frame):
-        """Rows from the window's start, for a frame already cut at its end."""
-        if self.start is not None:
-            return frame[np.asarray(pd.DatetimeIndex(frame.index) >= self.start)]
-        return frame.iloc[-self.size:]
-
-    def select(self, frame):
-        """Rows of a date-indexed, ascending frame or Series inside the window."""
-        return self.from_start(frame[self.through_end(frame.index)])
-
-
-def _month_start(name, year):
-    """First day of month `name` (Jan or January, any case) in `year`, or None."""
-    name = name.lower()
-    for number, month in enumerate(_MONTH_NAMES, 1):
-        if name in (month, month[:3]):
-            return pd.Timestamp(int(year), number, 1)
-    return None
-
-
-def parse_report_window(text):
-    """Parse 250d, 350d-25d, Jan2026 or Jan2026-Mar2026; None when `text` is not a window."""
-    match = _WINDOW_COUNTS.fullmatch(text)
-    if match:
-        last, skip = int(match.group(1)), int(match.group(2) or 0)
-        if last <= 0:
-            raise ValueError(f"observations must be positive, got {text}.")
-        if last <= skip:
-            raise ValueError(f"{text}: the first count must exceed the second, e.g. 350d-25d.")
-        return ReportWindow(f'{last}d' + (f'-{skip}d' if skip else ''), last=last, skip=skip)
-    match = _WINDOW_MONTHS.fullmatch(text)
-    if match:
-        first = _month_start(match.group(1), match.group(2))
-        final = _month_start(match.group(3), match.group(4)) if match.group(3) else first
-        if first is not None and final is not None:
-            if final < first:
-                raise ValueError(f"{text}: the months must run forward, e.g. Jan2026-Mar2026.")
-            label = '-'.join(dict.fromkeys(
-                f'{_MONTH_NAMES[month.month - 1][:3].title()}{month.year}' for month in (first, final)))
-            return ReportWindow(label, start=first, end=final + pd.offsets.MonthEnd(0))
-    return None
-
-
-def as_report_window(value):
-    """A ReportWindow from None, a ReportWindow, window text, or a count of trailing observations."""
-    if value is None or isinstance(value, ReportWindow):
-        return value
-    if isinstance(value, str):
-        window = parse_report_window(value.strip())
-        if window is None:
-            raise ValueError(f"Unknown window '{value}': use 250d, 350d-25d, Jan2026 or Jan2026-Mar2026.")
-        return window
-    if value <= 0:
-        raise ValueError(f"observations must be positive, got {value}.")
-    return ReportWindow(f'{int(value)}d', last=int(value))
-
-
-# ---------------------------------------------------------------------------
 # Main analysis orchestrator
 # ---------------------------------------------------------------------------
 
@@ -1749,7 +1777,7 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         # ── Max pain and put-call ratio of the range's latest options ─
         if 'max_pain' in REPORT_SECTIONS:
             try:
-                max_pain_analysis(Scrip, price_data.index[-1], pdf_pages=pdf_pages)
+                max_pain_analysis(Scrip, price_data.index[-1], start=price_data.index[0], pdf_pages=pdf_pages)
             except (ValueError, KeyError) as e:
                 print(f"  [max pain skipped] {e}")
 
@@ -3442,24 +3470,28 @@ def _listing_text(frame, width):
     return frame.to_string(line_width=width, max_colwidth=LIST_MAX_COLWIDTH)
 
 
-def _listing_summary(source, latest, total, order):
+def _listing_summary(source, latest, total, order, window=None):
     """Header lines shared by the console and PDF listings."""
     lines = [f'File: {source}']
     if latest.empty:
-        return lines + [f'Rows: {total:,} | Columns: {len(latest.columns)}']
+        scope = f' | No rows in window {window.label}' if window is not None else ''
+        return lines + [f'Rows: {total:,} | Columns: {len(latest.columns)}{scope}']
     dates = None
     if order is None:
         scope = f'last {len(latest):,} in file order (no Date column)'
     else:
         dates = _naive_dates(latest[order])
-        scope = f'latest {len(latest):,} by {order}'
+        days = dates.nunique()
+        scope = (f'latest {len(latest):,} by {order}' if window is None else
+                 f"{len(latest):,} rows on {days:,} trading day{'' if days == 1 else 's'} "
+                 f"in window {window.label}, by {order}")
         if dates.notna().any():
             scope += f' ({dates.min():%Y-%m-%d} to {dates.max():%Y-%m-%d})'
     lines.append(f'Rows: {total:,} | Columns: {len(latest.columns)} | Showing the {scope}')
     corrected = latest.attrs.get('corrected_dates') or {}
     if corrected:
-        details = ', '.join(f'{column} from {source} in {count:,}'
-                            for column, (source, count) in corrected.items())
+        details = ', '.join(f'{column} from {reference} in {count:,}'
+                            for column, (reference, count) in corrected.items())
         lines.append(f'Corrected from NSE reference dates: {details} of these rows.')
     if dates is not None:
         today = pd.Timestamp.today().normalize()
@@ -3492,14 +3524,15 @@ def _listing_pages(lines, per_page):
     return pages
 
 
-def plot_listing(summary, latest, source, pdf_path):
+def plot_listing(summary, latest, source, pdf_path, window=None):
     """Save a List result as a timestamped PDF and return its full path."""
     matplotlib.use('Agg')
     pdf_path = str(timestamped_path(pdf_path))
     Path(pdf_path).parent.mkdir(parents=True, exist_ok=True)
     lines = _listing_text(latest, LIST_PDF_CHARACTERS).splitlines() if len(latest) else ['No rows.']
     pages = _listing_pages(lines, LIST_PDF_LINES)
-    title = f'{source.name} | latest {len(latest):,} rows'
+    title = (f'{source.name} | latest {len(latest):,} rows' if window is None
+             else f'{source.name} | window {window.label} | {len(latest):,} rows')
     document = PdfPages(pdf_path)
     try:
         for number, page in enumerate(pages, 1):
@@ -3522,23 +3555,41 @@ def plot_listing(summary, latest, source, pdf_path):
 
 
 def list_parquet(arguments, use_pdf=False):
-    """`List <file> [rows] [output.pdf]`: print the latest rows of any Parquet file.
+    """`List <file> [rows|window] [output.pdf]`: print the latest rows of any Parquet file.
 
-    With --pdf the listing is also saved, by default as
-    charts/<file name>_latest<rows>_rows_<stamp>.pdf. Returns the PDF path, or None.
+    `rows` counts rows. A window - 100d, 350d-25d, Jan2026 or Jan2026-Mar2026 - takes every
+    row on its trading days instead, by Date (BizDt where present). With --pdf the listing is
+    also saved, by default as charts/<file name>_latest<rows>_rows_<stamp>.pdf or
+    charts/<file name>_<window>_rows_<stamp>.pdf. Returns the PDF path, or None.
     """
     counts = [argument for argument in arguments if argument.lstrip('+-').isdigit()]
     outputs = [argument for argument in arguments if argument.lower().endswith('.pdf')]
-    files = [argument for argument in arguments if argument not in counts + outputs]
-    if len(files) != 1 or len(counts) > 1 or len(outputs) > 1 or files[0].startswith('--'):
-        print('Usage: python Option-OGN.py [--pdf] List <file.parquet> [rows] [output.pdf]')
+    windows = []
+    for argument in arguments:
+        if argument in counts or argument in outputs:
+            continue
+        try:
+            window = parse_report_window(argument)
+        except ValueError as error:
+            print(f'  [error] {error}')
+            return None
+        if window is not None:
+            windows.append((argument, window))
+    files = [argument for argument in arguments
+             if argument not in counts + outputs + [token for token, _ in windows]]
+    if (len(files) != 1 or len(counts) + len(windows) > 1 or len(outputs) > 1
+            or files[0].startswith('--')):
+        print('Usage: python Option-OGN.py [--pdf] List <file.parquet> [rows|window] [output.pdf]')
         print(f'  rows        optional - latest N rows (default {LATEST_ROWS}), by Date when the file has one')
+        print('  window      optional - every row on 100d (latest 100 trading days), 350d-25d,')
+        print('              Jan2026 or Jan2026-Mar2026, instead of a row count')
         print('  --pdf       also save the listing as a PDF, by default in the charts folder')
         print('  output.pdf  optional - custom PDF name; needs --pdf')
         print('  Quote paths that contain spaces.')
         return None
+    window = windows[0][1] if windows else None
     rows = int(counts[0]) if counts else LATEST_ROWS
-    if rows <= 0:
+    if window is None and rows <= 0:
         print(f'  [error] rows must be positive, got {rows}.')
         return None
     if outputs and not use_pdf:
@@ -3547,11 +3598,11 @@ def list_parquet(arguments, use_pdf=False):
 
     source = Path(os.path.abspath(files[0]))
     try:
-        latest, total, order = latest_parquet_rows(source, rows)
+        latest, total, order = latest_parquet_rows(source, rows, window=window)
     except (OSError, ValueError, NotImplementedError) as error:
         print(f'  [error] {error}')
         return None
-    summary = _listing_summary(source, latest, total, order)
+    summary = _listing_summary(source, latest, total, order, window)
     for line in summary:
         print(f'  {line}')
     if len(latest):
@@ -3559,8 +3610,10 @@ def list_parquet(arguments, use_pdf=False):
         print(_listing_text(latest, shutil.get_terminal_size((160, 24)).columns))
     if not use_pdf:
         return None
-    pdf_path = outputs[0] if outputs else str(CHARTS_DIR / f'{source.stem}_latest{rows}_rows.pdf')
-    pdf_path = plot_listing(summary, latest, source, pdf_path)
+    name = (f'{source.stem}_latest{rows}_rows.pdf' if window is None
+            else f'{source.stem}_{window.label}_rows.pdf')
+    pdf_path = plot_listing(summary, latest, source, outputs[0] if outputs else str(CHARTS_DIR / name),
+                            window=window)
     print(f'\n  PDF saved: {pdf_path}')
     return pdf_path
 
@@ -3615,7 +3668,7 @@ def main():
         python Option-OGN.py --pdf WTI US02Y__US10Y   # -> charts/WTI_vs_US02Y__US10Y_Analysis_<stamp>.pdf
         python Option-OGN.py --pdf output.pdf         # custom output file -> output_<stamp>.pdf
         python Option-OGN.py List "<file>.parquet" 20 # latest 20 rows of any Parquet file
-        python Option-OGN.py --pdf List "<file>.parquet" 20  # -> charts/<file>_latest20_rows_<stamp>.pdf
+        python Option-OGN.py --pdf List "<file>.parquet" 100d  # -> charts/<file>_100d_rows_<stamp>.pdf
 
     <stamp> is the run time as YYYYMMDD_HHMMSS, so reruns never overwrite a report.
     Each PDF's full path is printed once it is saved.
@@ -3743,7 +3796,8 @@ def main():
         print("  window            optional - 250d (last 250 trading days), 350d-25d (latest 25 excluded),")
         print("                    Jan2026 or Jan2026-Mar2026; also --periods N. Counts are observations")
         print("                    at the analysed cadence, e.g. aligned months for a monthly comparison")
-        print(f"  List <file> [rows]    latest rows of any Parquet file (default {LATEST_ROWS}); --pdf also saves a PDF")
+        print(f"  List <file> [rows|window]  latest rows (default {LATEST_ROWS}) or every row in a window"
+              f" (100d, Jan2026) of any Parquet file; --pdf also saves a PDF")
         print("  --compare-frequency   auto (slower source), daily, weekly, monthly, quarterly, annual")
         print("  --compare-aggregation auto (series-specific), mean, last, sum")
         print('  --option-dates N          recent trading dates for IV overlays (default 5)')

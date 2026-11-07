@@ -376,6 +376,25 @@ class ParquetListTests(unittest.TestCase):
         self.assertIn('LATEST', output)
         self.assertNotIn('OLDER', output)
 
+    def test_list_windows_take_every_row_on_their_trading_days(self):
+        source = self.root / 'FO.parquet'
+        pd.DataFrame({'Date': [datetime.date(2026, 10, 9)] * 2 + [datetime.date(2026, 12, 10)] * 2,
+                      'BizDt': ['2026-10-09'] * 2 + ['2026-10-12'] * 2,
+                      'Symbol': ['OLDER-CE', 'OLDER-PE', 'LATEST-CE', 'LATEST-PE']}).to_parquet(source, index=False)
+        output = self.run_cli('List', str(source), '1d')
+        self.assertIn('Showing the 2 rows on 1 trading day in window 1d, by Date (2026-10-12 to 2026-10-12)', output)
+        self.assertIn('LATEST-PE', output)
+        self.assertNotIn('OLDER', output)
+        output = self.run_cli('--pdf', 'List', str(source), 'oct2026')
+        self.assertIn('Showing the 4 rows on 2 trading days in window Oct2026', output)
+        self.assertRegex(Path(re.search(r'PDF saved: (.+\.pdf)', output).group(1)).name,
+                         r'^FO_Oct2026_rows_\d{8}_\d{6}\.pdf$')
+        for arguments, message in [(['List', str(source), '2', '1d'], 'Usage:'),
+                                   (['List', str(source), '25d-350d'], 'the first count must exceed the second'),
+                                   (['List', str(self.root / 'none.parquet'), '1d'], 'No such file')]:
+            with self.subTest(arguments=arguments):
+                self.assertIn(message, self.run_cli(*arguments))
+
     def test_pdf_pages_repeat_column_block_headers(self):
         pages = self.module._listing_pages(['H1', 'a', 'b', 'c', 'd', '', 'H2', 'e'], 4)
         self.assertEqual(pages, [['H1', 'a', 'b', 'c'], ['H1', 'd', ''], ['H2', 'e']])
@@ -433,12 +452,15 @@ class MaxPainPageTests(unittest.TestCase):
                 for strike, oi in zip(cls.STRIKES, values)]
         return pd.DataFrame(rows)
 
-    def positioning(self, frame, as_of='2026-01-31'):
+    def loader(self, frame):
         def stored(symbol, start=None, end=None):
             return frame[(frame['Date'] >= start) & (frame['Date'] <= end)].reset_index(drop=True)
-        loader = Mock(side_effect=stored)
+        return Mock(side_effect=stored)
+
+    def positioning(self, frame, as_of='2026-01-31', start=None):
+        loader = self.loader(frame)
         with patch.object(self.module, 'load_derivatives', loader):
-            return self.module.option_positioning('ABB', as_of), loader
+            return self.module.option_positioning('ABB', as_of, start=start), loader
 
     def sample(self):
         return pd.concat([
@@ -449,6 +471,17 @@ class MaxPainPageTests(unittest.TestCase):
             self.chain('2026-02-02', '2026-02-24', [7] * 5, [7] * 5),        # after the range
             pd.DataFrame({'Date': [pd.Timestamp('2026-01-30')], 'Expiry': [pd.Timestamp('2026-02-24')],
                           'Instrument': ['FUTSTK'], 'Option type': ['XX'], 'Open Int': [5000.0]}),
+        ], ignore_index=True)
+
+    def settled_sample(self):
+        """Options around the 27 Jan 2026 expiry, which settles before the latest options of 30 Jan."""
+        lopsided = ([5, 10, 20, 40, 30], [60, 40, 20, 10, 10])
+        return pd.concat([
+            self.chain('2026-01-23', '2026-01-27', [1] * 5, [1] * 5, spot=95.0),
+            self.chain('2026-01-26', '2026-01-27', *lopsided, spot=98.0),         # the day before expiry
+            self.chain('2026-01-27', '2026-01-27', [3] * 5, [3] * 5, spot=104.0),  # expiry day
+            self.chain('2026-01-27', '2026-02-24', *lopsided, spot=104.0),
+            self.chain('2026-01-30', '2026-02-24', *lopsided),
         ], ignore_index=True)
 
     def test_curve_matches_writer_payout_and_the_previous_max_pain(self):
@@ -467,14 +500,19 @@ class MaxPainPageTests(unittest.TestCase):
 
     def test_positioning_uses_the_latest_options_and_nearest_unexpired_expiry(self):
         positioning, loader = self.positioning(self.sample())
-        self.assertEqual(loader.call_args.kwargs, {'start': '2025-12-31', 'end': '2026-01-31'})
+        self.assertEqual(loader.call_args.kwargs, {'start': '2025-11-12', 'end': '2026-01-31'})
         self.assertEqual((positioning['date'], positioning['expiry'], positioning['as_of']),
                          (pd.Timestamp('2026-01-30'), pd.Timestamp('2026-02-24'), pd.Timestamp('2026-01-31')))
+        self.assertIsNone(positioning['expired'])  # 27 Jan options exist only after their expiry
         self.assertEqual((positioning['max_pain'], positioning['spot']), (100.0, 101.0))
         self.assertEqual((positioning['call_oi'], positioning['put_oi']), (105.0, 140.0))
         self.assertAlmostEqual(positioning['pcr'], 140 / 105)
         self.assertAlmostEqual(positioning['pcr_all'], 290 / 155)
         self.assertAlmostEqual(positioning['pcr_volume'], 30 / 40)
+        self.assertEqual([item['expiry'] for item in positioning['expiries']],
+                         [pd.Timestamp('2026-02-24'), pd.Timestamp('2026-03-30')])
+        self.assertEqual((positioning['all_expiries']['put_oi'], positioning['all_expiries']['call_oi']), (290.0, 155.0))
+        self.assertAlmostEqual(positioning['expiries'][1]['pcr'], 3.0)
 
     def test_positioning_explains_missing_options_or_open_interest(self):
         sample = self.sample()
@@ -490,31 +528,144 @@ class MaxPainPageTests(unittest.TestCase):
         plot.assert_not_called()
         self.assertIn('No stored derivatives for WTI', output.getvalue())
 
-    def test_page_marks_max_pain_spot_and_a_pcr_gauge(self):
-        positioning, _ = self.positioning(self.sample())
+    def test_positioning_adds_the_last_expiry_in_the_range_with_its_close(self):
+        sample = self.settled_sample()
+        positioning, loader = self.positioning(sample, start='2025-06-02')
+        self.assertEqual(loader.call_args.kwargs, {'start': '2025-11-12', 'end': '2026-01-31'})
+        self.assertEqual((positioning['date'], positioning['expiry']),
+                         (pd.Timestamp('2026-01-30'), pd.Timestamp('2026-02-24')))
+        expired = positioning['expired']
+        self.assertEqual((expired['date'], expired['expiry']), (pd.Timestamp('2026-01-26'), pd.Timestamp('2026-01-27')))
+        self.assertEqual((expired['max_pain'], expired['spot'], expired['close']), (100.0, 98.0, 104.0))
+        self.assertEqual(expired['curve'].loc[100.0, 'Total'], 250.0)
+
+        positioning, loader = self.positioning(sample, start='2026-01-28')  # Range starts after that expiry
+        self.assertIsNone(positioning['expired'])
+        self.assertEqual(loader.call_args.kwargs, {'start': '2026-01-18', 'end': '2026-01-31'})
+
+        positioning, _ = self.positioning(sample, as_of='2026-01-27')  # Range ends on expiry day
+        self.assertEqual((positioning['date'], positioning['expiry'], positioning['spot']),
+                         (pd.Timestamp('2026-01-27'), pd.Timestamp('2026-02-24'), 104.0))
+        self.assertEqual([item['expiry'] for item in positioning['expiries']], [pd.Timestamp('2026-02-24')])
+        self.assertEqual((positioning['expired']['date'], positioning['expired']['close']),
+                         (pd.Timestamp('2026-01-26'), 104.0))
+
+        unpriced = sample[sample['Date'] != pd.Timestamp('2026-01-27')]
+        with patch.object(self.module, 'load_derivatives', self.loader(unpriced)), \
+                patch.object(self.module, 'plot_max_pain') as plot, \
+                patch.object(self.module.sys, 'stdout', new_callable=io.StringIO) as output:
+            positioning = self.module.max_pain_analysis('ABB', '2026-01-31')
+        self.assertTrue(np.isnan(positioning['expired']['close']))
+        plot.assert_called_once()
+        self.assertIn('2026-01-26, the day before the 2026-01-27 expiry: max pain 100, no expiry-day close stored',
+                      output.getvalue())
+
+    def render(self, positioning):
+        """(figure, max pain charts top to bottom, PCR gauges); gauges have their axes switched off."""
         document = Mock()
         self.module.plot_max_pain(positioning, 'ABB', pdf_pages=document)
         figure = document.savefig.call_args.args[0]
-        chart, gauge = figure.axes
-        self.assertEqual(len(chart.patches), 2 * len(self.STRIKES))
-        self.assertEqual([text.get_text() for text in chart.get_legend().get_texts()], ['Call pain', 'Put pain'])
-        self.assertEqual({'Max pain 100', 'Spot 101.00'}, {text.get_text() for text in chart.texts})
-        gauge_texts = {text.get_text() for text in gauge.texts}
-        self.assertTrue({'CALLS', 'PUTS', 'PCR 1.33', 'Put OI 140   /   Call OI 105',
-                         'All expiries 1.87   |   Volume 0.75'} <= gauge_texts)
+        return figure, [ax for ax in figure.axes if ax.axison], [ax for ax in figure.axes if not ax.axison]
+
+    def needle_angle(self, gauge):
         needle = next(patch for patch in gauge.patches if isinstance(patch, self.module.matplotlib.patches.Polygon))
         tip = needle.get_xy()[0]
-        self.assertAlmostEqual(np.degrees(np.arctan2(tip[1], tip[0])), 180 * (1 - (140 / 105) / (1 + 140 / 105)))
+        return np.degrees(np.arctan2(tip[1], tip[0]))
+
+    def assert_tidy(self, figure, charts, gauges):
         figure.canvas.draw()
         renderer = figure.canvas.get_renderer()
-        titles = [chart.title, gauge.title, *figure.texts]
-        boxes = [text.get_window_extent(renderer) for text in titles if text.get_text()]
-        for box in boxes:
+        blocks = [*(chart.get_tightbbox(renderer) for chart in charts),
+                  *(gauge.get_tightbbox(renderer) for gauge in gauges),
+                  *(text.get_window_extent(renderer) for text in figure.texts if text.get_text())]
+        for box in blocks:
             self.assertTrue(figure.bbox.x0 <= box.x0 and box.x1 <= figure.bbox.x1)
             self.assertTrue(figure.bbox.y0 <= box.y0 and box.y1 <= figure.bbox.y1)
-        for first, second in itertools.combinations(boxes, 2):
+        for first, second in itertools.combinations(blocks, 2):
             self.assertFalse(first.overlaps(second))
+        for chart in charts:
+            area = chart.get_window_extent(renderer)
+            for text in chart.texts:
+                box = text.get_window_extent(renderer)
+                self.assertTrue(area.x0 <= box.x0 and box.x1 <= area.x1, text.get_text())
+        for gauge in gauges:
+            texts = [text.get_window_extent(renderer) for text in gauge.texts if text.get_text()]
+            for first, second in itertools.combinations(texts, 2):
+                self.assertFalse(first.overlaps(second))
         self.assertFalse(self.module.plt.get_fignums())
+
+    def test_page_marks_max_pain_spot_and_pcr_gauges_per_expiry(self):
+        positioning, _ = self.positioning(self.sample())
+        figure, charts, gauges = self.render(positioning)
+        chart, = charts  # No expiry settled in range: the latest options alone
+        np.testing.assert_allclose(chart.get_position().bounds, self.module.MAX_PAIN_SINGLE)
+        self.assertEqual(chart.get_title(), 'Max Pain: ABB 30-01-2026, latest options, expiry 24 Feb 2026')
+        self.assertEqual(len(chart.patches), 2 * len(self.STRIKES))
+        self.assertEqual([text.get_text() for text in chart.get_legend().get_texts()], ['Call pain', 'Put pain'])
+        self.assertEqual({'Max pain 100', 'Spot 101.00 (30 Jan)'}, {text.get_text() for text in chart.texts})
+        expected = [('All expiries', 290, 155), ('Expiry 24 Feb 2026 (max pain)', 140, 105),
+                    ('Expiry 30 Mar 2026', 150, 50)]
+        self.assertEqual(len(gauges), len(expected))
+        for gauge, (title, put, call) in zip(gauges, expected):
+            texts = {text.get_text() for text in gauge.texts}
+            self.assertTrue({title, 'CALLS', 'PUTS', f'PCR {put / call:.2f}', f'Put OI {put}   /   Call OI {call}',
+                             'Volume PCR 0.75'} <= texts, texts)
+            self.assertAlmostEqual(self.needle_angle(gauge), 180 * (1 - (put / call) / (1 + put / call)))
+        cells = [gauge.get_position(original=True) for gauge in gauges]
+        self.assertEqual(len({round(cell.x0, 6) for cell in cells}), 1)  # A single column of three
+        self.assertEqual([cell.y0 for cell in cells], sorted((cell.y0 for cell in cells), reverse=True))
+        self.assertIn('PCR: put open interest / call open interest for all expiries',
+                      ' '.join(text.get_text() for text in figure.texts))
+        self.assert_tidy(figure, charts, gauges)
+
+    def test_page_puts_the_last_settled_expiry_above_the_latest_options(self):
+        positioning, _ = self.positioning(self.settled_sample())
+        figure, charts, gauges = self.render(positioning)
+        self.assertEqual(len(charts), 2)
+        upper, lower = sorted(charts, key=lambda chart: -chart.get_position().y0)
+        np.testing.assert_allclose([chart.get_position().bounds for chart in (upper, lower)],
+                                   self.module.MAX_PAIN_HALVES)
+        self.assertEqual(upper.get_title(), 'Max Pain: ABB 26-01-2026, the day before the 27 Jan 2026 expiry')
+        self.assertEqual(lower.get_title(), 'Max Pain: ABB 30-01-2026, latest options, expiry 24 Feb 2026')
+        self.assertEqual({text.get_text() for text in upper.texts},
+                         {'Max pain 100', 'Spot 98.00 (26 Jan)', 'Expiry close 104.00 (27 Jan), +4.0% vs max pain'})
+        self.assertEqual({text.get_text() for text in lower.texts}, {'Max pain 100', 'Spot 101.00 (30 Jan)'})
+        lines = {line.get_color(): line.get_xdata()[0] for line in upper.get_lines()}
+        self.assertEqual(set(lines), {'#d62728', self.module.MAX_PAIN_CLOSE_COLOUR})
+        self.assertAlmostEqual(lines['#d62728'], 1.6)                           # Spot 98 between 95 and 100
+        self.assertAlmostEqual(lines[self.module.MAX_PAIN_CLOSE_COLOUR], 2.8)   # Close 104 between 100 and 105
+        self.assertEqual(len(lower.get_lines()), 1)
+        self.assertEqual((upper.get_xlabel(), lower.get_xlabel()), ('', 'Strike (settlement price at expiry)'))
+        self.assertEqual(len(gauges), 1)  # The PCR gauges follow the latest options only
+        self.assertIn('Expiry 24 Feb 2026 (only expiry)', {text.get_text() for text in gauges[0].texts})
+        self.assert_tidy(figure, charts, gauges)
+
+    def test_gauge_grid_uses_one_column_up_to_three_then_two(self):
+        self.assertEqual([self.module._gauge_layout(count) for count in range(1, 9)],
+                         [(1, 1), (1, 2), (1, 3), (2, 2), (2, 3), (2, 3), (2, 4), (2, 4)])
+
+    def test_many_few_or_single_expiries_fit_the_grid(self):
+        expiries = pd.date_range('2026-02-03', periods=10, freq='7D')
+        frames = [self.chain('2026-01-30', when, [5, 10, 20, 40, 30], [30, 35, 25, 10, 5]) for when in expiries]
+        figure, charts, gauges = self.render(self.positioning(pd.concat(frames))[0])
+        self.assertEqual(len(gauges), self.module.PCR_GAUGE_MAX)
+        area_left, _, area_width, _ = self.module.PCR_GAUGE_AREA
+        pad, cell = self.module.PCR_GAUGE_PAD, area_width / 2
+        self.assertEqual({round(gauge.get_position(original=True).width, 6) for gauge in gauges},
+                         {round(cell * (1 - 2 * pad), 6)})
+        self.assertIn('PCR gauges show the nearest 7 of 10 expiries; All expiries includes every one.',
+                      ' '.join(text.get_text() for text in figure.texts))
+        self.assert_tidy(figure, charts, gauges)
+
+        figure, charts, gauges = self.render(self.positioning(pd.concat(frames[:4]))[0])
+        self.assertEqual(len(gauges), 5)
+        self.assertAlmostEqual(gauges[-1].get_position(original=True).x0, area_left + (0.5 + pad) * cell)
+        self.assert_tidy(figure, charts, gauges)
+
+        figure, charts, gauges = self.render(self.positioning(frames[0])[0])
+        self.assertEqual(len(gauges), 1)
+        self.assertIn('Expiry 03 Feb 2026 (only expiry)', {text.get_text() for text in gauges[0].texts})
+        self.assert_tidy(figure, charts, gauges)
 
     def test_wide_chains_draw_strikes_around_max_pain_and_spot(self):
         curve = pd.DataFrame({'Total': np.arange(100.0)}, index=pd.Index(np.arange(100.0) * 50, name='Strike'))
