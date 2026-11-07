@@ -11,7 +11,7 @@ multi-panel technical analysis charts including:
   - Renko charts
   - Support / resistance regression trendlines (scipy pivots + numpy polyfit)
 
-Report pages: technical -> trendlines -> volatility -> volatility guide -> option IV
+Report pages: technical -> max pain & PCR -> trendlines -> volatility -> volatility guide -> option IV
 (next 3 monthly expiries, plus the next 5 expiries when weekly contracts are listed)
 -> comparison, then separate Japan, US Schiller and India Schiller appendices once
 per PDF. Edit REPORT_SECTIONS to drop any of them.
@@ -169,6 +169,7 @@ CHARTS_DIR = Path(r"C:\OGN-OneDrive\OneDrive\Github projects\OGN") / "charts"
 # Comment out any line to drop that section from the generated report.
 REPORT_SECTIONS = [
     'technical',    # multi-panel indicator chart for the first symbol
+    'max_pain',     # max pain and put-call ratio of the range's latest options, when stored
     'trendlines',   # candlestick page with support / resistance regression lines
     'volatility',   # volatility cone / rolling / histogram page
     'volatility_guide',  # one page explaining each volatility graph with this report's numbers
@@ -284,28 +285,29 @@ def put_otm(df, focus_date):
     return df.loc[mask, ['Strike Price', 'Open Int']].copy()
 
 
-def max_pain_strike(call_sums, put_sums):
-    """Compute the strike at which total option-writer pain is minimised.
+def max_pain_curve(calls, puts):
+    """Option writers' payout at each strike if the expiry settled there.
 
-    For each candidate strike, calculates the total intrinsic value * OI
-    that option writers would have to pay out (ITM calls + ITM puts).
-    The strike with the lowest total payout is the "max pain" strike.
+    `calls` and `puts` hold Strike Price and Open Int rows. Settling at S, call pain
+    sums OI x (S - K) over calls struck below S and put pain sums OI x (K - S) over
+    puts struck above S. Returns Call pain, Put pain and Total indexed by strike.
     """
-    strikes = sorted(set(call_sums['Strike Price']).union(set(put_sums['Strike Price'])))
-    pain = {}
-    for s in strikes:
-        # ITM calls: strikes below the candidate settlement price
-        itm_calls = call_sums[call_sums['Strike Price'] < s].copy()
-        itm_calls['pain'] = (s - itm_calls['Strike Price']) * itm_calls['Open Int']
-        # ITM puts: strikes above the candidate settlement price
-        itm_puts = put_sums[put_sums['Strike Price'] > s].copy()
-        itm_puts['pain'] = (itm_puts['Strike Price'] - s) * itm_puts['Open Int']
-        # Total writer payout at this settlement price
-        pain[s] = itm_calls['pain'].sum() + itm_puts['pain'].sum()
-    if not pain:
-        return np.nan
-    # Strike that minimises total writer pain
-    return min(pain, key=pain.get)
+    def open_interest(rows):
+        strikes = pd.to_numeric(rows['Strike Price'], errors='coerce')
+        return pd.to_numeric(rows['Open Int'], errors='coerce').fillna(0.0).groupby(strikes).sum()
+
+    call_oi, put_oi = open_interest(calls), open_interest(puts)
+    strikes = np.union1d(call_oi.index.to_numpy(float), put_oi.index.to_numpy(float))
+    call_pain = (np.maximum(strikes[:, None] - call_oi.index.to_numpy(float), 0) * call_oi.to_numpy()).sum(axis=1)
+    put_pain = (np.maximum(put_oi.index.to_numpy(float) - strikes[:, None], 0) * put_oi.to_numpy()).sum(axis=1)
+    return pd.DataFrame({'Call pain': call_pain, 'Put pain': put_pain, 'Total': call_pain + put_pain},
+                        index=pd.Index(strikes, name='Strike'))
+
+
+def max_pain_strike(call_sums, put_sums):
+    """The strike at which option writers' total payout (max_pain_curve) is smallest."""
+    curve = max_pain_curve(call_sums, put_sums)
+    return np.nan if curve.empty else curve['Total'].idxmin()
 
 
 def GetMaxPain(scrip, start_date):
@@ -330,6 +332,189 @@ def GetMaxPain(scrip, start_date):
         mp = max_pain_strike(cs, ps)
         rows.append({'Date': d, 'MaxPain': mp, 'PCR': pcr})
     return pd.DataFrame(rows)
+
+
+# ── Max pain and put-call ratio page ──────────────────────────────────────
+MAX_PAIN_STRIKES = 41                    # Strikes drawn around max pain; the calculation uses all
+MAX_PAIN_CALL = ('#c6d9f1', '#4f81bd')   # Bar fill and edge
+MAX_PAIN_PUT = ('#f2c4c4', '#c0504d')
+PCR_GAUGE_TICKS = (0.25, 0.5, 0.75, 1, 1.5, 2, 4)
+PCR_GAUGE_COLOURS = ('#1a7f37', '#a7d7a9', '#f4f4f4', '#f1a8a3', '#c62828')  # Calls green .. puts red
+PCR_CALL_COLOUR, PCR_PUT_COLOUR = '#1a7f37', '#c62828'
+
+
+def _strike_label(strike):
+    """1,234 or 102.5 - strikes without trailing zeros."""
+    return format(strike, ',.2f').rstrip('0').rstrip('.')
+
+
+def _ratio_text(value):
+    """A put-call ratio for display; inf means puts without any calls."""
+    if value is None or np.isnan(value):
+        return 'n/a'
+    return 'no calls' if np.isinf(value) else f'{value:.2f}'
+
+
+def option_positioning(symbol, as_of):
+    """Max pain and put-call ratios for the nearest expiry on the last option date up to `as_of`.
+
+    Ratios use open interest unless named otherwise: `pcr` for that expiry, `pcr_all`
+    across every unexpired expiry that day, `pcr_volume` from traded contracts.
+    """
+    as_of = pd.Timestamp(as_of).normalize()
+    frame = load_derivatives(symbol, start=f'{as_of - pd.Timedelta(days=31):%Y-%m-%d}', end=f'{as_of:%Y-%m-%d}')
+    side = (frame['Option type'].astype(str).str.strip().str.upper()
+            if 'Option type' in frame.columns else pd.Series('', index=frame.index))
+    options = frame[side.isin(['CE', 'PE'])].assign(Side=side)
+    if options.empty:
+        raise ValueError(f"no {symbol} options in the month to {as_of:%d %b %Y}")
+    day = options['Date'].max()
+    listed = options[(options['Date'] == day) & (options['Expiry'] >= day)]
+    if listed.empty:
+        raise ValueError(f"no unexpired {symbol} options on {day:%d %b %Y}")
+    expiry = listed['Expiry'].min()
+    chain = listed[listed['Expiry'] == expiry]
+
+    def total(rows, column):
+        return float(pd.to_numeric(rows[column], errors='coerce').sum()) if column in rows.columns else np.nan
+
+    def ratio(put, call):
+        return put / call if call > 0 else (np.inf if put > 0 else np.nan)
+
+    calls, puts = chain[chain['Side'] == 'CE'], chain[chain['Side'] == 'PE']
+    call_oi, put_oi = total(calls, 'Open Int'), total(puts, 'Open Int')
+    if not call_oi + put_oi > 0:
+        raise ValueError(f"no open interest on the {symbol} {expiry:%d %b %Y} expiry")
+    curve = max_pain_curve(calls, puts)
+    spot = (float(pd.to_numeric(chain['Underlying Price'], errors='coerce').median())
+            if 'Underlying Price' in chain.columns else np.nan)
+    return {'as_of': as_of, 'date': day, 'expiry': expiry, 'curve': curve,
+            'max_pain': curve['Total'].idxmin(), 'spot': spot, 'call_oi': call_oi, 'put_oi': put_oi,
+            'pcr': ratio(put_oi, call_oi),
+            'pcr_all': ratio(total(listed[listed['Side'] == 'PE'], 'Open Int'),
+                             total(listed[listed['Side'] == 'CE'], 'Open Int')),
+            'pcr_volume': ratio(total(puts, 'Contracts'), total(calls, 'Contracts'))}
+
+
+def _max_pain_window(curve, max_pain, spot):
+    """MAX_PAIN_STRIKES strikes around max pain, shifted to include the spot when both fit."""
+    strikes = curve.index.to_numpy(float)
+    if len(strikes) <= MAX_PAIN_STRIKES:
+        return curve
+    centre = int(np.searchsorted(strikes, max_pain))
+    if np.isfinite(spot):
+        spot_at = int(np.clip(np.searchsorted(strikes, spot), 0, len(strikes) - 1))
+        if abs(spot_at - centre) < MAX_PAIN_STRIKES - 2:
+            centre = (centre + spot_at) // 2
+    first = int(np.clip(centre - MAX_PAIN_STRIKES // 2, 0, len(strikes) - MAX_PAIN_STRIKES))
+    return curve.iloc[first:first + MAX_PAIN_STRIKES]
+
+
+def _draw_pcr_gauge(ax, positioning):
+    """Semicircular gauge: the needle sits at puts' share of open interest.
+
+    Calls dominate on the green left, puts on the red right; PCR 1 points straight up.
+    """
+    cmap = matplotlib.colors.LinearSegmentedColormap.from_list('pcr', PCR_GAUGE_COLOURS)
+    for step in range(90):
+        ax.add_patch(matplotlib.patches.Wedge((0, 0), 1.0, 178 - 2 * step, 180 - 2 * step, width=0.3,
+                                              facecolor=cmap((step + 0.5) / 90), edgecolor='none'))
+    for value in PCR_GAUGE_TICKS:
+        angle = np.radians(180 * (1 - value / (1 + value)))
+        direction = np.array([np.cos(angle), np.sin(angle)])
+        ax.plot(*zip(direction * 1.0, direction * 1.07), color='#454c50', linewidth=2)
+        ax.text(*(direction * 1.17), f'{value:g}', ha='center', va='center', fontsize=17, color='#373d41')
+    pcr = positioning['pcr']
+    angle = np.radians(180 * (1 - (1.0 if np.isinf(pcr) else pcr / (1 + pcr))))
+    tip = np.array([np.cos(angle), np.sin(angle)]) * 0.86
+    side = np.array([-np.sin(angle), np.cos(angle)]) * 0.04
+    ax.add_patch(matplotlib.patches.Polygon([tip, side, -side], closed=True, color='#2b2f33', zorder=4))
+    ax.add_patch(matplotlib.patches.Circle((0, 0), 0.08, color='#2b2f33', zorder=5))
+    ax.text(-0.85, -0.1, 'CALLS', ha='center', va='top', fontsize=20, fontweight='bold', color=PCR_CALL_COLOUR)
+    ax.text(0.85, -0.1, 'PUTS', ha='center', va='top', fontsize=20, fontweight='bold', color=PCR_PUT_COLOUR)
+    colour = PCR_CALL_COLOUR if pcr < 1 else PCR_PUT_COLOUR if pcr > 1 else '#454c50'
+    ax.text(0, -0.2, f'PCR {_ratio_text(pcr)}', ha='center', va='top', fontsize=44, fontweight='bold', color=colour)
+    ax.text(0, -0.52, f"Put OI {positioning['put_oi']:,.0f}   /   Call OI {positioning['call_oi']:,.0f}",
+            ha='center', va='top', fontsize=17, color='#373d41')
+    ax.text(0, -0.66, f"All expiries {_ratio_text(positioning['pcr_all'])}   |   "
+            f"Volume {_ratio_text(positioning['pcr_volume'])}", ha='center', va='top', fontsize=17, color='#555b60')
+    ax.set_xlim(-1.32, 1.32)
+    ax.set_ylim(-0.82, 1.3)
+    ax.set_aspect('equal')
+    ax.set_axis_off()
+    ax.set_title('Put-Call Ratio (open interest)', fontsize=24, fontweight='bold', pad=6)
+
+
+def plot_max_pain(positioning, ticker, pdf_pages=None):
+    """One page: call and put pain by strike with max pain marked, beside a PCR gauge."""
+    shown = _max_pain_window(positioning['curve'], positioning['max_pain'], positioning['spot'])
+    strikes = shown.index.to_numpy(float)
+    x = np.arange(len(shown))
+    call, put = shown['Call pain'].to_numpy() / 1e7, shown['Put pain'].to_numpy() / 1e7  # Rs crore
+    top = float((call + put).max()) or 1.0
+
+    figure = plt.figure(figsize=(30, 17), facecolor='white')
+    figure.suptitle(f"{ticker}   Max Pain & Put-Call Ratio   |   options of {positioning['date']:%d %b %Y}   |   "
+                    f"expiry {positioning['expiry']:%d %b %Y}", fontsize=32, fontweight='bold', y=0.975)
+    ax = figure.add_axes((0.055, 0.2, 0.56, 0.64))
+    ax.bar(x, call, width=0.72, color=MAX_PAIN_CALL[0], edgecolor=MAX_PAIN_CALL[1], linewidth=1.2, label='Call pain')
+    ax.bar(x, put, width=0.72, bottom=call, color=MAX_PAIN_PUT[0], edgecolor=MAX_PAIN_PUT[1], linewidth=1.2,
+           label='Put pain')
+    ax.set_ylim(0, top * 1.12)
+    ax.set_xlim(-0.7, len(x) - 0.3)
+    at = int(np.flatnonzero(strikes == positioning['max_pain'])[0])
+    align = 'left' if at < len(x) / 4 else 'right' if at > 3 * len(x) / 4 else 'center'
+    ax.annotate(f"Max pain {_strike_label(positioning['max_pain'])}", xy=(at, call[at] + put[at]),
+                xytext=(at, call[at] + put[at] + top * 0.3), ha=align, va='bottom', fontsize=21,
+                fontweight='bold', color='#2b3fd6', arrowprops=dict(arrowstyle='-|>', color='#2b3fd6', lw=2.5))
+    spot = positioning['spot']
+    if np.isfinite(spot) and strikes[0] <= spot <= strikes[-1]:
+        where = float(np.interp(spot, strikes, x))
+        ax.axvline(where, color='#d62728', linestyle=':', linewidth=3)
+        ax.text(where + 0.25, top * 1.1, f'Spot {spot:,.2f}', color='#d62728', fontsize=19, va='top')
+    ax.set_xticks(x)
+    ax.set_xticklabels([_strike_label(strike) for strike in strikes], rotation=90,
+                       fontsize=14 if len(x) <= 30 else 11)
+    ax.tick_params(axis='y', labelsize=14)
+    ax.set_xlabel('Strike (settlement price at expiry)', fontsize=18, fontweight='bold')
+    ax.set_ylabel('Pain value (Rs crore)', fontsize=18, fontweight='bold')
+    ax.grid(axis='y', color='#d5dadd', alpha=0.7)
+    ax.set_axisbelow(True)
+    ax.spines[['top', 'right']].set_visible(False)
+    ax.set_title(f"Max Pain: {ticker} {positioning['date']:%d-%m-%Y}", fontsize=24, fontweight='bold', pad=48)
+    ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.0), ncol=2, fontsize=17, frameon=False)
+
+    _draw_pcr_gauge(figure.add_axes((0.65, 0.27, 0.32, 0.58)), positioning)
+    notes = [
+        'Max pain: the expiry settlement price at which in-the-money options are worth least, so option writers '
+        'pay out least. Pain = open interest x intrinsic value; each bar stacks call and put pain.',
+        f"PCR: put open interest / call open interest on the {positioning['expiry']:%d %b %Y} expiry. "
+        'Above 1 (red) more puts, below 1 (green) more calls. A positioning snapshot, not a forecast.',
+    ]
+    if positioning['date'] != positioning['as_of']:
+        notes.append(f"Latest options on or before {positioning['as_of']:%d %b %Y}, the end of the report's range.")
+    figure.text(0.055, 0.075, '\n'.join(notes), fontsize=14, color='#454c50', va='top', linespacing=1.5)
+    if pdf_pages is not None:
+        try:
+            pdf_pages.savefig(figure)
+        finally:
+            plt.close(figure)
+    else:
+        plt.show()
+
+
+def max_pain_analysis(ticker, as_of, pdf_pages=None):
+    """Compute and render the max pain and put-call ratio page for the options of `as_of`."""
+    try:
+        positioning = option_positioning(ticker, as_of)
+    except FileNotFoundError:
+        print(f"  [max pain] No stored derivatives for {ticker}.")
+        return None
+    print(f"  [max pain] {positioning['date']:%Y-%m-%d}, expiry {positioning['expiry']:%Y-%m-%d}: "
+          f"max pain {_strike_label(positioning['max_pain'])}, spot {positioning['spot']:,.2f}, "
+          f"PCR {_ratio_text(positioning['pcr'])} (all expiries {_ratio_text(positioning['pcr_all'])})")
+    plot_max_pain(positioning, ticker, pdf_pages=pdf_pages)
+    return positioning
 
 
 # ---------------------------------------------------------------------------
@@ -1560,6 +1745,13 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
             display_bars = (technical_window_bars(Indicatordf['Date'])
                             if analysis_window is None else len(price_data))
             plot_chart(Indicatordf, display_bars, Scrip, 0, pdf_pages=pdf_pages)
+
+        # ── Max pain and put-call ratio of the range's latest options ─
+        if 'max_pain' in REPORT_SECTIONS:
+            try:
+                max_pain_analysis(Scrip, price_data.index[-1], pdf_pages=pdf_pages)
+            except (ValueError, KeyError) as e:
+                print(f"  [max pain skipped] {e}")
 
         # ── Support / resistance trendlines ───────────────────────────
         if 'trendlines' in REPORT_SECTIONS:

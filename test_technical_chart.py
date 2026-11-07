@@ -146,6 +146,19 @@ class TechnicalChartTests(unittest.TestCase):
         chart.assert_not_called()
         self.assertIn('No TEST observations in window Jan2030', output.getvalue())
 
+    def test_max_pain_page_follows_the_technical_page_for_the_range_end(self):
+        frame = self.prices()
+        order = []
+        pages = {name: Mock(side_effect=lambda *args, name=name, **kwargs: order.append(name))
+                 for name in ('plot_chart', 'max_pain_analysis', 'trendline_analysis')}
+        self.run_report(frame, days='350d-25d', REPORT_SECTIONS=['trendlines', 'max_pain', 'technical'], **pages)
+        self.assertEqual(order, ['plot_chart', 'max_pain_analysis', 'trendline_analysis'])
+        self.assertEqual(pages['max_pain_analysis'].call_args.args[:2], ('TEST', frame['Date'].iloc[-26]))
+        pages['max_pain_analysis'].side_effect = ValueError('no TEST options in the month to 22 Oct 2026')
+        with patch.object(self.module.sys, 'stdout', new_callable=io.StringIO) as output:
+            self.run_report(frame, REPORT_SECTIONS=['max_pain'], max_pain_analysis=pages['max_pain_analysis'])
+        self.assertIn('[max pain skipped] no TEST options', output.getvalue())
+
     def test_analysis_rejects_nonpositive_windows_before_opening_a_pdf(self):
         for days in (0, -1):
             with self.subTest(days=days), patch.object(self.module, 'PdfPages') as document:

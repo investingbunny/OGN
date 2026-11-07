@@ -90,12 +90,12 @@ Explicit comparison settings enter filenames. **Every PDF**, including custom na
 `_YYYYMMDD_HHMMSS` before `.pdf`; same-second collisions gain `_2`, preventing overwrites.
 The console prints each saved PDF's full path, including custom relative names.
 
-Page order: technical/audit -> trendlines -> volatility -> guide -> option IV by expiry ->
-optional comparison. PDFs append Japan (3 pages), US Schiller (2), India Schiller (2), once each.
+Page order: technical/audit -> max pain & PCR -> trendlines -> volatility -> guide -> option IV by
+expiry -> optional comparison. PDFs append Japan (3 pages), US Schiller (2), India Schiller (2), once each.
 Macro panels show five years of cached data, source/definition/frequency/units/latest date and gaps.
 
 In [Option-OGN.py](Option-OGN.py), comment `REPORT_SECTIONS` entries to disable sections:
-`technical`, `trendlines`, `volatility`, `volatility_guide`, `option_overlay`, `comparison`,
+`technical`, `max_pain`, `trendlines`, `volatility`, `volatility_guide`, `option_overlay`, `comparison`,
 `japan_macro`, `schiller_macro`, `india_schiller`. `VOLATILITY_PANELS` controls individual panels.
 Unavailable sections print a reason without removing other pages.
 
@@ -165,6 +165,19 @@ Renko independently uses full history and shows 100 bricks.
 
 Buy/Sell/Hold are green/red/amber with a verdict. Missing inputs: Hold / *Not enough history*;
 no latest volume: omit volume row. Trendlines use scipy pivots and numpy regression.
+
+### Max Pain & PCR Page
+
+Drawn when the symbol has stored options, from the latest option date on or before the range's last
+day (within a month), for the nearest unexpired expiry:
+
+- **Max pain:** stacked call (blue) and put (red) pain per strike in Rs crore; pain = open interest x
+  intrinsic value if the expiry settled at that strike. An arrow marks the minimum (max pain) and a
+  dotted line the spot. Up to 41 strikes around max pain and spot are drawn; all strikes are used.
+- **PCR gauge:** put OI / call OI for that expiry; the needle is the put share of OI, green (calls)
+  left, red (puts) right, PCR 1 upright. Shows OI totals, all-expiry OI PCR and traded-volume PCR.
+
+Computed with pandas/numpy (TA-Lib has no option-chain functions) and drawn with matplotlib.
 
 ### Volatility Analysis
 

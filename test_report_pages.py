@@ -1,4 +1,4 @@
-"""Checks for volatility guide pages, report windows and timestamped files."""
+"""Checks for volatility guide, max pain and PCR pages, report windows and timestamped files."""
 
 import datetime
 import importlib.util
@@ -410,6 +410,120 @@ class ParquetListTests(unittest.TestCase):
             for first, second in itertools.combinations(boxes, 2):
                 self.assertFalse(first.overlaps(second))
         self.assertFalse(self.module.plt.get_fignums())
+
+
+class MaxPainPageTests(unittest.TestCase):
+    STRIKES = [90, 95, 100, 105, 110]
+
+    @classmethod
+    def setUpClass(cls):
+        import matplotlib
+        matplotlib.use('Agg')
+        spec = importlib.util.spec_from_file_location(
+            'ogn_max_pain_test', Path(__file__).with_name('Option-OGN.py'))
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    @classmethod
+    def chain(cls, day, expiry, call_oi, put_oi, spot=101.0, contracts=(8.0, 6.0)):
+        rows = [{'Date': pd.Timestamp(day), 'Expiry': pd.Timestamp(expiry), 'Instrument': 'OPTSTK',
+                 'Option type': side, 'Strike Price': float(strike), 'Open Int': float(oi),
+                 'Contracts': traded, 'Underlying Price': spot}
+                for side, values, traded in (('CE', call_oi, contracts[0]), ('PE', put_oi, contracts[1]))
+                for strike, oi in zip(cls.STRIKES, values)]
+        return pd.DataFrame(rows)
+
+    def positioning(self, frame, as_of='2026-01-31'):
+        def stored(symbol, start=None, end=None):
+            return frame[(frame['Date'] >= start) & (frame['Date'] <= end)].reset_index(drop=True)
+        loader = Mock(side_effect=stored)
+        with patch.object(self.module, 'load_derivatives', loader):
+            return self.module.option_positioning('ABB', as_of), loader
+
+    def sample(self):
+        return pd.concat([
+            self.chain('2026-01-29', '2026-02-24', [1] * 5, [1] * 5),        # an older day
+            self.chain('2026-01-30', '2026-01-27', [99] * 5, [99] * 5),      # expired, still listed
+            self.chain('2026-01-30', '2026-02-24', [5, 10, 20, 40, 30], [60, 40, 20, 10, 10]),
+            self.chain('2026-01-30', '2026-03-30', [10] * 5, [30] * 5),      # a later expiry
+            self.chain('2026-02-02', '2026-02-24', [7] * 5, [7] * 5),        # after the range
+            pd.DataFrame({'Date': [pd.Timestamp('2026-01-30')], 'Expiry': [pd.Timestamp('2026-02-24')],
+                          'Instrument': ['FUTSTK'], 'Option type': ['XX'], 'Open Int': [5000.0]}),
+        ], ignore_index=True)
+
+    def test_curve_matches_writer_payout_and_the_previous_max_pain(self):
+        calls = pd.DataFrame({'Strike Price': self.STRIKES, 'Open Int': [5, 10, 20, 40, 30]})
+        puts = pd.DataFrame({'Strike Price': self.STRIKES, 'Open Int': [30, 35, 25, 10, 5]})
+        curve = self.module.max_pain_curve(
+            pd.concat([calls, pd.DataFrame({'Strike Price': [np.nan], 'Open Int': [999]})]), puts)
+        # Settling at 100: calls struck at 90 and 95 pay 5 x 10 + 10 x 5; puts at 105 and 110 the same.
+        self.assertEqual(curve.loc[100.0].tolist(), [100.0, 100.0, 200.0])
+        expected = {float(s): float(sum(oi * max(s - k, 0) for k, oi in zip(self.STRIKES, calls['Open Int']))
+                                    + sum(oi * max(k - s, 0) for k, oi in zip(self.STRIKES, puts['Open Int'])))
+                    for s in self.STRIKES}
+        self.assertEqual(curve['Total'].to_dict(), expected)
+        self.assertEqual(self.module.max_pain_strike(calls, puts), 100.0)
+        self.assertTrue(np.isnan(self.module.max_pain_strike(calls.iloc[:0], puts.iloc[:0])))
+
+    def test_positioning_uses_the_latest_options_and_nearest_unexpired_expiry(self):
+        positioning, loader = self.positioning(self.sample())
+        self.assertEqual(loader.call_args.kwargs, {'start': '2025-12-31', 'end': '2026-01-31'})
+        self.assertEqual((positioning['date'], positioning['expiry'], positioning['as_of']),
+                         (pd.Timestamp('2026-01-30'), pd.Timestamp('2026-02-24'), pd.Timestamp('2026-01-31')))
+        self.assertEqual((positioning['max_pain'], positioning['spot']), (100.0, 101.0))
+        self.assertEqual((positioning['call_oi'], positioning['put_oi']), (105.0, 140.0))
+        self.assertAlmostEqual(positioning['pcr'], 140 / 105)
+        self.assertAlmostEqual(positioning['pcr_all'], 290 / 155)
+        self.assertAlmostEqual(positioning['pcr_volume'], 30 / 40)
+
+    def test_positioning_explains_missing_options_or_open_interest(self):
+        sample = self.sample()
+        with self.assertRaisesRegex(ValueError, 'no ABB options in the month to 31 Dec 2025'):
+            self.positioning(sample, as_of='2025-12-31')
+        idle = self.chain('2026-01-30', '2026-02-24', [0] * 5, [0] * 5)
+        with self.assertRaisesRegex(ValueError, 'no open interest'):
+            self.positioning(idle)
+        with patch.object(self.module, 'load_derivatives', side_effect=FileNotFoundError('none')), \
+                patch.object(self.module, 'plot_max_pain') as plot, \
+                patch.object(self.module.sys, 'stdout', new_callable=io.StringIO) as output:
+            self.assertIsNone(self.module.max_pain_analysis('WTI', '2026-01-30'))
+        plot.assert_not_called()
+        self.assertIn('No stored derivatives for WTI', output.getvalue())
+
+    def test_page_marks_max_pain_spot_and_a_pcr_gauge(self):
+        positioning, _ = self.positioning(self.sample())
+        document = Mock()
+        self.module.plot_max_pain(positioning, 'ABB', pdf_pages=document)
+        figure = document.savefig.call_args.args[0]
+        chart, gauge = figure.axes
+        self.assertEqual(len(chart.patches), 2 * len(self.STRIKES))
+        self.assertEqual([text.get_text() for text in chart.get_legend().get_texts()], ['Call pain', 'Put pain'])
+        self.assertEqual({'Max pain 100', 'Spot 101.00'}, {text.get_text() for text in chart.texts})
+        gauge_texts = {text.get_text() for text in gauge.texts}
+        self.assertTrue({'CALLS', 'PUTS', 'PCR 1.33', 'Put OI 140   /   Call OI 105',
+                         'All expiries 1.87   |   Volume 0.75'} <= gauge_texts)
+        needle = next(patch for patch in gauge.patches if isinstance(patch, self.module.matplotlib.patches.Polygon))
+        tip = needle.get_xy()[0]
+        self.assertAlmostEqual(np.degrees(np.arctan2(tip[1], tip[0])), 180 * (1 - (140 / 105) / (1 + 140 / 105)))
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        titles = [chart.title, gauge.title, *figure.texts]
+        boxes = [text.get_window_extent(renderer) for text in titles if text.get_text()]
+        for box in boxes:
+            self.assertTrue(figure.bbox.x0 <= box.x0 and box.x1 <= figure.bbox.x1)
+            self.assertTrue(figure.bbox.y0 <= box.y0 and box.y1 <= figure.bbox.y1)
+        for first, second in itertools.combinations(boxes, 2):
+            self.assertFalse(first.overlaps(second))
+        self.assertFalse(self.module.plt.get_fignums())
+
+    def test_wide_chains_draw_strikes_around_max_pain_and_spot(self):
+        curve = pd.DataFrame({'Total': np.arange(100.0)}, index=pd.Index(np.arange(100.0) * 50, name='Strike'))
+        window = self.module._max_pain_window
+        shown = window(curve, 2500.0, 3000.0).index
+        self.assertEqual(len(shown), self.module.MAX_PAIN_STRIKES)
+        self.assertTrue(2500.0 in shown and 3000.0 in shown)
+        self.assertEqual(window(curve, 100.0, 4900.0).index[0], 0.0)
+        self.assertEqual(len(window(curve.iloc[:10], 100.0, 200.0)), 10)
 
 
 if __name__ == '__main__':
