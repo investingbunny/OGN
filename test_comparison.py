@@ -216,6 +216,25 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(result['lag_unit'], 'observations')
         self.assertEqual(len(result['aligned']), 60)
         self.assertTrue(result['aligned'].index.isin(second.index).all())
+        common = dates.delete(10)
+        excluded = self.module.compute_comparison(first, second, 'Gold', 'Silver', days='30d-5d')
+        self.assertEqual(excluded['aligned'].index.tolist(), common[-30:-5].tolist())
+        self.assertEqual(excluded['total_overlap'], len(common) - 5)
+
+    def test_window_end_applies_before_the_latest_contiguous_run(self):
+        dates = pd.date_range('2010-01-01', periods=84, freq='MS')
+        generator = np.random.default_rng(3)
+        first = self.series(dates, 50 + generator.normal(size=84).cumsum(), 'monthly')
+        second = self.series(dates.delete(78), 20 + generator.normal(size=83).cumsum(), 'monthly')
+        result = self.module.compute_comparison(first, second, 'First', 'Second', days='Jan2012-Dec2014')
+        self.assertEqual(len(result['aligned']), 36)
+        self.assertEqual((result['aligned'].index[0], result['aligned'].index[-1]),
+                         (pd.Timestamp('2012-01-31'), pd.Timestamp('2014-12-31')))
+        self.assertEqual(result['alignment']['dropped_for_gaps'], 0)
+        # Without a window only the run after the July 2016 gap remains.
+        self.assertEqual(len(self.module.compute_comparison(first, second, 'First', 'Second')['aligned']), 5)
+        with self.assertRaisesRegex(ValueError, 'in window Jan2030'):
+            self.module.compute_comparison(first, second, 'First', 'Second', days='Jan2030')
 
     def test_cli_passes_sampling_choices_and_uses_observation_filename(self):
         arguments = ['Option-OGN.py', '--pdf', '--periods', '72',
@@ -225,11 +244,11 @@ class ComparisonTests(unittest.TestCase):
                 patch.object(self.module, 'FnOAnalysis') as analyse:
             self.module.main()
         options = analyse.call_args.kwargs
-        self.assertEqual(options['days'], 72)
+        self.assertEqual(options['days'], self.module.ReportWindow('72d', last=72))
         self.assertEqual(options['comparison_frequency'], 'quarterly')
         self.assertEqual(options['comparison_aggregation'], 'last')
         self.assertEqual(options['pdf_path'], str(
-            self.module.CHARTS_DIR / 'WTI_vs_JP10Y_72obs_quarterly_last_Analysis.pdf'))
+            self.module.CHARTS_DIR / 'WTI_vs_JP10Y_72d_quarterly_last_Analysis.pdf'))
         self.assertEqual(self.module.CHARTS_DIR, Path(r'C:\OGN-OneDrive\OneDrive\Github projects\OGN') / 'charts')
 
     def test_chart_uses_period_labels_and_standardizes_negative_levels(self):
@@ -245,7 +264,7 @@ class ComparisonTests(unittest.TestCase):
         texts = [label.get_text() for label in figure.texts]
         axes_titles = [axes.get_title() for axes in figure.axes]
         self.assertTrue(any('monthly (metadata)' in text for text in texts))
-        self.assertTrue(any('last 72 months' in text for text in texts))
+        self.assertTrue(any('72d: 72 months' in text for text in texts))
         self.assertTrue(any('not a release-time backtest' in text for text in texts))
         self.assertTrue(any('Standardized levels' in title for title in axes_titles))
         self.assertIn('Lag (months)', figure.axes[3].get_xlabel())

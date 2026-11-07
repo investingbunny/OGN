@@ -664,6 +664,133 @@ class DerivativesLoaderTests(unittest.TestCase):
             self.paths['Derivatives'] / 'FINNIFTY.parquet', index=False)
         self.assertTrue(OGN.load_derivatives('FINNIFTY')['Underlying Price'].isna().all())
 
+    def test_nse_reference_dates_fix_derivatives_and_keep_equity_dates(self):
+        legacy = pd.DataFrame({'Date': [DAY(2024, 7, 5)], 'Symbol': 'ABB', 'Instrument': 'OPTSTK',
+                               'Expiry': ['2024-07-25'], 'Strike Price': [7000.0], 'Option type': 'CE',
+                               'Close': [10.0], 'Value': [1.0]})
+        udiff = pd.DataFrame({
+            'Date': [DAY(2024, 1, 8), DAY(2024, 8, 13), DAY(2026, 6, 11)],  # two stored day-first
+            'BizDt': ['2024-08-01', '2024-08-13', '2026-11-06'], 'Symbol': 'ABB', 'Instrument': 'STO',
+            'Expiry': ['2024-08-29', '2024-08-29', '2026-07-11'],
+            'FininstrmActlXpryDt': ['2024-08-29', '2024-08-29', '2026-11-07'], 'Strike Price': 7000.0,
+            'Option type': 'CE', 'Close': [11.0, 12.0, 13.0], 'Value': 1.0,
+            'UndrlygPric': [np.nan, 7100.0, 7200.0]})
+        pd.concat([legacy, udiff]).to_parquet(self.paths['Derivatives'] / 'ABB.parquet', index=False)
+        pd.DataFrame({'Date': [DAY(2024, 1, 8), DAY(2024, 7, 5), DAY(2024, 8, 1)], 'Symbol': 'ABB',
+                      'Series': 'EQ', 'Close': [6000.0, 7000.0, 7050.0]}).to_parquet(
+            self.paths['Equity'] / 'ABB.parquet', index=False)
+        for mode in string_modes():
+            with self.subTest(mode=mode), mode():
+                frame = OGN.load_derivatives('ABB')
+                self.assertEqual(frame['Date'].dt.strftime('%Y-%m-%d').tolist(),
+                                 ['2024-07-05', '2024-08-01', '2024-08-13', '2026-11-06'])
+                self.assertEqual(frame['Expiry'].dt.strftime('%Y-%m-%d').tolist(),
+                                 ['2024-07-25', '2024-08-29', '2024-08-29', '2026-11-07'])
+                self.assertEqual(frame.index.tolist(), [0, 1, 2, 3])
+                # A UDiFF row without UndrlygPric takes the cash close of its true date, not 8 Jan's.
+                self.assertEqual(frame['Underlying Price'].tolist(), [7000.0, 7050.0, 7100.0, 7200.0])
+                self.assertEqual(OGN.load_equity('ABB')['Date'].dt.strftime('%Y-%m-%d').tolist(),
+                                 ['2024-01-08', '2024-07-05', '2024-08-01'])
+
+    def test_corrected_dates_prefer_valid_nse_dates_in_any_case(self):
+        frame = pd.DataFrame({'date': ['2024-01-08', '2024-07-05', '2024-01-09'],
+                              'BIZDT': ['2024-08-01', '', 'not a date']})
+        self.assertEqual(OGN.corrected_dates(frame, 'date').dt.strftime('%Y-%m-%d').tolist(),
+                         ['2024-08-01', '2024-07-05', '2024-01-09'])
+        equity = pd.DataFrame({'Date': [DAY(2024, 1, 8)], 'Close': [1.0]})
+        self.assertEqual(OGN.corrected_dates(equity).tolist(), [pd.Timestamp('2024-01-08')])
+
+
+class LatestRowsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, frame, name='rows.parquet', index=False, **options):
+        path = self.root / name
+        pq.write_table(pa.Table.from_pandas(frame, preserve_index=index), path, **options)
+        return path
+
+    def test_latest_rows_follow_date_with_stable_ties_and_undated_rows_oldest(self):
+        dates = [DAY(2024, 1, 3), DAY(2024, 1, 1), DAY(2024, 1, 2), DAY(2024, 1, 3), None, DAY(2024, 1, 2)]
+        for label, values in [('date32', dates), ('ISO text', [day and day.isoformat() for day in dates])]:
+            with self.subTest(label):
+                path = self.write(pd.DataFrame({'Value': range(6), 'date': values}), row_group_size=2)
+                latest, total, order = OGN.latest_parquet_rows(path, 3)
+                self.assertEqual((total, order), (6, 'date'))
+                self.assertEqual(latest.index.tolist(), [5, 0, 3])
+                self.assertEqual(latest['Value'].tolist(), [5, 0, 3])
+                self.assertEqual(latest.attrs['corrected_dates'], {})
+                self.assertEqual(OGN.latest_parquet_rows(path, 50)[0].index.tolist(), [4, 1, 2, 5, 0, 3])
+
+    def test_latest_rows_take_nse_reference_dates_and_report_corrections(self):
+        frame = pd.DataFrame({
+            'Date': [DAY(2024, 7, 5), DAY(2024, 1, 8), DAY(2024, 8, 13), DAY(2026, 6, 11)],
+            'BizDt': [None, '2024-08-01', '2024-08-13', '2026-11-06'],
+            'Expiry': ['2024-07-25', '2024-08-29', '2024-08-29', '2026-07-11'],
+            'FininstrmActlXpryDt': [None, '2024-08-29', '2024-08-29', '2026-11-07'],
+            'Close': [10.0, 11.0, 12.0, 13.0]})
+        latest, total, order = OGN.latest_parquet_rows(self.write(frame, row_group_size=2), 3)
+        self.assertEqual((total, order, latest.index.tolist()), (4, 'Date', [1, 2, 3]))
+        self.assertEqual(latest['Date'].dt.strftime('%Y-%m-%d').tolist(), ['2024-08-01', '2024-08-13', '2026-11-06'])
+        self.assertEqual(latest['Expiry'].dt.strftime('%Y-%m-%d').tolist(), ['2024-08-29', '2024-08-29', '2026-11-07'])
+        self.assertEqual(latest.attrs['corrected_dates'],
+                         {'Date': ('BizDt', 2), 'Expiry': ('FininstrmActlXpryDt', 1)})
+        raw = self.write(pd.DataFrame({'BizDt': ['2024-08-13', '2024-08-01', None], 'Close': [1.0, 2.0, 3.0]}),
+                         'raw.parquet')
+        latest, _, order = OGN.latest_parquet_rows(raw, 2)
+        self.assertEqual((order, latest.index.tolist()), ('BizDt', [1, 0]))
+
+    def test_only_row_groups_holding_the_latest_rows_are_read(self):
+        frame = pd.DataFrame({'Date': pd.date_range('2024-01-01', periods=6).date, 'Value': range(6)})
+        path = self.write(frame, row_group_size=2)
+        read = pq.ParquetFile.read_row_groups
+        with patch.object(pq.ParquetFile, 'read_row_groups', autospec=True, side_effect=read) as spy:
+            latest, _, _ = OGN.latest_parquet_rows(path, 2)
+        self.assertEqual(spy.call_args.args[1], [2])
+        self.assertEqual((latest.index.tolist(), latest['Value'].tolist()), ([4, 5], [4, 5]))
+
+    def test_files_without_usable_dates_keep_file_order(self):
+        path = self.write(pd.DataFrame({'Symbol': list('ABCDE'), 'Close': [1.0, 2, 3, 4, 5]}),
+                          row_group_size=2)
+        latest, total, order = OGN.latest_parquet_rows(path, 2)
+        self.assertEqual((total, order, latest.index.tolist(), latest['Symbol'].tolist()),
+                         (5, None, [3, 4], ['D', 'E']))
+        self.assertEqual(len(OGN.latest_parquet_rows(path, 10)[0]), 5)
+        unparseable = self.write(pd.DataFrame({'Date': ['n/a', 'unknown', '?'], 'Value': [1, 2, 3]}),
+                                 'unparseable.parquet')
+        latest, _, order = OGN.latest_parquet_rows(unparseable, 2)
+        self.assertEqual((order, latest['Value'].tolist()), (None, [2, 3]))
+        empty = self.write(pd.DataFrame({'Date': pd.Series([], dtype='datetime64[ns]'),
+                                         'Close': pd.Series([], dtype=float)}), 'empty.parquet')
+        latest, total, _ = OGN.latest_parquet_rows(empty, 3)
+        self.assertEqual((total, len(latest), latest.columns.tolist()), (0, 0, ['Date', 'Close']))
+
+    def test_a_stored_date_index_orders_rows_and_becomes_a_column(self):
+        frame = pd.DataFrame({'Close': [3.0, 1.0, 2.0]}, index=pd.DatetimeIndex(
+            ['2024-01-03', '2024-01-01', '2024-01-02'], name='Date'))
+        latest, _, order = OGN.latest_parquet_rows(self.write(frame, index=True), 2)
+        self.assertEqual(order, 'Date')
+        self.assertEqual(latest.columns.tolist(), ['Date', 'Close'])
+        self.assertEqual((latest.index.tolist(), latest['Close'].tolist()), ([2, 0], [2.0, 3.0]))
+
+    def test_rejects_missing_paths_folders_other_files_and_bad_counts(self):
+        with self.assertRaises(FileNotFoundError):
+            OGN.latest_parquet_rows(self.root / 'missing.parquet')
+        with self.assertRaises(IsADirectoryError):
+            OGN.latest_parquet_rows(self.root)
+        text = self.root / 'notes.parquet'
+        text.write_text('not a parquet file')
+        with self.assertRaises(ValueError):
+            OGN.latest_parquet_rows(text)
+        path = self.write(pd.DataFrame({'Close': [1.0]}))
+        for rows in (0, -1):
+            with self.subTest(rows=rows), self.assertRaisesRegex(ValueError, 'positive'):
+                OGN.latest_parquet_rows(path, rows)
+
 
 class RepairTests(unittest.TestCase):
     FOLDERS = {'EQUITY': 'Equity', 'PRICEBAND': 'PriceBand', 'DELIVERY': 'DeliveryPositions',

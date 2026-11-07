@@ -19,9 +19,12 @@ per PDF. Edit REPORT_SECTIONS to drop any of them.
 Usage:
     python Option-OGN.py                          # analyse all FnO symbols (interactive)
     python Option-OGN.py WTI                       # full analysis for one series
+    python Option-OGN.py --pdf WTI 250d            # one series, last 250 trading days
+    python Option-OGN.py --pdf WTI 350d-25d        # ... 350 back to 25 back (latest 25 excluded)
+    python Option-OGN.py --pdf WTI Jan2026         # ... January 2026 (also Jan2026-Mar2026)
     python Option-OGN.py WTI US02Y__US10Y          # ... plus a statistical comparison
-    python Option-OGN.py WTI US02Y__US10Y 250      # ... over the last 250 observations
-    python Option-OGN.py --pdf WTI JP10Y 120      # last 120 aligned months
+    python Option-OGN.py WTI US02Y__US10Y 250d     # ... over the last 250 aligned observations
+    python Option-OGN.py --pdf WTI JP10Y 120d      # last 120 aligned months
     python Option-OGN.py --pdf WTI JP10Y --compare-aggregation last
     python Option-OGN.py --pdf WTI JP10Y --compare-frequency quarterly
     python Option-OGN.py --estimator Raw WTI       # pick the volatility estimator
@@ -32,21 +35,28 @@ Usage:
     python Option-OGN.py --pdf                     # all FnO symbols -> charts/FnO_Analysis_<stamp>.pdf
     python Option-OGN.py --pdf WTI                 # single symbol -> charts/WTI_Analysis_<stamp>.pdf
     python Option-OGN.py --pdf output.pdf          # custom output file -> output_<stamp>.pdf
+    python Option-OGN.py List "<file>.parquet" 20  # latest 20 rows of any Parquet file
+    python Option-OGN.py --pdf List "<file>.parquet" 20  # ... also saved as a PDF
 
-PDF names carry a _YYYYMMDD_HHMMSS stamp (<stamp>), so a rerun never overwrites a report.
+PDF names carry a _YYYYMMDD_HHMMSS stamp (<stamp>), so a rerun never overwrites a report;
+each PDF's full path is printed once it is saved.
 
 @author: HRTR
 """
 
 import io
+import os
+import re
 import sys
 import math
+import shutil
 import datetime
 import warnings
 import contextlib
 import textwrap
 from functools import reduce
 from pathlib import Path
+from typing import NamedTuple, Optional
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -124,6 +134,9 @@ from OGN import (
     NSEFnOList,
     WATCHLIST,
     _load_parquet,
+    _naive_dates,
+    latest_parquet_rows,
+    LATEST_ROWS,
     EQUITY_PROCESSED,
     DERIVATIVES_PROCESSED,
     INDICES_PROCESSED,
@@ -241,11 +254,11 @@ def business_days(start, end):
 
 
 def timestamped_path(path, moment=None):
-    """`path` with _YYYYMMDD_HHMMSS before its suffix, so a rerun never overwrites a report.
+    """Absolute `path` with _YYYYMMDD_HHMMSS before its suffix, so a rerun never overwrites a report.
 
     A file already holding that name (two runs in one second) gets a _2, _3 ... counter.
     """
-    path = Path(path)
+    path = Path(os.path.abspath(path))
     stamp = (moment or datetime.datetime.now()).strftime('%Y%m%d_%H%M%S')
     candidate = path.with_name(f'{path.stem}_{stamp}{path.suffix}')
     counter = 2
@@ -1295,6 +1308,100 @@ def trendline_analysis(price_data, ticker, bars=TREND_BARS,
 
 
 # ---------------------------------------------------------------------------
+# Report windows: 250d, 350d-25d, Jan2026, Jan2026-Mar2026
+# ---------------------------------------------------------------------------
+
+_WINDOW_COUNTS = re.compile(r'(\d+)d(?:-(\d+)d)?', re.IGNORECASE)
+_WINDOW_MONTHS = re.compile(r'([a-z]+)(\d{4})(?:-([a-z]+)(\d{4}))?', re.IGNORECASE)
+_MONTH_NAMES = ('january', 'february', 'march', 'april', 'may', 'june', 'july',
+                'august', 'september', 'october', 'november', 'december')
+
+
+class ReportWindow(NamedTuple):
+    """The period a report covers.
+
+    Count windows are trading days, i.e. observations at the analysed cadence: the
+    latest `last`, minus the newest `skip`. Month windows cover the calendar dates
+    `start` to `end` inclusive.
+    """
+    label: str
+    last: Optional[int] = None
+    skip: int = 0
+    start: Optional[pd.Timestamp] = None
+    end: Optional[pd.Timestamp] = None
+
+    @property
+    def size(self):
+        """Observations a count window asks for; None for month windows."""
+        return None if self.last is None else self.last - self.skip
+
+    def through_end(self, dates):
+        """Boolean mask of ascending `dates` up to the window's end."""
+        dates = pd.DatetimeIndex(dates)
+        if self.end is not None:
+            return np.asarray(dates < self.end + pd.Timedelta(days=1))
+        keep = np.ones(len(dates), dtype=bool)
+        keep[max(len(dates) - self.skip, 0):] = False
+        return keep
+
+    def from_start(self, frame):
+        """Rows from the window's start, for a frame already cut at its end."""
+        if self.start is not None:
+            return frame[np.asarray(pd.DatetimeIndex(frame.index) >= self.start)]
+        return frame.iloc[-self.size:]
+
+    def select(self, frame):
+        """Rows of a date-indexed, ascending frame or Series inside the window."""
+        return self.from_start(frame[self.through_end(frame.index)])
+
+
+def _month_start(name, year):
+    """First day of month `name` (Jan or January, any case) in `year`, or None."""
+    name = name.lower()
+    for number, month in enumerate(_MONTH_NAMES, 1):
+        if name in (month, month[:3]):
+            return pd.Timestamp(int(year), number, 1)
+    return None
+
+
+def parse_report_window(text):
+    """Parse 250d, 350d-25d, Jan2026 or Jan2026-Mar2026; None when `text` is not a window."""
+    match = _WINDOW_COUNTS.fullmatch(text)
+    if match:
+        last, skip = int(match.group(1)), int(match.group(2) or 0)
+        if last <= 0:
+            raise ValueError(f"observations must be positive, got {text}.")
+        if last <= skip:
+            raise ValueError(f"{text}: the first count must exceed the second, e.g. 350d-25d.")
+        return ReportWindow(f'{last}d' + (f'-{skip}d' if skip else ''), last=last, skip=skip)
+    match = _WINDOW_MONTHS.fullmatch(text)
+    if match:
+        first = _month_start(match.group(1), match.group(2))
+        final = _month_start(match.group(3), match.group(4)) if match.group(3) else first
+        if first is not None and final is not None:
+            if final < first:
+                raise ValueError(f"{text}: the months must run forward, e.g. Jan2026-Mar2026.")
+            label = '-'.join(dict.fromkeys(
+                f'{_MONTH_NAMES[month.month - 1][:3].title()}{month.year}' for month in (first, final)))
+            return ReportWindow(label, start=first, end=final + pd.offsets.MonthEnd(0))
+    return None
+
+
+def as_report_window(value):
+    """A ReportWindow from None, a ReportWindow, window text, or a count of trailing observations."""
+    if value is None or isinstance(value, ReportWindow):
+        return value
+    if isinstance(value, str):
+        window = parse_report_window(value.strip())
+        if window is None:
+            raise ValueError(f"Unknown window '{value}': use 250d, 350d-25d, Jan2026 or Jan2026-Mar2026.")
+        return window
+    if value <= 0:
+        raise ValueError(f"observations must be positive, got {value}.")
+    return ReportWindow(f'{int(value)}d', last=int(value))
+
+
+# ---------------------------------------------------------------------------
 # Main analysis orchestrator
 # ---------------------------------------------------------------------------
 
@@ -1319,7 +1426,10 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
                               _YYYYMMDD_HHMMSS stamp added before .pdf
         compare_with:         If set, append a statistical comparison of the
                               analysed symbol against this second series
-        days:                 Window in aligned observations (legacy parameter name)
+        days:                 Report window (legacy name): a ReportWindow, text such as
+                              250d, 350d-25d, Jan2026 or Jan2026-Mar2026, or a count of
+                              trailing observations. Limits the single-symbol pages, or
+                              only the comparison when compare_with is set
         estimator:            Volatility estimator name (see ESTIMATORS)
         trend_bars:           Trailing bars used by the trendline page
         trend_distance:       Minimum bars between two trendline pivots
@@ -1337,6 +1447,9 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
     Returns:
         The saved PDF path (timestamped), or None for interactive charts.
     """
+    window = as_report_window(days)
+    analysis_window = window if not compare_with else None
+
     if single_scrip:
         symbols = [single_scrip]
     elif scrip_list:
@@ -1428,15 +1541,30 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
 
         Indicatordf.reset_index(inplace=True)
 
+        price_data = OHLCdf.set_index('Date')
+        if analysis_window is not None:
+            price_data = analysis_window.select(price_data)
+            if price_data.empty:
+                print(f"  [skip] No {Scrip} observations in window {analysis_window.label}")
+                continue
+            scope = f"{len(price_data):,} observations"
+            if analysis_window.size and len(price_data) < analysis_window.size:
+                scope += f" - fewer than the {analysis_window.size:,} requested"
+            print(f"  Window {analysis_window.label}: {scope} "
+                  f"({price_data.index[0]:%Y-%m-%d} to {price_data.index[-1]:%Y-%m-%d})")
+            # Nothing after the window's last bar reaches the indicators, audit or Renko.
+            Indicatordf = Indicatordf[Indicatordf['Date'] <= price_data.index[-1]].reset_index(drop=True)
+
         # ── Plot ──────────────────────────────────────────────────────
         if 'technical' in REPORT_SECTIONS:
-            display_bars = technical_window_bars(Indicatordf['Date'])
+            display_bars = (technical_window_bars(Indicatordf['Date'])
+                            if analysis_window is None else len(price_data))
             plot_chart(Indicatordf, display_bars, Scrip, 0, pdf_pages=pdf_pages)
 
         # ── Support / resistance trendlines ───────────────────────────
         if 'trendlines' in REPORT_SECTIONS:
             try:
-                trendline_analysis(OHLCdf.set_index('Date'), Scrip,
+                trendline_analysis(price_data, Scrip,
                                    bars=trend_bars, distance=trend_distance,
                                    prominence=trend_prominence,
                                    prominence_pct=trend_prominence_pct,
@@ -1447,7 +1575,7 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         # ── Volatility profile ────────────────────────────────────────
         if 'volatility' in REPORT_SECTIONS:
             try:
-                volatility_analysis(OHLCdf.set_index('Date'), Scrip,
+                volatility_analysis(price_data, Scrip,
                                     estimator=estimator, pdf_pages=pdf_pages,
                                     option_dates=option_dates, option_min_contracts=option_min_contracts,
                                     option_outliers=option_outliers, option_rate=option_rate,
@@ -1560,8 +1688,12 @@ def _comp_native_frequency(series):
 
 
 def align_comparison_series(series_a, series_b, label_a, label_b,
-                            frequency='auto', aggregation='auto'):
-    """Align at the slower cadence, without upsampling or filling missing periods."""
+                            frequency='auto', aggregation='auto', window=None):
+    """Align at the slower cadence, without upsampling or filling missing periods.
+
+    A ReportWindow's end applies before the latest contiguous run is chosen, so a
+    window that ends earlier is not lost to a later gap; its start is left to the caller.
+    """
     if frequency not in ('auto', *COMP_FREQUENCIES):
         raise ValueError(f'Unknown comparison frequency: {frequency}')
     if aggregation not in ('auto', 'mean', 'last', 'sum'):
@@ -1646,8 +1778,13 @@ def align_comparison_series(series_a, series_b, label_a, label_b,
 
     aligned = pd.concat([aggregated[0].rename(label_a), aggregated[1].rename(label_b)],
                         axis=1, join='inner').dropna().sort_index()
+    if window is not None:
+        ends = (aligned.index.to_timestamp(how='end').normalize()
+                if isinstance(aligned.index, pd.PeriodIndex) else aligned.index)
+        aligned = aligned[window.through_end(ends)]
     if aligned.empty:
-        raise ValueError(f'No overlapping closed {target} periods between {label_a} and {label_b}.')
+        scope = f' in window {window.label}' if window is not None else ''
+        raise ValueError(f'No overlapping closed {target} periods between {label_a} and {label_b}{scope}.')
     dropped_for_gaps = 0
     if target != 'daily':
         breaks = np.flatnonzero(np.diff(aligned.index.asi8) > 1)
@@ -1902,26 +2039,30 @@ def compute_comparison(series_a, series_b, label_a, label_b,
                        frequency='auto', aggregation='auto'):
     """Compare native series on a shared cadence before calculating changes.
 
-    The legacy `days` parameter counts aligned observations, not calendar days.
-    Short samples retain descriptive charts but not significance tests.
+    `days` (legacy name) is the report window: a ReportWindow, text such as 250d,
+    350d-25d or Jan2026, or a count of the latest aligned observations, never
+    calendar days. Short samples retain descriptive charts but not significance tests.
     """
+    window = as_report_window(days)
+    if window is not None and window.size is not None and window.size < 3:
+        raise ValueError('The comparison window needs at least 3 aligned observations.')
     if label_a == label_b:
         raise ValueError('Choose two different series for a comparison.')
     if max_lag < 1:
         raise ValueError('max_lag must be positive.')
     aligned, alignment = align_comparison_series(
-        series_a, series_b, label_a, label_b, frequency=frequency, aggregation=aggregation)
+        series_a, series_b, label_a, label_b, frequency=frequency, aggregation=aggregation,
+        window=window)
     total_overlap = len(aligned)
 
-    if days is not None:
-        if days < 3:
-            raise ValueError('The comparison window needs at least 3 aligned observations.')
-        aligned = aligned.tail(days)
+    if window is not None:
+        aligned = window.from_start(aligned)
 
     if len(aligned) < 3:
+        scope = f' in window {window.label}' if window is not None else ''
         raise ValueError(
             f"Only {len(aligned)} overlapping observations between {label_a} and "
-            f"{label_b} - need at least 3 for descriptive charts.")
+            f"{label_b}{scope} - need at least 3 for descriptive charts.")
 
     levels_a = aligned[label_a].to_numpy(dtype=float)
     levels_b = aligned[label_b].to_numpy(dtype=float)
@@ -1963,7 +2104,7 @@ def compute_comparison(series_a, series_b, label_a, label_b,
         'label_a': label_a,
         'label_b': label_b,
         'max_lag': effective_lag,
-        'days_requested': days,
+        'window': window,
         'total_overlap': total_overlap,
         'inference_note': '' if enough_history else inference_note,
     }
@@ -2181,9 +2322,10 @@ def load_analysis_frame(token):
 
 def _comp_window_note(results):
     """Label a requested window in aligned periods rather than calendar days."""
-    if not results.get('days_requested'):
+    window = results.get('window')
+    if window is None:
         return ""
-    return f"   |   last {len(results['aligned']):,} {results.get('lag_unit', 'observations')}"
+    return f"   |   {window.label}: {len(results['aligned']):,} {results.get('lag_unit', 'observations')}"
 
 
 def _comp_alignment_note(results):
@@ -2388,12 +2530,13 @@ def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None,
                                  frequency=frequency, aggregation=aggregation)
     aligned = results['aligned']
     overlap = results['total_overlap']
-    if days and len(aligned) < days:
-        scope = f"{len(aligned):,} observations - fewer than the {days:,} requested"
-    elif days:
-        scope = f"last {len(aligned):,} of {overlap:,} aligned observations"
-    else:
+    window = results['window']
+    if window is None:
         scope = f"{len(aligned):,} aligned observations in the latest contiguous overlap"
+    else:
+        scope = f"window {window.label}: {len(aligned):,} of {overlap:,} aligned observations"
+        if window.size and len(aligned) < window.size:
+            scope += f" - fewer than the {window.size:,} requested"
     print(f"\n  {_comp_alignment_note(results)}")
     print(f"  Excluded periods by source: open {results['alignment']['dropped_open_periods']}, "
           f"incomplete {results['alignment']['dropped_incomplete_periods']}; "
@@ -3094,6 +3237,143 @@ def plot_india_schiller(pdf_pages=None):
 
 
 # ---------------------------------------------------------------------------
+# List - the latest rows of any Parquet file
+# ---------------------------------------------------------------------------
+
+LIST_PDF_CHARACTERS = 180  # Monospace characters per PDF line
+LIST_PDF_LINES = 52        # Table lines per PDF page
+LIST_MAX_COLWIDTH = 60     # Longer cell values are cut short with ...
+
+
+def _listing_text(frame, width):
+    """Every column of `frame`, wrapped into blocks at most `width` characters wide."""
+    return frame.to_string(line_width=width, max_colwidth=LIST_MAX_COLWIDTH)
+
+
+def _listing_summary(source, latest, total, order):
+    """Header lines shared by the console and PDF listings."""
+    lines = [f'File: {source}']
+    if latest.empty:
+        return lines + [f'Rows: {total:,} | Columns: {len(latest.columns)}']
+    dates = None
+    if order is None:
+        scope = f'last {len(latest):,} in file order (no Date column)'
+    else:
+        dates = _naive_dates(latest[order])
+        scope = f'latest {len(latest):,} by {order}'
+        if dates.notna().any():
+            scope += f' ({dates.min():%Y-%m-%d} to {dates.max():%Y-%m-%d})'
+    lines.append(f'Rows: {total:,} | Columns: {len(latest.columns)} | Showing the {scope}')
+    corrected = latest.attrs.get('corrected_dates') or {}
+    if corrected:
+        details = ', '.join(f'{column} from {source} in {count:,}'
+                            for column, (source, count) in corrected.items())
+        lines.append(f'Corrected from NSE reference dates: {details} of these rows.')
+    if dates is not None:
+        today = pd.Timestamp.today().normalize()
+        ahead = int((dates.dt.normalize() > today).sum())
+        if ahead:
+            lines.append(f"[warning] {ahead:,} of these rows {'is' if ahead == 1 else 'are'} dated "
+                         f"after today ({today:%Y-%m-%d}); check the stored dates.")
+    lines.append("The first column is each row's position in the file, counting from 0.")
+    return lines
+
+
+def _listing_pages(lines, per_page):
+    """Split listing lines into pages, repeating a column block's header after a page break."""
+    pages, page, header = [], [], None
+    for index, line in enumerate(lines):
+        if not line.strip():
+            if page and len(page) < per_page:
+                page.append(line)
+            continue
+        starts_block = index == 0 or not lines[index - 1].strip()
+        if starts_block:
+            header = line
+        # A block header needs room for at least one of its rows below it.
+        if len(page) >= per_page - (1 if starts_block else 0):
+            pages.append(page)
+            page = [] if starts_block else [header]
+        page.append(line)
+    if page:
+        pages.append(page)
+    return pages
+
+
+def plot_listing(summary, latest, source, pdf_path):
+    """Save a List result as a timestamped PDF and return its full path."""
+    matplotlib.use('Agg')
+    pdf_path = str(timestamped_path(pdf_path))
+    Path(pdf_path).parent.mkdir(parents=True, exist_ok=True)
+    lines = _listing_text(latest, LIST_PDF_CHARACTERS).splitlines() if len(latest) else ['No rows.']
+    pages = _listing_pages(lines, LIST_PDF_LINES)
+    title = f'{source.name} | latest {len(latest):,} rows'
+    document = PdfPages(pdf_path)
+    try:
+        for number, page in enumerate(pages, 1):
+            figure = plt.figure(figsize=(16.54, 11.69))  # A3 landscape
+            figure.text(0.03, 0.965, title, fontsize=18, fontweight='bold', color='#24282b', va='top')
+            for offset, line in enumerate(summary):
+                figure.text(0.03, 0.925 - offset * 0.022, line, fontsize=10.5, va='top',
+                            color='#a34542' if line.startswith('[warning]') else '#454c50')
+            figure.text(0.03, 0.913 - len(summary) * 0.022, '\n'.join(page), family='monospace',
+                        fontsize=9.5, va='top', linespacing=1.3, color='#24282b')
+            figure.text(0.97, 0.02, f'Page {number}/{len(pages)}', fontsize=9, ha='right',
+                        color='#555b60')
+            try:
+                document.savefig(figure)
+            finally:
+                plt.close(figure)
+    finally:
+        document.close()
+    return pdf_path
+
+
+def list_parquet(arguments, use_pdf=False):
+    """`List <file> [rows] [output.pdf]`: print the latest rows of any Parquet file.
+
+    With --pdf the listing is also saved, by default as
+    charts/<file name>_latest<rows>_rows_<stamp>.pdf. Returns the PDF path, or None.
+    """
+    counts = [argument for argument in arguments if argument.lstrip('+-').isdigit()]
+    outputs = [argument for argument in arguments if argument.lower().endswith('.pdf')]
+    files = [argument for argument in arguments if argument not in counts + outputs]
+    if len(files) != 1 or len(counts) > 1 or len(outputs) > 1 or files[0].startswith('--'):
+        print('Usage: python Option-OGN.py [--pdf] List <file.parquet> [rows] [output.pdf]')
+        print(f'  rows        optional - latest N rows (default {LATEST_ROWS}), by Date when the file has one')
+        print('  --pdf       also save the listing as a PDF, by default in the charts folder')
+        print('  output.pdf  optional - custom PDF name; needs --pdf')
+        print('  Quote paths that contain spaces.')
+        return None
+    rows = int(counts[0]) if counts else LATEST_ROWS
+    if rows <= 0:
+        print(f'  [error] rows must be positive, got {rows}.')
+        return None
+    if outputs and not use_pdf:
+        print(f'  [error] Add --pdf to save the listing as {outputs[0]}.')
+        return None
+
+    source = Path(os.path.abspath(files[0]))
+    try:
+        latest, total, order = latest_parquet_rows(source, rows)
+    except (OSError, ValueError, NotImplementedError) as error:
+        print(f'  [error] {error}')
+        return None
+    summary = _listing_summary(source, latest, total, order)
+    for line in summary:
+        print(f'  {line}')
+    if len(latest):
+        print()
+        print(_listing_text(latest, shutil.get_terminal_size((160, 24)).columns))
+    if not use_pdf:
+        return None
+    pdf_path = outputs[0] if outputs else str(CHARTS_DIR / f'{source.stem}_latest{rows}_rows.pdf')
+    pdf_path = plot_listing(summary, latest, source, pdf_path)
+    print(f'\n  PDF saved: {pdf_path}')
+    return pdf_path
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -3126,8 +3406,11 @@ def main():
     Usage:
         python Option-OGN.py                          # interactive, all FnO
         python Option-OGN.py WTI                      # full analysis, one symbol
+        python Option-OGN.py --pdf WTI 250d           # one symbol, last 250 trading days
+        python Option-OGN.py --pdf WTI 350d-25d       # ... 350 back to 25 back (latest 25 excluded)
+        python Option-OGN.py --pdf WTI Jan2026        # ... January 2026 (also Jan2026-Mar2026)
         python Option-OGN.py WTI US02Y__US10Y         # ... plus a comparison
-        python Option-OGN.py WTI US02Y__US10Y 250     # ... over the last 250 observations
+        python Option-OGN.py WTI US02Y__US10Y 250d    # ... over the last 250 aligned observations
         python Option-OGN.py --pdf WTI JP10Y --periods 120  # monthly alignment
         python Option-OGN.py --pdf WTI JP10Y --compare-frequency quarterly
         python Option-OGN.py --estimator Raw WTI      # choose the volatility estimator
@@ -3139,13 +3422,24 @@ def main():
         python Option-OGN.py --pdf WTI                # -> charts/WTI_Analysis_<stamp>.pdf
         python Option-OGN.py --pdf WTI US02Y__US10Y   # -> charts/WTI_vs_US02Y__US10Y_Analysis_<stamp>.pdf
         python Option-OGN.py --pdf output.pdf         # custom output file -> output_<stamp>.pdf
+        python Option-OGN.py List "<file>.parquet" 20 # latest 20 rows of any Parquet file
+        python Option-OGN.py --pdf List "<file>.parquet" 20  # -> charts/<file>_latest20_rows_<stamp>.pdf
 
     <stamp> is the run time as YYYYMMDD_HHMMSS, so reruns never overwrite a report.
+    Each PDF's full path is printed once it is saved.
     """
     args = sys.argv[1:]
     use_pdf = '--pdf' in args
     if use_pdf:
         args.remove('--pdf')
+
+    # Legacy Windows code pages cannot encode this script's Unicode output.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    if args and args[0].lower() == 'list':
+        list_parquet(args[1:], use_pdf=use_pdf)
+        return
 
     try:
         raw_option_dates = _take_flag_value(args, '--option-dates')
@@ -3217,10 +3511,6 @@ def main():
             return
         estimator = match[0]
 
-    # Legacy Windows code pages cannot encode this script's Unicode output.
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
     pdf_path = None
     tokens = []
     for arg in args:
@@ -3229,24 +3519,39 @@ def main():
         else:
             tokens.append(arg)
 
-    days = requested_periods
-    if tokens and tokens[-1].lstrip('+-').isdigit():
-        if requested_periods is not None:
-            print('  [error] Use --periods or the trailing window, not both.')
-            return
-        days = int(tokens.pop())
-        if days <= 0:
-            print(f"  [error] observations must be positive, got {days}.")
-            return
+    days = None if requested_periods is None else ReportWindow(f'{requested_periods}d', last=requested_periods)
+    try:
+        trailing = parse_report_window(tokens[-1]) if tokens else None
+        if trailing is not None:
+            if days is not None:
+                raise ValueError('Use --periods or the trailing window, not both.')
+            days = trailing
+            tokens.pop()
+        elif tokens and tokens[-1].lstrip('+-').isdigit():
+            raise ValueError(f"Write the window as {tokens[-1].lstrip('+-')}d (trading days), "
+                             f"350d-25d or Jan2026.")
+        for token in tokens:
+            try:
+                misplaced = parse_report_window(token) is not None
+            except ValueError:
+                misplaced = True
+            if misplaced:
+                raise ValueError(f"Give one window, after the symbols: {token}")
+    except ValueError as e:
+        print(f"  [error] {e}")
+        return
 
     if len(tokens) > 2:
         print("Usage: python Option-OGN.py [--pdf] [--estimator NAME] "
               "[--trend-bars N] [--trend-distance N] [--trend-prominence X] "
               "[--compare-frequency FREQ] [--compare-aggregation METHOD] "
-              "[symbol] [compare_symbol] [observations]")
+              "[symbol] [compare_symbol] [window]")
         print("  symbol            full technical analysis for this series")
         print("  compare_symbol    optional - append a statistical comparison")
-        print("  observations      optional - last N aligned observations; also --periods N")
+        print("  window            optional - 250d (last 250 trading days), 350d-25d (latest 25 excluded),")
+        print("                    Jan2026 or Jan2026-Mar2026; also --periods N. Counts are observations")
+        print("                    at the analysed cadence, e.g. aligned months for a monthly comparison")
+        print(f"  List <file> [rows]    latest rows of any Parquet file (default {LATEST_ROWS}); --pdf also saves a PDF")
         print("  --compare-frequency   auto (slower source), daily, weekly, monthly, quarterly, annual")
         print("  --compare-aggregation auto (series-specific), mean, last, sum")
         print('  --option-dates N          recent trading dates for IV overlays (default 5)')
@@ -3268,20 +3573,24 @@ def main():
     symbol = tokens[0].upper() if len(tokens) >= 1 else None
     compare_with = tokens[1].upper() if len(tokens) == 2 else None
 
-    if not compare_with and (days or comparison_frequency != 'auto' or comparison_aggregation != 'auto'):
+    if days is not None and not symbol:
+        print('  [error] A report window requires a symbol.')
+        return
+
+    if not compare_with and (comparison_frequency != 'auto' or comparison_aggregation != 'auto'):
         print('  [error] Comparison options require a second symbol.')
         return
 
     if use_pdf and not pdf_path:
+        suffix = f"_{days.label}" if days is not None else ""
         if symbol and compare_with:
-            suffix = f"_{days}obs" if days else ""
             if comparison_frequency != 'auto':
                 suffix += f'_{comparison_frequency}'
             if comparison_aggregation != 'auto':
                 suffix += f'_{comparison_aggregation}'
             pdf_path = str(CHARTS_DIR / f"{symbol}_vs_{compare_with}{suffix}_Analysis.pdf")
         elif symbol:
-            pdf_path = str(CHARTS_DIR / f"{symbol}_Analysis.pdf")
+            pdf_path = str(CHARTS_DIR / f"{symbol}{suffix}_Analysis.pdf")
         else:
             pdf_path = str(CHARTS_DIR / "FnO_Analysis.pdf")
 

@@ -12,11 +12,13 @@ Usage:
     futures = load_futures("RELIANCE")
     options = load_options("RELIANCE")
     nifty = load_index("NIFTY")
+    rows, total, order = latest_parquet_rows(DERIVATIVES_PROCESSED / "ABB.parquet", 20)
 
 @author: HRTR
 """
 
 import datetime
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -110,7 +112,9 @@ def _load_parquet(directory: Path, symbol: str) -> pd.DataFrame:
         symbol:    NSE symbol name (used as the parquet filename stem).
 
     Returns:
-        DataFrame with the symbol's data, Date column parsed as datetime.
+        DataFrame with the symbol's data, Date column parsed as datetime,
+        taken from NSE's BizDt where a row has one (see corrected_dates)
+        and sorted by it when that changed any row.
 
     Raises:
         FileNotFoundError: If the parquet file does not exist.
@@ -122,7 +126,40 @@ def _load_parquet(directory: Path, symbol: str) -> pd.DataFrame:
     # Ensure Date column is proper datetime for filtering/sorting
     if 'Date' in df.columns:
         df['Date'] = pd.to_datetime(df['Date'])
+        dates = corrected_dates(df)
+        if not dates.equals(df['Date']):
+            # Corrected rows no longer follow the file's stored date order.
+            df['Date'] = dates
+            df = df.sort_values('Date', kind='stable', ignore_index=isinstance(df.index, pd.RangeIndex))
     return df
+
+
+# UDiFF rows carry NSE's own ISO dates next to the parsed ones. The F&O parser has stored
+# some Date and Expiry values with day and month swapped (2024-08-01 as 2024-01-08), so
+# these NSE columns win wherever they hold a valid date. Files without them, such as
+# equity, index and macro files, keep their stored dates.
+NSE_REFERENCE_DATES = {'Date': 'BizDt', 'Expiry': 'FininstrmActlXpryDt'}
+
+
+def _nse_reference(columns, column):
+    """Name of `column`'s NSE reference column among `columns` (any case), or None."""
+    wanted = {name.lower(): source.lower() for name, source in NSE_REFERENCE_DATES.items()}
+    reference = wanted.get(str(column).lower())
+    return next((name for name in columns if reference and str(name).lower() == reference), None)
+
+
+def corrected_dates(frame: pd.DataFrame, column: str = 'Date', errors: str = 'raise') -> pd.Series:
+    """`column` as datetimes, replaced by its NSE reference date wherever that is valid.
+
+    Date takes BizDt and Expiry takes FininstrmActlXpryDt (NSE_REFERENCE_DATES); the
+    reference is parsed strictly as ISO 8601, never day-first. Rows without a valid
+    reference, and frames without the reference column, keep `column`'s own dates.
+    """
+    dates = pd.to_datetime(frame[column], errors=errors)
+    reference = _nse_reference(frame.columns, column)
+    if reference is None:
+        return dates
+    return pd.to_datetime(frame[reference], format='ISO8601', errors='coerce').fillna(dates)
 
 
 def list_symbols(directory: Path) -> list:
@@ -130,6 +167,95 @@ def list_symbols(directory: Path) -> list:
     if not directory.exists():
         return []
     return sorted(p.stem for p in directory.glob("*.parquet"))
+
+
+LATEST_ROWS = 10  # Default count for latest_parquet_rows and `Option-OGN.py List`
+
+
+def _naive_dates(values) -> pd.Series:
+    """Parse values as naive UTC datetimes; anything unparseable becomes NaT."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', UserWarning)
+        return pd.to_datetime(values, errors='coerce', utc=True).dt.tz_convert(None)
+
+
+def latest_parquet_rows(path, rows: int = LATEST_ROWS):
+    """Return the latest `rows` rows of any Parquet file, its row count and its ordering column.
+
+    "Latest" follows a column named Date (any case) when the file has one, using NSE's
+    BizDt instead wherever a row carries a valid one (see corrected_dates): a stable sort
+    keeps each date's stored row order, and rows without a valid date rank oldest.
+    Otherwise the file's last rows are used. Only the row groups holding the chosen rows
+    are read, so a large file is never loaded whole. Returned Date and Expiry columns hold
+    the corrected dates; frame.attrs['corrected_dates'] maps each changed column to
+    (reference column, rows changed).
+
+    Returns:
+        (DataFrame indexed by each row's 0-based position in the file,
+         total rows in the file, ordering column name or None)
+    """
+    import pyarrow.parquet as pq
+
+    if rows <= 0:
+        raise ValueError(f"rows must be positive, got {rows}.")
+    path = Path(path)
+    if path.is_dir():
+        raise IsADirectoryError(f"{path} is a folder; pass one Parquet file.")
+    if not path.exists():
+        raise FileNotFoundError(f"No such file: {path}")
+
+    with open(path, 'rb') as handle:
+        parquet = pq.ParquetFile(handle)
+        total = parquet.metadata.num_rows
+        names = parquet.schema_arrow.names
+        order = next((name for name in names if name.lower() == 'date'), None)
+        reference = _nse_reference(names, order or 'Date')
+        positions = np.arange(max(total - rows, 0), total)
+        if (order or reference) and total:
+            stored = parquet.read(columns=[name for name in (order, reference) if name]).to_pandas(
+                date_as_object=False, ignore_metadata=True)  # A stored Date index stays a column
+            try:
+                dates = (_naive_dates(stored[order]) if order
+                         else pd.Series(pd.NaT, index=stored.index, dtype='datetime64[ns]'))
+                if reference:
+                    dates = pd.to_datetime(stored[reference], format='ISO8601', errors='coerce').fillna(dates)
+            except (TypeError, ValueError):
+                dates = None
+            if dates is None or dates.isna().all():
+                order = None
+            else:
+                order = order or reference
+                # NaT is the smallest int64, so rows without a date rank oldest.
+                positions = np.argsort(dates.to_numpy().view('int64'), kind='stable')[-rows:]
+
+        sizes = np.array([parquet.metadata.row_group(group).num_rows
+                          for group in range(parquet.metadata.num_row_groups)], dtype='int64')
+        starts = np.concatenate([[0], np.cumsum(sizes)])
+        groups = np.searchsorted(starts, positions, side='right') - 1
+        needed = np.unique(groups)
+        if len(needed):
+            table = parquet.read_row_groups(needed.tolist())
+            offsets = np.concatenate([[0], np.cumsum(sizes[needed])])[np.searchsorted(needed, groups)]
+            table = table.take(positions - starts[groups] + offsets)
+        else:
+            table = parquet.schema_arrow.empty_table()
+
+    frame = table.to_pandas()
+    if not isinstance(frame.index, pd.RangeIndex) or frame.index.name is not None:
+        frame = frame.reset_index()  # A stored index becomes an ordinary column
+    corrections = {}
+    for wanted in NSE_REFERENCE_DATES:
+        column = next((name for name in frame.columns if str(name).lower() == wanted.lower()), None)
+        source = _nse_reference(frame.columns, column) if column is not None else None
+        if source is not None:
+            stored = pd.to_datetime(frame[column], errors='coerce')
+            frame[column] = corrected_dates(frame, column, errors='coerce')
+            changed = int((frame[column].notna() & frame[column].ne(stored)).sum())
+            if changed:
+                corrections[column] = (source, changed)
+    frame.index = pd.Index(positions)
+    frame.attrs['corrected_dates'] = corrections
+    return frame, total, order
 
 
 # ---------------------------------------------------------------------------
@@ -196,12 +322,13 @@ def load_derivatives(symbol: str, start: str = None, end: str = None) -> pd.Data
     UDiFF rows carry the underlying price and lot size. Legacy rows take the
     same day's cash-market EQ close (or the stored index close for the index
     derivatives in INDEX_UNDERLYINGS), so spot and strike share one
-    corporate-action basis; their Lot Size stays blank.
+    corporate-action basis; their Lot Size stays blank. UDiFF rows take
+    Date and Expiry from NSE's BizDt and FininstrmActlXpryDt (corrected_dates).
     """
     df = _load_parquet(DERIVATIVES_PROCESSED, symbol)
-    # Parse Expiry as datetime for date-based filtering downstream
+    # Parse Expiry as datetime for date-based filtering downstream (NSE's own date where present)
     if 'Expiry' in df.columns:
-        df['Expiry'] = pd.to_datetime(df['Expiry'])
+        df['Expiry'] = corrected_dates(df, 'Expiry')
     df = _filter_dates(df, start, end)
     if 'Instrument' in df.columns:
         instrument = df['Instrument'].astype(str).str.strip()

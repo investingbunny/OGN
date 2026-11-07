@@ -1,6 +1,7 @@
-"""Regression checks for the technical page: 1-year gap-free axis and the Buy/Sell/Hold audit."""
+"""Regression checks for technical-page windows, gap-free axes and the Buy/Sell/Hold audit."""
 
 import importlib.util
+import io
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -31,7 +32,7 @@ class TechnicalChartTests(unittest.TestCase):
         return pd.DataFrame({'Date': dates, 'Open': close - 2, 'High': close + 5,
                              'Low': close - 5, 'Close': close, 'Volume': 1000.0})
 
-    def run_report(self, frame, **patches):
+    def run_report(self, frame, days=None, compare_with=None, **patches):
         """Run only the technical section for `frame`; return the PdfPages mock."""
         module = self.module
         document = Mock()
@@ -43,7 +44,8 @@ class TechnicalChartTests(unittest.TestCase):
             **patches,
         }
         with patch.multiple(module, **replacements):
-            module.FnOAnalysis(single_scrip='TEST', pdf_path='unused.pdf')
+            module.FnOAnalysis(single_scrip='TEST', pdf_path='unused.pdf',
+                               days=days, compare_with=compare_with)
         return document
 
     def indicator_lines(self, figure):
@@ -66,6 +68,90 @@ class TechnicalChartTests(unittest.TestCase):
         self.assertEqual(self.module.technical_window_bars(dates, years=2),
                          int((dates >= pd.Timestamp('2024-10-22')).sum()))
         self.assertEqual(self.module.technical_window_bars(pd.Series([], dtype='datetime64[ns]')), 0)
+
+    def test_single_symbol_window_limits_primary_pages_without_losing_indicator_warmup(self):
+        frame = self.prices()
+        for days in (1, 30, 250, 400, len(frame) + 100):
+            with self.subTest(days=days):
+                chart, trendlines, volatility = Mock(), Mock(), Mock()
+                self.run_report(
+                    frame, days=days, REPORT_SECTIONS=['technical', 'trendlines', 'volatility'],
+                    plot_chart=chart, trendline_analysis=trendlines, volatility_analysis=volatility)
+                indicators, bars = chart.call_args.args[:2]
+                self.assertEqual(bars, min(days, len(frame)))
+                self.assertEqual(len(indicators), len(frame))
+                self.assertAlmostEqual(indicators['200DMA'].iloc[-1], frame['Close'].tail(200).mean())
+                self.assertAlmostEqual(indicators['9DMA-E'].iloc[-1],
+                                       frame['Close'].ewm(span=9, adjust=False).mean().iloc[-1])
+                expected = frame.set_index('Date').tail(days)
+                pd.testing.assert_frame_equal(trendlines.call_args.args[0], expected)
+                pd.testing.assert_frame_equal(volatility.call_args.args[0], expected)
+
+    def test_single_symbol_window_is_drawn_on_the_indicator_panels(self):
+        for days in (250, 400):
+            with self.subTest(days=days):
+                figure = self.run_report(self.prices(), days=days).savefig.call_args.args[0]
+                for x in self.indicator_lines(figure):
+                    np.testing.assert_array_equal(x, np.arange(days))
+
+    def test_pairwise_window_leaves_primary_pages_at_their_existing_defaults(self):
+        frame = self.prices()
+        chart, trendlines, volatility, comparison = Mock(), Mock(), Mock(), Mock()
+        self.run_report(
+            frame, days=250, compare_with='PEER',
+            REPORT_SECTIONS=['technical', 'trendlines', 'volatility', 'comparison'],
+            plot_chart=chart, trendline_analysis=trendlines,
+            volatility_analysis=volatility, compare_series=comparison)
+        self.assertEqual(chart.call_args.args[1], self.module.technical_window_bars(frame['Date']))
+        expected = frame.set_index('Date')
+        pd.testing.assert_frame_equal(trendlines.call_args.args[0], expected)
+        pd.testing.assert_frame_equal(volatility.call_args.args[0], expected)
+        self.assertEqual(comparison.call_args.args, ('TEST', 'PEER'))
+        self.assertEqual(comparison.call_args.kwargs['days'], 250)
+
+    def test_single_symbol_window_reports_when_less_history_is_available(self):
+        frame = self.prices()
+        days = len(frame) + 100
+        with patch.object(self.module.sys, 'stdout', new_callable=io.StringIO) as output:
+            self.run_report(frame, days=days, plot_chart=Mock())
+        self.assertIn(f'fewer than the {days:,} requested', output.getvalue())
+
+    def test_window_ending_early_excludes_later_bars_from_every_primary_page(self):
+        frame = self.prices()
+        chart, trendlines, volatility = Mock(), Mock(), Mock()
+        self.run_report(frame, days='350d-25d', REPORT_SECTIONS=['technical', 'trendlines', 'volatility'],
+                        plot_chart=chart, trendline_analysis=trendlines, volatility_analysis=volatility)
+        indicators, bars = chart.call_args.args[:2]
+        expected = frame.set_index('Date').iloc[-350:-25]
+        self.assertEqual(bars, 325)
+        self.assertEqual(len(indicators), len(frame) - 25)
+        self.assertEqual(indicators['Date'].iloc[-1], expected.index[-1])
+        self.assertAlmostEqual(indicators['200DMA'].iloc[-1], frame['Close'].iloc[-225:-25].mean())
+        pd.testing.assert_frame_equal(trendlines.call_args.args[0], expected)
+        pd.testing.assert_frame_equal(volatility.call_args.args[0], expected)
+
+    def test_month_window_covers_calendar_months_and_skips_empty_ones(self):
+        frame = self.prices()
+        chart, volatility = Mock(), Mock()
+        self.run_report(frame, days='Mar2026-Apr2026', REPORT_SECTIONS=['technical', 'volatility'],
+                        plot_chart=chart, volatility_analysis=volatility)
+        indicators, bars = chart.call_args.args[:2]
+        inside = frame[(frame['Date'] >= '2026-03-01') & (frame['Date'] <= '2026-04-30')]
+        self.assertEqual(bars, len(inside))
+        self.assertEqual(indicators['Date'].iloc[-1], inside['Date'].iloc[-1])
+        pd.testing.assert_frame_equal(volatility.call_args.args[0], inside.set_index('Date'))
+        chart.reset_mock()
+        with patch.object(self.module.sys, 'stdout', new_callable=io.StringIO) as output:
+            self.run_report(frame, days='Jan2030', plot_chart=chart)
+        chart.assert_not_called()
+        self.assertIn('No TEST observations in window Jan2030', output.getvalue())
+
+    def test_analysis_rejects_nonpositive_windows_before_opening_a_pdf(self):
+        for days in (0, -1):
+            with self.subTest(days=days), patch.object(self.module, 'PdfPages') as document:
+                with self.assertRaisesRegex(ValueError, 'observations must be positive'):
+                    self.module.FnOAnalysis(single_scrip='TEST', pdf_path='unused.pdf', days=days)
+                document.assert_not_called()
 
     def test_panels_show_last_year_without_weekend_or_holiday_gaps(self):
         frame = self.prices()
