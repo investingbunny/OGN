@@ -1,5 +1,6 @@
 """Focused tests for option volume selection, IV diagnostics and chart overlays."""
 
+import io
 import math
 import unittest
 import importlib.util
@@ -212,6 +213,24 @@ class OptionIVTests(unittest.TestCase):
         self.assertTrue(diagnostic['solver_unavailable'])
         self.assertEqual(frame['IV source'].iloc[0], 'Reported')
 
+    def test_full_snapshot_preserves_zero_volume_and_unavailable_iv_without_changing_default(self):
+        derivatives = self.derivatives().assign(**{'Open Int': 500, 'Lot Size': 10})
+        derivatives.loc[0, ['Contracts', 'Settle Price', 'Close']] = [0, np.nan, np.nan]
+        default, _ = overlay.prepare_option_iv(derivatives, 'NIFTY', ['2026-09-01'])
+        self.assertEqual(default['Option type'].tolist(), ['PE'])
+        full, diagnostic = overlay.prepare_option_iv(
+            derivatives, 'NIFTY', ['2026-09-01'], min_contracts=0, include_unavailable_iv=True)
+        call = full[full['Option type'].eq('CE')].iloc[0]
+        self.assertEqual((call['Contracts'], call['Open Int'], call['Lot Size']), (0, 500, 10))
+        self.assertTrue(np.isnan(call['IV']))
+        self.assertEqual(diagnostic['invalid_premium'], 1)
+        derivatives.loc[0, 'Contracts'] = np.nan
+        full, _ = overlay.prepare_option_iv(
+            derivatives, 'NIFTY', ['2026-09-01'], min_contracts=0, include_unavailable_iv=True)
+        call = full[full['Option type'].eq('CE')].iloc[0]
+        self.assertEqual(call['Open Int'], 500)
+        self.assertTrue(np.isnan(call['Contracts']))
+
 
 class OptionPlotTests(unittest.TestCase):
     @classmethod
@@ -331,13 +350,14 @@ class OptionIntegrationTests(unittest.TestCase):
         with patch.object(self.module, 'VOLATILITY_PANELS', ['cone']):
             self.module.plot_volatility(profile, 'NIFTY', pdf_pages=document)
         axes = document.savefig.call_args.args[0].axes[0]
-        self.assertCountEqual([text.get_text() for text in axes.texts],
-                              ['(24500, 22 Sep)\nClose: 123.45', '(25000, 22 Sep)\nClose: 67.89'])
-        for side, implied in [('CE', 0.35), ('PE', 0.40)]:
-            collection = next(item for item in axes.collections if item.get_label() == f'{side} IV')
-            np.testing.assert_allclose(collection.get_offsets(), [[14, implied]])
+        self.assertCountEqual([text.get_text() for text in axes.texts if text.get_text()],
+                              ['(24500, 22 Sep)\nClose: 123.45', '1 smile tail contracts >35% IV clipped'])
+        collection = next(item for item in axes.collections if item.get_label() == 'CE IV')
+        np.testing.assert_allclose(collection.get_offsets(), [[14, 0.35]])
+        self.assertNotIn('PE IV', [item.get_label() for item in axes.collections])
         outlined = next(item for item in axes.collections if item.get_label() == 'Smile MAD outlier')
-        np.testing.assert_allclose(outlined.get_offsets(), [[14, 0.35], [14, 0.40]])
+        np.testing.assert_allclose(outlined.get_offsets(), [[14, 0.35]])
+        self.assertEqual(axes.get_ylim(), (0.05, 0.35))
 
     def test_cone_without_mad_outliers_keeps_historical_lines(self):
         as_of = pd.Timestamp('2026-09-02')
@@ -351,11 +371,11 @@ class OptionIntegrationTests(unittest.TestCase):
         with patch.object(self.module, 'VOLATILITY_PANELS', ['cone']):
             self.module.plot_volatility(profile, 'NIFTY', pdf_pages=document)
         axes = document.savefig.call_args.args[0].axes[0]
-        self.assertFalse(axes.collections)
+        self.assertEqual(len(axes.collections), 1)  # Historical p10/p90 shading, no option dots
         self.assertFalse(axes.texts)
         self.assertEqual([line.get_label() for line in axes.lines],
                          ['Max', '75th Prctl', 'Median', 'Historical mean', '25th Prctl',
-                          'Min', 'Realized (latest)'])
+                          'Min', '10th Prctl', '90th Prctl', 'Realized (latest)'])
 
     def test_loader_uses_all_expiries_and_attaches_historical_benchmarks(self):
         fixture = OptionSelectionTests()
@@ -412,6 +432,272 @@ class OptionIntegrationTests(unittest.TestCase):
         self.assertEqual(parameters['option_rate'], 0.055)
         self.assertEqual(parameters['option_iv_unit'], 'decimal')
         self.assertIsNone(parameters['days'])
+
+
+class OptionBattlefieldTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import matplotlib
+        matplotlib.use('Agg')
+        spec = importlib.util.spec_from_file_location('ogn_battlefield_test', Path(__file__).with_name('Option-OGN.py'))
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    @staticmethod
+    def snapshots(outside_wall=False, dates=('2026-09-01', '2026-09-02')):
+        rows = []
+        for day in pd.to_datetime(dates):
+            for expiry in pd.to_datetime(['2026-10-27', '2026-09-22']):
+                for strike in range(75, 126, 5):
+                    for side in ('CE', 'PE'):
+                        rows.append({
+                            'Date': day, 'Expiry': expiry, 'Symbol': 'NIFTY', 'Instrument': 'OPTIDX',
+                            'Strike Price': float(strike), 'Option type': side, 'IV': 0.14,
+                            'Open Int': 100.0, 'Contracts': 10.0, 'Lot Size': 10.0,
+                            'Close': 2.0 if side == 'CE' else 3.0,
+                            'Tenor sessions': np.busday_count(day.date(), expiry.date()),
+                        })
+        frame = pd.DataFrame(rows)
+        near = frame['Expiry'].eq(pd.Timestamp('2026-09-22'))
+        current = frame['Date'].eq(pd.Timestamp(dates[-1]))
+        def change(strike, side, column, before, after):
+            mask = near & frame['Strike Price'].eq(strike) & frame['Option type'].eq(side)
+            frame.loc[mask & ~current, column] = before
+            frame.loc[mask & current, column] = after
+        change(100, 'CE', 'IV', 0.10, 0.24)
+        change(100, 'CE', 'Open Int', 100, 70)
+        change(100, 'CE', 'Contracts', 10, 200)
+        change(100, 'PE', 'Open Int', 100, 140)
+        change(105, 'CE', 'Open Int', 100, 120)
+        change(105, 'PE', 'Open Int', 100, 80)
+        change(105, 'PE', 'IV', 0.10, 0.16)
+        change(95, 'CE', 'IV', 0.15, 0.25)
+        change(110, 'CE', 'IV', 0.19, 0.18)
+        change(115, 'CE', 'Open Int', 100, 200)
+        change(90, 'PE', 'Open Int', 100, 600)
+        if outside_wall:
+            extra = frame[near & frame['Strike Price'].eq(75) & frame['Option type'].eq('CE')].copy()
+            extra['Strike Price'], extra['Open Int'], extra['Contracts'] = 60.0, 10000.0, 0.0
+            frame = pd.concat([frame, extra], ignore_index=True)
+        return (frame[frame['Date'].eq(pd.Timestamp(dates[-1]))].copy(),
+                frame[frame['Date'].eq(pd.Timestamp(dates[0]))].copy())
+
+    def battlefield(self, today=None, previous=None, **kwargs):
+        if today is None:
+            today, previous = self.snapshots()
+        cone = {'windows': [3, 30, 90], 'p10': [0.10] * 3, 'p90': [0.20] * 3}
+        return self.module.compute_option_battlefield(today, previous, 100.0, 95.0, cone, **kwargs)
+
+    @staticmethod
+    def prices():
+        prices = OptionIntegrationTests().prices()
+        prices[['Open', 'High', 'Low', 'Close']] *= 100.0 / prices['Close'].iloc[-1]
+        for day, close in zip(prices.index[-2:], (95.0, 100.0)):
+            prices.loc[day, ['Open', 'High', 'Low', 'Close']] = [close - 0.1, close + 0.2, close - 0.2, close]
+        return prices
+
+    def test_regime_precedence_oi_drivers_and_full_chain_pain_and_walls(self):
+        today, previous = self.snapshots(outside_wall=True)
+        result = self.battlefield(today, previous)
+        self.assertEqual((result['atm_strike'], result['strike_step']), (100, 5))
+        np.testing.assert_array_equal(result['strike_list'], np.arange(75, 126, 5))
+        contracts = result['contracts'].set_index(['Expiry', 'Strike Price', 'Option type'])
+        near = pd.Timestamp('2026-09-22')
+        self.assertEqual([contracts.loc[(near, strike, 'CE'), 'IV regime'] for strike in (100, 110, 95, 125)],
+                         ['RISING_FROM_BOTTOM', 'HOOKING_DOWN_TOP', 'SPIKED_ABOVE_CONE', 'NEUTRAL'])
+        self.assertIn((near, 125, 'CE'), contracts.index)  # Use today's grid for both dates
+        self.assertAlmostEqual(contracts.loc[(near, 100, 'CE'), 'Vol/OI'], 200 * 10 / 70)
+        cells = result['cells'].set_index(['Expiry', 'Strike Price'])
+        self.assertEqual((cells.loc[(near, 100), 'Net OI shift'], cells.loc[(near, 100), 'Driver']), (70, 'P-Add'))
+        self.assertTrue(cells.loc[(near, 100), 'Bullish confluence'])
+        self.assertTrue(cells.loc[(near, 100), 'Volume spike'])
+        self.assertEqual(cells.loc[(near, 105), 'Net OI shift'], -40)
+        self.assertTrue(cells.loc[(near, 105), 'Bearish confluence'])
+        self.assertTrue(cells.loc[(near, 90), 'Floor'])
+        self.assertFalse(cells.loc[(near, 115), 'Ceiling'])  # Bigger full-chain wall is outside ATM +/-5
+        summary = result['expiry_summary']
+        self.assertEqual(list(summary.index), [near, pd.Timestamp('2026-10-27')])
+        self.assertEqual(summary.loc[near, 'Max pain'], 60)
+        self.assertAlmostEqual(summary.loc[near, 'PCR'], 1620 / 1190)
+        self.assertEqual(summary.loc[near, ['EM lower', 'EM upper']].tolist(), [95, 105])
+
+    def test_missing_pairs_iv_and_lot_sizes_are_unavailable_not_zero(self):
+        today, previous = self.snapshots()
+        previous = previous[~(previous['Strike Price'].eq(125) & previous['Option type'].eq('PE'))]
+        mask = today['Strike Price'].eq(120) & today['Option type'].eq('CE')
+        today.loc[mask, ['IV', 'Lot Size']] = np.nan
+        result = self.battlefield(today, previous)
+        cells = result['cells'].set_index(['Expiry', 'Strike Price'])
+        self.assertTrue(cells.xs(125, level='Strike Price')['Net OI shift'].isna().all())
+        self.assertEqual(result['missing_cells'], 2)
+        self.assertEqual((result['unavailable_iv'], result['unavailable_volume']), (2, 2))
+        self.assertFalse(cells.xs(120, level='Strike Price')['Bullish confluence'].any())
+        empty = previous.iloc[:0]
+        with self.assertRaisesRegex(ValueError, 'last two underlying dates'):
+            self.battlefield(today, empty)
+        with self.assertRaisesRegex(ValueError, 'Duplicate'):
+            self.battlefield(pd.concat([today, today.iloc[:1]]), previous)
+
+    def test_strict_threshold_zero_oi_and_tenor_interpolation_without_extrapolation(self):
+        today, previous = self.snapshots()
+        mask = today['Strike Price'].eq(125) & today['Option type'].eq('CE')
+        today.loc[mask, ['Open Int', 'IV']] = [0, 0.15]
+        previous.loc[previous['Strike Price'].eq(125) & previous['Option type'].eq('CE'), 'IV'] = 0.10
+        exact = self.battlefield(today, previous, threshold_oi=100)
+        below = self.battlefield(today, previous, threshold_oi=99)
+        self.assertFalse(exact['cells'].query('`Strike Price` == 125')['Bullish confluence'].any())
+        self.assertTrue(below['cells'].query('`Strike Price` == 125')['Bullish confluence'].all())
+        zero_oi = exact['contracts']['Strike Price'].eq(125) & exact['contracts']['Option type'].eq('CE')
+        self.assertTrue(exact['contracts'].loc[zero_oi, 'Vol/OI'].eq(100).all())
+        near = today['Expiry'].eq(pd.Timestamp('2026-09-22'))
+        target = near & today['Strike Price'].eq(120) & today['Option type'].eq('CE')
+        today.loc[target, 'IV'] = 0.125
+        previous.loc[previous['Expiry'].eq(pd.Timestamp('2026-09-22'))
+                     & previous['Strike Price'].eq(120) & previous['Option type'].eq('CE'), 'IV'] = 0.12
+        cone = {'windows': [3, 25, 90], 'p10': [0.09, 0.13, 0.13], 'p90': [0.18, 0.26, 0.26]}
+        result = self.module.compute_option_battlefield(today, previous, 100, 95, cone)
+        target = result['contracts']['Expiry'].eq(pd.Timestamp('2026-09-22')) & result[
+            'contracts']['Strike Price'].eq(120) & result['contracts']['Option type'].eq('CE')
+        self.assertEqual(result['contracts'].loc[target, 'IV regime'].item(), 'RISING_FROM_BOTTOM')
+        unsupported = {'windows': [3, 10], 'p10': [0.10, 0.10], 'p90': [0.20, 0.20]}
+        result = self.module.compute_option_battlefield(today, previous, 100, 95, unsupported)
+        self.assertTrue(result['contracts']['IV regime'].eq('UNAVAILABLE').all())
+        self.assertFalse(result['cells'][['Bullish confluence', 'Bearish confluence']].any().any())
+
+    def test_cone_trail_endpoints_weekend_tenors_and_exact_clipping(self):
+        today, previous = self.snapshots(dates=('2026-09-04', '2026-09-07'))
+        near = today['Expiry'].eq(pd.Timestamp('2026-09-22'))
+        today.loc[near & today['Strike Price'].isin([100, 120]) & today['Option type'].eq('CE'), 'IV'] = 0.40
+        today.loc[near & today['Strike Price'].eq(95) & today['Option type'].eq('CE'), 'Tenor sessions'] = np.nan
+        result = self.battlefield(today, previous)
+        self.assertEqual(result['unavailable_iv'], 1)
+        profile = self.module.compute_volatility_profile(self.prices())
+        profile['option_battlefield'] = result
+        pages = Mock()
+        with patch.object(self.module, 'VOLATILITY_PANELS', ['cone']):
+            self.module.plot_volatility(profile, 'NIFTY', pdf_pages=pages)
+        figure = pages.savefig.call_args.args[0]
+        axes = figure.axes[0]
+        self.assertEqual(axes.get_ylim(), (0.05, 0.35))
+        for values, series in zip(profile['cone']['p10'], profile['cone']['series']):
+            self.assertAlmostEqual(values, series.quantile(0.10))
+        arrows = [text for text in axes.texts if getattr(text, 'arrow_patch', None) is not None and not text.get_text()]
+        self.assertTrue(all(np.isfinite(arrow.xy).all() and np.isfinite(arrow.xyann).all() for arrow in arrows))
+        trail = next(arrow for arrow in arrows if arrow.xy[1] == 0.40)
+        self.assertEqual(trail.xyann[0] - trail.xy[0], 1)  # Friday -> Monday, not three calendar days
+        starts = [collection for collection in axes.collections if len(collection.get_facecolors()) == 0]
+        self.assertTrue(starts)
+        texts = [text.get_text() for text in axes.texts if text.get_text()]
+        self.assertIn('2 ATM +/-5 contracts >35% IV clipped', texts)
+        self.assertFalse(any('40.0%' in text for text in texts))
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        area = axes.get_window_extent(renderer)
+        for text in axes.texts:
+            if text.get_text():
+                box = text.get_window_extent(renderer)
+                self.assertTrue(area.x0 <= box.x0 <= box.x1 <= area.x1, text.get_text())
+                self.assertTrue(area.y0 <= box.y0 <= box.y1 <= area.y1, text.get_text())
+        self.assertFalse(self.module.plt.get_fignums())
+
+    def test_volatility_footer_stays_clear_of_histogram_ticks(self):
+        today, previous = self.snapshots()
+        profile = self.module.compute_volatility_profile(self.prices())
+        profile['option_battlefield'] = self.battlefield(today, previous)
+        profile['option_overlay'] = {'points': today.assign(**{'Is outlier': False}),
+                                     'as_of': today['Date'].iloc[0], 'rate': 0.065}
+        pages = Mock()
+        self.module.plot_volatility(profile, 'NIFTY', pdf_pages=pages)
+        figure = pages.savefig.call_args.args[0]
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        footer = next(text for text in figure.texts if text.get_text().startswith('Option IV:'))
+        box = footer.get_window_extent(renderer)
+        self.assertTrue(0 <= box.x0 <= box.x1 <= figure.bbox.x1)
+        self.assertTrue(0 <= box.y0 <= box.y1 <= figure.bbox.y1)
+        histogram = next(axes for axes in figure.axes if axes.get_title() == 'Distribution of estimator values')
+        for tick in histogram.get_xticklabels():
+            self.assertFalse(box.overlaps(tick.get_window_extent(renderer)))
+        self.assertFalse(self.module.plt.get_fignums())
+
+    def test_battlefield_layers_and_nearest_pain_label_in_and_out_of_window(self):
+        for outside in (False, True):
+            with self.subTest(outside=outside):
+                today, previous = self.snapshots(outside_wall=outside)
+                result = self.battlefield(today, previous)
+                pages = Mock()
+                self.module.plot_option_battlefield(result, 'NIFTY', pdf_pages=pages)
+                figure = pages.savefig.call_args.args[0]
+                axes = figure.axes[0]
+                pain = 60 if outside else 100
+                line = next(line for line in axes.lines if line.get_color() == '#2b3fd6')
+                self.assertEqual(line.get_linestyle(), ':')
+                np.testing.assert_array_equal(line.get_xdata(), [pain, pain])
+                body = ' '.join(text.get_text() for text in axes.texts)
+                self.assertIn(f'Max pain {pain}', body)
+                self.assertIn('Expiry 22 Sep 2026 | quotes 02 Sep', body)
+                self.assertEqual('outside strike window' in body, outside)
+                self.assertEqual(len(axes.containers), 2)
+                np.testing.assert_allclose([bar.get_height() for bar in axes.containers[0]],
+                                           result['cells'].loc[result['cells']['Expiry'].eq(
+                                               pd.Timestamp('2026-09-22')), 'Net OI shift'])
+                self.assertTrue(axes.get_xlim()[0] > 60)  # Max pain cannot widen the ATM grid
+                legend = [text.get_text() for text in axes.get_legend().get_texts()]
+                self.assertIn('IV/OI confluence', legend)
+                self.assertIn('Volume/OI >1.5', legend)
+                self.assertTrue(any('22 Sep 2026 | MP:' in label and 'PCR:1.36' in label for label in legend))
+                self.assertIn('FLOOR', body)
+                if not outside:
+                    self.assertIn('CEILING', body)
+                figure.canvas.draw()
+                renderer = figure.canvas.get_renderer()
+                for text in figure.texts:
+                    box = text.get_window_extent(renderer)
+                    self.assertTrue(figure.bbox.x0 <= box.x0 <= box.x1 <= figure.bbox.x1, text.get_text())
+                    self.assertTrue(figure.bbox.y0 <= box.y0 <= box.y1 <= figure.bbox.y1, text.get_text())
+                self.assertFalse(self.module.plt.get_fignums())
+
+    def test_report_order_and_single_date_history_still_loads_previous_snapshot(self):
+        today, previous = self.snapshots(outside_wall=True)
+        source = pd.concat([today, previous], ignore_index=True)
+        source['IV'] *= 100
+        pages = Mock()
+        with patch.object(self.module, 'load_derivatives', return_value=source) as loader, \
+                patch.object(self.module, 'plot_volatility', pages.volatility), \
+                patch.object(self.module, 'plot_option_battlefield', pages.battlefield), \
+                patch.object(self.module, 'plot_volatility_guide', pages.guide), \
+                patch.object(overlay, 'plot_option_history', pages.history):
+            result = self.module.volatility_analysis(self.prices(), 'NIFTY', option_dates=1)
+        self.assertIsNotNone(result['option_battlefield'])
+        loader.assert_called_once_with('NIFTY', start='2026-09-01', end='2026-09-02')
+        self.assertEqual(result['option_overlay']['points']['Date'].unique().tolist(),
+                         [pd.Timestamp('2026-09-02').to_datetime64()])
+        self.assertEqual([call[0] for call in pages.mock_calls], ['volatility', 'battlefield', 'guide', 'history'])
+        with patch.object(self.module, 'REPORT_SECTIONS', ['volatility', 'option_battlefield']), \
+                patch.object(self.module, 'load_derivatives', return_value=source), \
+                patch.object(self.module, 'plot_volatility'), \
+                patch.object(self.module, 'plot_option_battlefield') as battlefield, \
+                patch.object(overlay, 'plot_option_history') as history:
+            result = self.module.volatility_analysis(self.prices(), 'NIFTY')
+        battlefield.assert_called_once()
+        history.assert_not_called()
+        self.assertIsNone(result['option_overlay'])
+
+    def test_missing_previous_snapshot_does_not_substitute_an_older_nonempty_date(self):
+        today, older = self.snapshots()
+        older['Date'] = pd.Timestamp('2026-08-31')
+        source = pd.concat([today, older], ignore_index=True)
+        source['IV'] *= 100
+        with patch.object(self.module, 'load_derivatives', return_value=source), \
+                patch.object(self.module, 'plot_volatility'), \
+                patch.object(self.module, 'plot_option_battlefield') as battlefield, \
+                patch.object(self.module, 'plot_volatility_guide'), \
+                patch.object(overlay, 'plot_option_history'), \
+                patch.object(self.module.sys, 'stdout', new_callable=io.StringIO) as output:
+            result = self.module.volatility_analysis(self.prices(), 'NIFTY')
+        self.assertIsNone(result['option_battlefield'])
+        battlefield.assert_not_called()
+        self.assertIn('[battlefield unavailable]', output.getvalue())
 
 
 class WeeklyExpiryTests(unittest.TestCase):

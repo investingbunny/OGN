@@ -11,7 +11,8 @@ multi-panel technical analysis charts including:
   - Renko charts
   - Support / resistance regression trendlines (scipy pivots + numpy polyfit)
 
-Report pages: technical -> max pain & PCR -> trendlines -> volatility -> volatility guide -> option IV
+Report pages: technical -> max pain & PCR -> trendlines -> volatility with IV trails
+-> OI & spot battlefield -> volatility guide -> option IV
 (next 3 monthly expiries, plus the next 5 expiries when weekly contracts are listed)
 -> comparison, then separate Japan, US Schiller and India Schiller appendices once
 per PDF. Edit REPORT_SECTIONS to drop any of them.
@@ -173,6 +174,7 @@ REPORT_SECTIONS = [
     'max_pain',     # max pain and put-call ratio of the range's latest options, when stored
     'trendlines',   # candlestick page with support / resistance regression lines
     'volatility',   # volatility cone / rolling / histogram page
+    'option_battlefield',  # matched ATM +/-5 OI shifts, spot trajectory and nearest max pain
     'volatility_guide',  # one page explaining each volatility graph with this report's numbers
     'option_overlay',
     'comparison',   # statistical comparison, only when a second symbol is given
@@ -231,6 +233,7 @@ RANGE_ESTIMATORS = {'GarmanKlass', 'Parkinson', 'RogersSatchell'}
 VOLATILITY_WINDOWS = [3, 5, 10, 20, 30, 60, 90]  # Cone x-axis
 VOLATILITY_WINDOW = 30                            # Rolling / histogram window
 VOLATILITY_QUANTILES = [0.25, 0.75]
+OPTION_OI_THRESHOLD = 0.0  # Absolute net Open Int shift required for IV/OI confluence
 
 
 # ---------------------------------------------------------------------------
@@ -2798,6 +2801,128 @@ def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None,
 # Volatility estimators (cone, rolling, distribution)
 # ---------------------------------------------------------------------------
 
+def compute_option_battlefield(df_today, df_prev, spot_today, spot_prev, rv_cone,
+                               threshold_oi=OPTION_OI_THRESHOLD):
+    """Match full close snapshots on today's ATM +/-5 grid; IV is an annualized decimal."""
+    if (not np.isfinite([spot_today, spot_prev, threshold_oi]).all()
+            or min(spot_today, spot_prev) <= 0 or threshold_oi < 0):
+        raise ValueError('Battlefield needs positive finite spots and a nonnegative finite OI threshold')
+    required = {'Date', 'Expiry', 'Strike Price', 'Option type', 'IV', 'Open Int',
+                'Contracts', 'Close', 'Tenor sessions'}
+    snapshots = []
+    keys = ['Expiry', 'Strike Price', 'Option type']
+    for source in (df_today, df_prev):
+        if not required.issubset(source.columns):
+            raise ValueError(f'Missing battlefield columns: {sorted(required - set(source.columns))}')
+        frame = source.copy()
+        for column in ['Date', 'Expiry']:
+            frame[column] = _naive_dates(frame[column]).dt.normalize()
+        if frame.empty or frame['Date'].isna().any() or frame['Date'].nunique() != 1:
+            raise ValueError('Battlefield requires a complete snapshot on each of the last two underlying dates')
+        frame['Option type'] = frame['Option type'].astype(str).str.strip().str.upper()
+        for column in ['Strike Price', 'IV', 'Close', 'Tenor sessions', 'Lot Size']:
+            values = pd.to_numeric(frame.get(column, pd.Series(np.nan, index=frame.index)), errors='coerce')
+            frame[column] = values.where(np.isfinite(values) & (values > 0))
+        for column in ['Open Int', 'Contracts']:
+            values = pd.to_numeric(frame[column], errors='coerce')
+            frame[column] = values.where(np.isfinite(values) & (values >= 0))
+        frame['Strike Price'] = frame['Strike Price'].round(8)
+        frame = frame[frame['Option type'].isin(['CE', 'PE']) & frame['Strike Price'].notna()
+                      & (frame['Expiry'] > frame['Date'])]
+        if frame.duplicated(keys).any():
+            raise ValueError('Duplicate expiry/strike/side contracts make the battlefield ambiguous')
+        snapshots.append(frame)
+    today, previous = snapshots
+    if today.empty or previous.empty or previous['Date'].iloc[0] >= today['Date'].iloc[0]:
+        raise ValueError('Battlefield requires unexpired options on T and the earlier T-1 date')
+    if ('Symbol' in today and 'Symbol' in previous
+            and pd.concat([today['Symbol'], previous['Symbol']]).dropna().nunique() > 1):
+        raise ValueError('Battlefield snapshots must belong to one underlying')
+
+    nearest_strikes = np.sort(today.loc[today['Expiry'].eq(today['Expiry'].min()),
+                                       'Strike Price'].unique())
+    if len(nearest_strikes) < 2:
+        raise ValueError('At least two nearest-expiry strikes are needed to infer strike spacing')
+    step = float(np.round(np.diff(nearest_strikes), 8).min())
+    anchor = nearest_strikes[0]
+    atm = round(float(anchor + math.floor((spot_today - anchor) / step + 0.5) * step), 8)
+    strikes = np.round(atm + np.arange(-5, 6) * step, 8)
+    merged = today[today['Strike Price'].isin(strikes)].merge(
+        previous[previous['Strike Price'].isin(strikes)], on=keys,
+        suffixes=('_T', '_T1'), how='inner', validate='one_to_one')
+    if merged.empty:
+        raise ValueError('No ATM +/-5 contracts match the last two underlying dates; stale quotes are not substituted')
+    merged['IV delta'] = merged['IV_T'] - merged['IV_T1']
+    merged['OI delta'] = merged['Open Int_T'] - merged['Open Int_T1']
+    merged['Vol/OI'] = (merged['Contracts_T'] * merged['Lot Size_T']
+                        / merged['Open Int_T'].clip(lower=1))
+    windows = np.asarray(rv_cone['windows'], dtype=float)
+    lower, upper = (np.asarray(rv_cone[key], dtype=float) for key in ('p10', 'p90'))
+    if (not len(windows) or len(lower) != len(windows) or len(upper) != len(windows)
+            or not np.isfinite(np.concatenate([windows, lower, upper])).all()
+            or (lower > upper).any() or len(np.unique(windows)) != len(windows)):
+        raise ValueError('Battlefield requires finite p10/p90 bounds at distinct realized-volatility tenors')
+    order = np.argsort(windows)
+    floor = np.interp(merged['Tenor sessions_T'], windows[order], lower[order], left=np.nan, right=np.nan)
+    ceiling = np.interp(merged['Tenor sessions_T'], windows[order], upper[order], left=np.nan, right=np.nan)
+    merged['IV regime'] = np.select([
+        (merged['IV_T1'] <= floor * 1.10) & (merged['IV delta'] > 0),
+        (merged['IV_T1'] >= ceiling * 0.90) & (merged['IV delta'] < 0),
+        (merged['IV_T'] > ceiling) & (merged['IV delta'] > 0),
+    ], ['RISING_FROM_BOTTOM', 'HOOKING_DOWN_TOP', 'SPIKED_ABOVE_CONE'], default='NEUTRAL')
+    available = (merged[['IV_T', 'IV_T1', 'Tenor sessions_T', 'Tenor sessions_T1']].notna().all(axis=1)
+                 & np.isfinite(floor) & np.isfinite(ceiling))
+    merged.loc[~available, 'IV regime'] = 'UNAVAILABLE'
+
+    summaries, grids = [], []
+    for expiry, group in merged.groupby('Expiry', sort=True):
+        ce, pe = (group[group['Option type'].eq(side)].set_index('Strike Price').reindex(strikes)
+                  for side in ('CE', 'PE'))
+        full = today[today['Expiry'].eq(expiry)]
+        calls, puts = (full[full['Option type'].eq(side)] for side in ('CE', 'PE'))
+        curve = (max_pain_curve(calls, puts) if full['Open Int'].notna().all()
+                 and full['Open Int'].sum() > 0 else pd.DataFrame())
+        call_total = group.loc[group['Option type'].eq('CE'), 'Open Int_T'].sum()
+        put_total = group.loc[group['Option type'].eq('PE'), 'Open Int_T'].sum()
+        straddle = ce.loc[atm, 'Close_T'] + pe.loc[atm, 'Close_T']
+        summaries.append({
+            'Expiry': expiry, 'PCR': put_total / max(call_total, 1) if group['Open Int_T'].notna().all() else np.nan,
+            'Max pain': curve['Total'].idxmin() if not curve.empty else np.nan,
+            'EM lower': spot_today - straddle, 'EM upper': spot_today + straddle,
+        })
+        paired = ce[['Open Int_T', 'Open Int_T1']].notna().all(axis=1) & pe[
+            ['Open Int_T', 'Open Int_T1']].notna().all(axis=1)
+        net = (pe['OI delta'] - ce['OI delta']).where(paired)
+        driver = np.where(ce['OI delta'].abs() > pe['OI delta'].abs(),
+                          np.where(ce['OI delta'] < 0, 'C-Unw', 'C-Add'),
+                          np.where(pe['OI delta'] > 0, 'P-Add', 'P-Unw'))
+        grid = pd.DataFrame({
+            'Strike Price': strikes, 'Expiry': expiry, 'Net OI shift': net.to_numpy(),
+            'Driver': driver, 'Available': paired.to_numpy(),
+            'Bullish confluence': (net.gt(threshold_oi) & ce['IV regime'].eq('RISING_FROM_BOTTOM')).to_numpy(),
+            'Bearish confluence': (net.lt(-threshold_oi) & pe['IV regime'].isin(
+                ['RISING_FROM_BOTTOM', 'SPIKED_ABOVE_CONE'])).to_numpy(),
+            'Ceiling': (ce['Open Int_T'].eq(calls['Open Int'].max() if calls['Open Int'].notna().all() else np.nan)
+                        & ce['OI delta'].gt(0) & paired).to_numpy(),
+            'Floor': (pe['Open Int_T'].eq(puts['Open Int'].max() if puts['Open Int'].notna().all() else np.nan)
+                      & pe['OI delta'].gt(0) & paired).to_numpy(),
+            'Volume spike': (ce['Vol/OI'].gt(1.5) | pe['Vol/OI'].gt(1.5)).to_numpy(),
+        })
+        grid.loc[~grid['Available'], 'Driver'] = 'Unavailable'
+        grid.loc[paired.to_numpy() & ce['OI delta'].eq(0).to_numpy()
+                 & pe['OI delta'].eq(0).to_numpy(), 'Driver'] = 'Flat'
+        grids.append(grid)
+    cells = pd.concat(grids, ignore_index=True)
+    return {'contracts': merged, 'cells': cells, 'expiry_summary': pd.DataFrame(summaries).set_index('Expiry'),
+            'date': today['Date'].iloc[0], 'previous_date': previous['Date'].iloc[0],
+            'spot_today': spot_today, 'spot_prev': spot_prev, 'atm_strike': atm,
+            'strike_step': step, 'strike_list': strikes, 'threshold_oi': threshold_oi,
+            'missing_cells': int((~cells['Available']).sum()),
+            'unavailable_iv': int(merged['IV regime'].eq('UNAVAILABLE').sum()),
+            'unavailable_volume': int(merged['Vol/OI'].isna().sum()),
+            'unmatched_expiries': int(today['Expiry'].nunique() - merged['Expiry'].nunique())}
+
+
 def build_volatility_option_overlay(price_data, ticker, estimator,
                                      date_count=option_overlay.OPTION_HISTORY_DATES,
                                      min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
@@ -2825,7 +2950,7 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
     if frequency != 'daily':
         print('  [options] Option IV overlays require daily underlying prices, not monthly/quarterly macro observations.')
         return None
-    dates = history.index[-date_count:]
+    dates = history.index[-max(date_count, 2):]
     try:
         derivatives = load_derivatives(ticker, start=f'{dates[0]:%Y-%m-%d}', end=f'{dates[-1]:%Y-%m-%d}')
     except FileNotFoundError:
@@ -2836,9 +2961,10 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
         return None
     chain, diagnostics = option_overlay.prepare_option_iv(
         derivatives, ticker, dates, rate=rate, reported_iv_unit=reported_iv_unit,
+        min_contracts=0, include_unavailable_iv=True)
+    points = option_overlay.select_option_points(
+        chain[chain['Date'].isin(history.index[-date_count:])], outlier_count=outlier_count,
         min_contracts=min_contracts)
-    points = option_overlay.select_option_points(chain, outlier_count=outlier_count,
-                                                 min_contracts=min_contracts)
     if points.empty:
         print(f"  [options] No valid IV points: {diagnostics['eligible_contracts']} eligible contracts, "
               f"{diagnostics['missing_forward']} without a same-expiry future or parity forward, "
@@ -2846,13 +2972,15 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
               f"{diagnostics['solver_failures']} solver failures.")
         if diagnostics['solver_unavailable']:
             print('  [options] Install vollib to estimate missing IV; reported IV can be used directly.')
-        return None
+        if chain.empty or 'option_battlefield' not in REPORT_SECTIONS:
+            return None
     # Next monthly expiries, plus the next expiries of any kind when weeklies are listed
-    expiries = option_overlay.select_report_expiries(points)
+    expiries = option_overlay.select_report_expiries(chain[chain['Expiry'] > dates[-1]])
     points = points[points['Expiry'].isin(expiries)].reset_index(drop=True)
     if points.empty:
         print('  [options] No upcoming expiries with valid IV points.')
-        return None
+        if chain.empty or 'option_battlefield' not in REPORT_SECTIONS:
+            return None
     points = option_overlay.attach_realized_benchmarks(
         points, history, lambda available, tenor: get_volatility_estimator(available, estimator, tenor))
     kinds = points.drop_duplicates('Expiry')['Expiry type'].value_counts()
@@ -2864,7 +2992,9 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
     return {'points': points, 'diagnostics': diagnostics, 'as_of': dates[-1],
             'estimator': estimator, 'top_count': option_overlay.OPTION_TOP_COUNT,
             'outlier_count': outlier_count, 'min_contracts': min_contracts, 'rate': rate,
-            'reported_iv_unit': reported_iv_unit, 'expiries': expiries}
+            'reported_iv_unit': reported_iv_unit, 'expiries': expiries, 'chain': chain,
+            'observation_dates': dates[-2:], 'spot_today': float(history['Close'].iloc[-1]),
+            'spot_prev': float(history['Close'].iloc[-2]) if len(history) > 1 else np.nan}
 
 
 def get_volatility_estimator(price_data, estimator=DEFAULT_ESTIMATOR,
@@ -2908,7 +3038,7 @@ def compute_volatility_profile(price_data, estimator=DEFAULT_ESTIMATOR,
     if not usable:
         return None
 
-    cone = {'windows': [], 'max': [], 'top_q': [], 'median': [], 'mean': [],
+    cone = {'windows': [], 'max': [], 'p10': [], 'p90': [], 'top_q': [], 'median': [], 'mean': [],
             'bottom_q': [], 'min': [], 'realized': [], 'series': []}
 
     for w in usable:
@@ -2918,6 +3048,8 @@ def compute_volatility_profile(price_data, estimator=DEFAULT_ESTIMATOR,
             continue
         cone['windows'].append(w)
         cone['max'].append(series.max())
+        cone['p10'].append(series.quantile(0.10))
+        cone['p90'].append(series.quantile(0.90))
         cone['top_q'].append(series.quantile(quantiles[1]))
         cone['median'].append(series.median())
         cone['mean'].append(series.mean())
@@ -2993,6 +3125,184 @@ def _cone_option_points(options, outliers_only=True):
     return latest
 
 
+def _plot_iv_trails(axes, battlefield, existing_labels):
+    """Hollow T-1 to solid T endpoints; keep non-neutral labels inside the clipped cone."""
+    from adjustText import adjust_text
+
+    contracts = battlefield['contracts']
+    trails = contracts[contracts['Strike Price'].isin(battlefield['strike_list'][3:8])
+                       & contracts[['IV_T', 'IV_T1', 'Tenor sessions_T', 'Tenor sessions_T1']].notna().all(axis=1)]
+    if trails.empty:
+        return
+    tenors = np.concatenate([trails['Tenor sessions_T1'], trails['Tenor sessions_T']])
+    left, right = axes.get_xlim()
+    axes.set_xlim(min(left, tenors.min() - 0.8), max(right, tenors.max() + 0.8))
+    styles = {
+        'RISING_FROM_BOTTOM': ('#15803d', 'Rising from bottom'),
+        'HOOKING_DOWN_TOP': ('#dc2626', 'Hooking down from top'),
+        'SPIKED_ABOVE_CONE': ('#f59e0b', 'Spiked above cone'),
+        'NEUTRAL': ('#9ca3af', 'Neutral IV trail'),
+        'UNAVAILABLE': ('#9ca3af', 'RV bounds unavailable'),
+    }
+    labels = list(existing_labels)
+    for regime, (colour, description) in styles.items():
+        group = trails[trails['IV regime'].eq(regime)]
+        if group.empty:
+            continue
+        axes.plot([], [], color=colour, marker='o', label=description)
+        axes.scatter(group['Tenor sessions_T1'], group['IV_T1'], s=35,
+                     facecolors='none', edgecolors=colour, linewidths=1.4, zorder=5)
+        axes.scatter(group['Tenor sessions_T'], group['IV_T'], s=35, color=colour, zorder=6)
+        for _, row in group.iterrows():
+            annotation = axes.annotate(
+                '', xy=(row['Tenor sessions_T'], row['IV_T']),
+                xytext=(row['Tenor sessions_T1'], row['IV_T1']), annotation_clip=False,
+                arrowprops=dict(arrowstyle='->', color=colour, alpha=0.85, lw=1.3,
+                                linestyle='--' if regime == 'UNAVAILABLE' else '-'), zorder=4)
+            if annotation.arrow_patch is not None:
+                annotation.arrow_patch.set_clip_path(axes.patch)
+            if regime not in ('NEUTRAL', 'UNAVAILABLE') and 0.05 <= row['IV_T'] <= 0.35:
+                labels.append(axes.text(
+                    row['Tenor sessions_T'], row['IV_T'],
+                    f"{row['Strike Price']:g}{row['Option type']} ({row['Expiry']:%d %b})\n"
+                    f"{row['IV_T1'] * 100:.1f}->{row['IV_T'] * 100:.1f}%",
+                    fontsize=8, ha='center', va='bottom', color=colour, zorder=7,
+                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.8, pad=0.3)))
+    legend = axes.legend(fontsize=9, ncol=3, loc='upper right')
+    if labels:
+        adjust_text(labels, x=tenors, y=np.concatenate([trails['IV_T1'], trails['IV_T']]),
+                    ax=axes, objects=[legend], ensure_inside_axes=True, iter_lim=500,
+                    expand=(1.1, 1.2), arrowprops=dict(arrowstyle='-', color='#777777', lw=0.5))
+
+
+def plot_option_battlefield(battlefield, ticker, pdf_pages=None):
+    """Layer per-expiry OI shifts, close-to-close spot, straddle range and full-chain max pain."""
+    from adjustText import adjust_text
+    from matplotlib.transforms import offset_copy
+
+    summary, cells = battlefield['expiry_summary'], battlefield['cells']
+    expiries, strikes, step = list(summary.index), battlefield['strike_list'], battlefield['strike_step']
+    figure = plt.figure(figsize=(30, 17), facecolor='white')
+    figure.suptitle(f"{ticker}   Multi-Expiry OI & Spot Battlefield   |   "
+                    f"{battlefield['previous_date']:%d %b} -> {battlefield['date']:%d %b %Y}",
+                    fontsize=30, fontweight='bold', y=0.975)
+    figure.text(0.055, 0.925, f"ATM {_strike_label(battlefield['atm_strike'])} +/-5 | "
+                f"Step {_strike_label(step)} | Positive: put additions / call unwinding | "
+                "PCR: matched ATM +/-5 OI; max pain and walls: full current expiry chain",
+                fontsize=15, color='#454c50')
+    columns = 3 if len(expiries) <= 24 else 4
+    bottom = min(0.50, 0.24 + 0.018 * math.ceil((len(expiries) + 3) / columns))
+    axes = figure.add_axes((0.055, bottom, 0.90, 0.84 - bottom))
+    colours = plt.get_cmap('tab20')(np.linspace(0, 1, len(expiries)))
+    width = step * 0.76 / len(expiries)
+    labels, used = [], set()
+    for number, (expiry, colour) in enumerate(zip(expiries, colours)):
+        group = cells[cells['Expiry'].eq(expiry)].set_index('Strike Price').reindex(strikes)
+        badge = summary.loc[expiry]
+        pain = _strike_label(badge['Max pain']) if np.isfinite(badge['Max pain']) else 'n/a'
+        move = (f"{badge['EM lower']:,.0f}-{badge['EM upper']:,.0f}"
+                if np.isfinite(badge['EM lower']) else 'n/a')
+        positions = strikes + (number - (len(expiries) - 1) / 2) * width
+        axes.bar(positions, group['Net OI shift'], width=width * 0.92, color=colour, alpha=0.85,
+                 label=f"{expiry:%d %b %Y} | MP:{pain} | PCR:{_ratio_text(badge['PCR'])} | EM:{move}")
+        for x, (_, cell) in zip(positions, group.iterrows()):
+            value = cell['Net OI shift']
+            if not np.isfinite(value):
+                axes.text(x, 0, 'n/a', fontsize=7, rotation=90, ha='center', va='bottom', color='#777777')
+                continue
+            confluence = cell['Bullish confluence'] or cell['Bearish confluence']
+            tags = []
+            if confluence:
+                axes.scatter([x], [value], marker='*', s=160, color='#d4a017', edgecolors='#785b09',
+                             zorder=6, label='IV/OI confluence' if 'star' not in used else '_nolegend_')
+                used.add('star')
+                tags.append('BULL' if cell['Bullish confluence'] else 'BEAR')
+            if cell['Ceiling']:
+                tags.append('CEILING')
+            if cell['Floor']:
+                tags.append('FLOOR')
+            if tags:
+                labels.append(axes.text(
+                    x, value, f"{' / '.join(tags)}\n{cell['Driver']}",
+                    ha='center', va='bottom' if value >= 0 else 'top', fontsize=9, zorder=7,
+                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.8, pad=0.3)))
+            if cell['Volume spike']:
+                axes.scatter([x], [value], marker='D', s=45, facecolors='none', edgecolors='#374151',
+                             transform=offset_copy(axes.transData, fig=figure, y=5, units='points'),
+                             zorder=7, label='Volume/OI >1.5' if 'diamond' not in used else '_nolegend_')
+                used.add('diamond')
+    magnitude = cells['Net OI shift'].abs().max()
+    magnitude = float(magnitude) if np.isfinite(magnitude) and magnitude > 0 else 1.0
+    axes.set_ylim(-magnitude * 1.25, magnitude * 1.55)
+    axes.set_xlim(strikes[0] - step * 0.6, strikes[-1] + step * 0.6)
+    axes.axhline(0, color='#6b7280', linewidth=1)
+    near = summary.iloc[0]
+    if np.isfinite(near['EM lower']) and np.isfinite(near['EM upper']):
+        axes.axvspan(near['EM lower'], near['EM upper'], color='#38bdf8', alpha=0.08,
+                     label=rf"Near expiry $\pm1\sigma$ proxy ({near['EM lower']:,.0f}-{near['EM upper']:,.0f})")
+    for key, caption, colour, style, height in [
+            ('spot_prev', 'Spot T-1', '#6b7280', '--', 0.95),
+            ('spot_today', 'Spot T', '#111827', '-', 0.89)]:
+        spot = battlefield[key]
+        axes.axvline(spot, color=colour, linestyle=style, linewidth=2)
+        if axes.get_xlim()[0] <= spot <= axes.get_xlim()[1]:
+            axes.text(spot, height, f'{caption} {spot:,.2f}', transform=axes.get_xaxis_transform(),
+                      ha='left' if spot <= battlefield['atm_strike'] else 'right', va='top',
+                      fontsize=12, color=colour, bbox=MAX_PAIN_LABEL_BOX)
+    trajectory = axes.annotate(
+        '', xy=(battlefield['spot_today'], 0.985), xytext=(battlefield['spot_prev'], 0.985),
+        xycoords=('data', 'axes fraction'), annotation_clip=False,
+        arrowprops=dict(arrowstyle='->', color='#15803d' if battlefield['spot_today'] >=
+                        battlefield['spot_prev'] else '#dc2626', lw=2.5))
+    if trajectory.arrow_patch is not None:
+        trajectory.arrow_patch.set_clip_path(axes.patch)
+    pain = near['Max pain']
+    if np.isfinite(pain):
+        axes.axvline(pain, color='#2b3fd6', linestyle=':', linewidth=2.5)
+        left, right = axes.get_xlim()
+        outside = not left <= pain <= right
+        at = min(max(pain, left + step * 0.15), right - step * 0.15)
+        gap = battlefield['spot_today'] / pain - 1
+        axes.text(at, 0.81, f"Max pain {_strike_label(pain)}"
+                  + (' (outside strike window)' if outside else '')
+                  + f"\nExpiry {expiries[0]:%d %b %Y} | quotes {battlefield['date']:%d %b}"
+                  + f"\nSpot {gap:+.1%} vs max pain", transform=axes.get_xaxis_transform(),
+                  fontsize=12, fontweight='bold', color='#2b3fd6', va='top',
+                  ha='left' if at <= battlefield['atm_strike'] else 'right', bbox=MAX_PAIN_LABEL_BOX)
+    axes.set_xticks(strikes)
+    axes.set_xticklabels([_strike_label(strike) for strike in strikes], fontsize=12)
+    axes.set_xlabel('Strike price (today ATM +/-5)', fontsize=16, fontweight='bold')
+    axes.set_ylabel('Net bullish OI shift (PE delta - CE delta)', fontsize=16, fontweight='bold')
+    axes.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f'{value:,.0f}'))
+    axes.tick_params(axis='y', labelsize=12)
+    axes.grid(axis='y', color='#d5dadd', alpha=0.6)
+    axes.set_axisbelow(True)
+    axes.spines[['top', 'right']].set_visible(False)
+    axes.legend(loc='upper center', bbox_to_anchor=(0.5, -0.14), ncol=columns,
+                fontsize=11 if len(expiries) <= 7 else 9, frameon=False)
+    if labels:
+        adjust_text(labels, ax=axes, ensure_inside_axes=True, iter_lim=300,
+                    expand=(1.15, 1.25), arrowprops=dict(arrowstyle='-', color='#777777', lw=0.5))
+    gaps = (f"Unavailable: {battlefield['missing_cells']} strike/expiry pairs, "
+            f"{battlefield['unavailable_iv']} IV regimes, {battlefield['unavailable_volume']} volume/OI ratios "
+            f"(missing volume, OI or lot size), {battlefield['unmatched_expiries']} expiries without matched quotes. "
+            f"{int(summary['EM lower'].isna().sum())} ATM straddles and "
+            f"{int(summary['Max pain'].isna().sum())} max-pain estimates unavailable.")
+    figure.text(0.055, 0.075, textwrap.fill(gaps, 190), fontsize=12, color='#555b60', va='top')
+    figure.text(0.055, 0.027, f"Stars: aligned IV regime and |net OI shift| > {battlefield['threshold_oi']:,.0f}. "
+                "Diamonds: Contracts x Lot Size / max(Open Int, 1) >1.5. "
+                "EM uses current ATM option Close prices, a straddle proxy, not a calibrated 1-sigma interval.\n"
+                "OI shifts identify additions/unwinding, not whether trades were bought or written; "
+                "positioning and max pain are not forecasts.", fontsize=11, color='#555b60')
+    if pdf_pages is not None:
+        try:
+            pdf_pages.savefig(figure)
+        finally:
+            plt.close(figure)
+    else:
+        plt.show()
+
+
 def plot_volatility(profile, ticker, pdf_pages=None):
     """Render the volatility page: cone, box, rolling series and distribution."""
     cone = profile['cone']
@@ -3001,6 +3311,7 @@ def plot_volatility(profile, ticker, pdf_pages=None):
     label = _volatility_formatter(profile)
     lower, upper = profile['quantiles']
     options = profile.get('option_overlay')
+    battlefield = profile.get('option_battlefield')
 
     figure = plt.figure(figsize=(30, 17))
     figure.suptitle(
@@ -3022,23 +3333,49 @@ def plot_volatility(profile, ticker, pdf_pages=None):
         ax_cone.plot(cone['windows'], cone['bottom_q'], marker='o',
                      label=f"{int(lower * 100)}th Prctl")
         ax_cone.plot(cone['windows'], cone['min'], marker='o', label='Min')
+        if not profile['is_moment']:
+            ax_cone.plot(cone['windows'], cone['p10'], linestyle=':', label='10th Prctl')
+            ax_cone.plot(cone['windows'], cone['p90'], linestyle=':', label='90th Prctl')
+            ax_cone.fill_between(cone['windows'], cone['p10'], cone['p90'], alpha=0.10,
+                                 color='#64748b', label='10th-90th percentile')
+            ax_cone.set_ylim(0.05, 0.35)
         ax_cone.plot(cone['windows'], cone['realized'], 'r-.', marker='*',
                      markersize=16, linewidth=2.5, label='Realized (latest)')
         ax_cone.set_xticks(cone['windows'])
         ax_cone.set_xlim(cone['windows'][0] - 3, cone['windows'][-1] + 3)
         ax_cone.set_xlabel('Rolling window (days)', fontsize=15)
         ax_cone.yaxis.set_major_formatter(FuncFormatter(lambda v, _: label(v)))
+        ax_cone.set_ylabel('Annualized volatility (%)' if not profile['is_moment'] else estimator, fontsize=13)
         ax_cone.grid(True, axis='y', alpha=0.4)
         ax_cone.tick_params(labelsize=13)
         ax_cone.legend(fontsize=13)
         ax_cone.set_title('Volatility Cone', fontsize=20, fontweight='bold', pad=8)
+        option_labels, clipped = [], []
         if options is not None:
             latest = _cone_option_points(options)
             if not latest.empty:
-                option_overlay.plot_option_markers(ax_cone, latest, 'Tenor sessions', fontsize=9)
+                visible = latest[latest['IV'].between(0.05, 0.35)]
+                option_labels = option_overlay.plot_option_markers(ax_cone, visible, 'Tenor sessions', fontsize=9)
+                tails = latest[latest['IV'] > 0.35]
+                if battlefield is not None:
+                    matched = pd.MultiIndex.from_frame(battlefield['contracts'][['Expiry', 'Strike Price', 'Option type']])
+                    tails = tails[~pd.MultiIndex.from_frame(tails[['Expiry', 'Strike Price', 'Option type']]).isin(matched)]
+                if not tails.empty:
+                    clipped.append(f'{len(tails)} smile tail contracts >35% IV clipped')
                 ax_cone.set_xlabel('Lookback / expiry tenor (weekday sessions)', fontsize=13)
                 ax_cone.set_title(f"Volatility Cone + Option IV | {options['as_of']:%d %b %Y}",
                                   fontsize=18, fontweight='bold', pad=8)
+        if battlefield is not None and not profile['is_moment']:
+            _plot_iv_trails(ax_cone, battlefield, option_labels)
+            ax_cone.set_xlabel('Lookback / expiry tenor (weekday sessions)', fontsize=13)
+            ax_cone.set_title(f"Volatility Cone + T-1 -> T IV Trails | {battlefield['date']:%d %b %Y}",
+                              fontsize=18, fontweight='bold', pad=8)
+            count = int(battlefield['contracts']['IV_T'].gt(0.35).sum())
+            if count:
+                clipped.insert(0, f'{count} ATM +/-5 contracts >35% IV clipped')
+        if clipped:
+            ax_cone.text(0.99, 0.02, '\n'.join(clipped), transform=ax_cone.transAxes, ha='right',
+                         va='bottom', fontsize=10, color='#555555', bbox=MAX_PAIN_LABEL_BOX)
 
     # --- Box plot of the same per-window distributions ---
     if has('box'):
@@ -3125,12 +3462,18 @@ def plot_volatility(profile, ticker, pdf_pages=None):
                      "option Close (N/A if missing). "
                      f"Black-76 estimates use {options['rate']:.2%} ACT/365; realized volatility uses 252/year. "
                      'The cone defaults to monthly Smile MAD outliers.')
+    if battlefield is not None:
+        notes.append('IV trails: ATM +/-2, all matched expiries; hollow T-1 -> solid T. '
+                     'Green rising from bottom, red hooking down, orange spiked, gray neutral/unavailable; '
+                     'cone view 5%-35%.')
     if 'volatility_guide' in REPORT_SECTIONS:
-        notes.append('Next page: how to read each graph.')
+        notes.append('Next page: OI battlefield; volatility guide follows.' if battlefield is not None
+                     and 'option_battlefield' in REPORT_SECTIONS else 'Next page: how to read each graph.')
     if options is not None:
         notes.append('Per-expiry option IV pages follow.')
     if notes:
-        figure.text(0.05, 0.017, ' '.join(notes), fontsize=11, color='#555555')
+        figure.text(0.05, 0.015, textwrap.fill(' '.join(notes), 350), fontsize=11,
+                    color='#555555', va='bottom')
     if pdf_pages:
         pdf_pages.savefig(figure)
         plt.close(figure)
@@ -3168,7 +3511,8 @@ def _volatility_guide_blocks(profile, ticker):
         blocks.append(('Volatility Cone', [
             ('Shows', f'The range of {estimator} {noun} for each look-back window ({windows[0]} to '
                       f'{windows[-1]} days): max, {upper}th percentile, median, mean, {lower}th '
-                      'percentile and min over the whole history. Red stars are today.'),
+                      'percentile and min over the whole history. Red stars are today.'
+                      + (' Dotted 10th/90th bounds shade the historical cone; view is 5%-35%.' if not moment else '')),
             ('Read', 'Short windows swing far more than long ones, so the cone narrows to the right. '
                      'A star near the top of the cone is high for that window, near the bottom low.'),
             ('Here', example)]))
@@ -3226,6 +3570,8 @@ def _volatility_guide_blocks(profile, ticker):
                      f'{len(rolling):,} readings: {reading}.')]))
 
     cone_points = _cone_option_points(profile.get('option_overlay'))
+    if not moment and not cone_points.empty:
+        cone_points = cone_points[cone_points['IV'].between(0.05, 0.35)]
     if has('cone') and not cone_points.empty:
         nearest = cone_points['Expiry'].min()
         near = cone_points[cone_points['Expiry'].eq(nearest)]
@@ -3242,6 +3588,19 @@ def _volatility_guide_blocks(profile, ticker):
                      + ', '.join(f'{side} {label(value)}' for side, value in sides.items()
                                  if np.isfinite(value))
                      + f' vs {benchmark}.')]))
+    battlefield = profile.get('option_battlefield')
+    if has('cone') and battlefield is not None and not moment:
+        counts = battlefield['contracts']['IV regime'].value_counts()
+        blocks.append(('Previous-day IV trails', [
+            ('Shows', 'ATM +/-2 contracts at each matched expiry: hollow T-1 IV to solid T IV, '
+                      'moving left as weekday tenor falls. Non-neutral labels show strike, side and IV change.'),
+            ('Read', 'Green: IV rising from near the 10th-percentile bottom. Red: IV falling from near '
+                     'the 90th-percentile top. Orange: rising above the 90th bound. Gray: neutral or '
+                     'unavailable bounds (dashed). These are regimes, not trade recommendations.'),
+            ('Here', f"{battlefield['previous_date']:%d %b} -> {battlefield['date']:%d %b}: ATM +/-5 has "
+                     f"{counts.get('RISING_FROM_BOTTOM', 0)} rising, {counts.get('HOOKING_DOWN_TOP', 0)} hooking, "
+                     f"{counts.get('SPIKED_ABOVE_CONE', 0)} spiked and {counts.get('NEUTRAL', 0)} neutral contracts; "
+                     f"{battlefield['unavailable_iv']} regimes unavailable.")]))
 
     if not moment and not rolling.empty:
         percentile = _percentile_rank(rolling, rolling.iloc[-1])
@@ -3256,14 +3615,14 @@ def _volatility_guide_blocks(profile, ticker):
 
 
 def plot_volatility_guide(profile, ticker, pdf_pages=None):
-    """Page after the volatility profile: what each graph shows, using this report's numbers."""
+    """Explain the volatility graphs using this report's numbers, after any OI battlefield."""
     blocks = _volatility_guide_blocks(profile, ticker)
     if not blocks:
         return 0
     figure = plt.figure(figsize=(30, 17))
     figure.suptitle(f"{ticker}   Volatility Profile - how to read it   |   "
                     f"{profile['estimator']} estimator", fontsize=32, fontweight='bold', y=0.975)
-    figure.text(0.05, 0.925, "One block per graph on the previous page: what it shows, how to read "
+    figure.text(0.05, 0.925, "One block per volatility graph: what it shows, how to read "
                 "it, and this report's numbers as the example.", fontsize=17, color='#444444')
     rows = math.ceil(len(blocks) / 2)
     size, wrap = (20, 82) if rows <= 3 else (17, 96)  # A fourth row needs smaller text
@@ -3299,18 +3658,21 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
         print(f"  [volatility] Use Raw, HodgesTompkins or YangZhang for this series.")
 
     options = None
-    if 'option_overlay' in REPORT_SECTIONS:
+    if 'option_overlay' in REPORT_SECTIONS or 'option_battlefield' in REPORT_SECTIONS:
         try:
             options = build_volatility_option_overlay(
                 price_data, ticker, estimator, date_count=option_dates,
                 min_contracts=option_min_contracts, outlier_count=option_outliers,
                 rate=option_rate, reported_iv_unit=option_iv_unit)
-        except Exception as error:
+        except (OSError, ValueError, KeyError) as error:
             print(f'  [options unavailable] {type(error).__name__}: {error}')
     windows = list(VOLATILITY_WINDOWS)
     if options is not None:
         latest = _cone_option_points(options, outliers_only=False)
         windows = sorted(set(windows) | set(latest.loc[latest['RV count'] > 0, 'Tenor sessions'].astype(int)))
+        current = options['chain'][options['chain']['Date'].eq(options['as_of'])]
+        tenors = current['Tenor sessions']
+        windows = sorted(set(windows) | set(tenors[(tenors >= 3) & (tenors + 1 < len(price_data))].astype(int)))
     profile = compute_volatility_profile(price_data, estimator=estimator, windows=windows)
     if profile is None:
         print(f"  [volatility] Not enough history for {ticker} "
@@ -3325,11 +3687,29 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
               f"median {label(rolling.median())}, "
               f"range {label(rolling.min())} to {label(rolling.max())}")
 
-    profile['option_overlay'] = options
+    battlefield = None
+    if options is not None:
+        try:
+            dates = options['observation_dates']
+            if len(dates) < 2:
+                raise ValueError('Two underlying close dates are required for IV trails and OI shifts')
+            battlefield = compute_option_battlefield(
+                options['chain'][options['chain']['Date'].eq(dates[-1])],
+                options['chain'][options['chain']['Date'].eq(dates[-2])],
+                options['spot_today'], options['spot_prev'], profile['cone'])
+            print(f"  [battlefield] {len(battlefield['contracts'])} matched contracts; "
+                  f"{battlefield['missing_cells']} pairs, {battlefield['unavailable_iv']} IV regimes and "
+                  f"{battlefield['unavailable_volume']} volume/OI ratios unavailable.")
+        except (ValueError, KeyError) as error:
+            print(f'  [battlefield unavailable] {error}')
+    profile['option_overlay'] = options if 'option_overlay' in REPORT_SECTIONS else None
+    profile['option_battlefield'] = battlefield
     plot_volatility(profile, ticker, pdf_pages=pdf_pages)
+    if battlefield is not None and 'option_battlefield' in REPORT_SECTIONS:
+        plot_option_battlefield(battlefield, ticker, pdf_pages=pdf_pages)
     if 'volatility_guide' in REPORT_SECTIONS:
         plot_volatility_guide(profile, ticker, pdf_pages=pdf_pages)
-    if options is not None:
+    if options is not None and 'option_overlay' in REPORT_SECTIONS:
         option_overlay.plot_option_history(options, ticker, pdf_pages=pdf_pages)
     return profile
 

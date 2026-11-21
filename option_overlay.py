@@ -75,7 +75,8 @@ def parity_forwards(options, rate=OPTION_RATE, strikes=OPTION_PARITY_STRIKES):
 
 
 def prepare_option_iv(derivatives, ticker, observation_dates, rate=OPTION_RATE,
-                       reported_iv_unit='percent', min_contracts=OPTION_MIN_CONTRACTS):
+                       reported_iv_unit='percent', min_contracts=OPTION_MIN_CONTRACTS,
+                       include_unavailable_iv=False):
     """Read reported IV or infer Black-76 IV from a same-expiry forward.
 
     The forward is the exactly matched futures price; when no future with that
@@ -85,11 +86,13 @@ def prepare_option_iv(derivatives, ticker, observation_dates, rate=OPTION_RATE,
     close for both legs. Tenor is actual calendar days / 365 for pricing; expiry
     day itself is excluded because daily data cannot identify its remaining
     intraday option lifetime. Each row is labelled Monthly or Weekly expiry.
+    Use min_contracts=0 and include_unavailable_iv=True for full OI snapshots;
+    unavailable IV stays NaN and cannot produce a volatility signal.
     """
     if reported_iv_unit not in ('percent', 'decimal'):
         raise ValueError('Reported IV unit must be percent or decimal')
-    if not np.isfinite(rate) or not -1 < rate < 1 or min_contracts < 1:
-        raise ValueError('Use a finite annual decimal rate between -1 and 1 and positive minimum volume')
+    if not np.isfinite(rate) or not -1 < rate < 1 or min_contracts < 0:
+        raise ValueError('Use a finite annual decimal rate between -1 and 1 and nonnegative minimum volume')
     required = {'Date', 'Expiry', 'Symbol', 'Option type', 'Strike Price', 'Contracts'}
     if not required.issubset(derivatives.columns):
         raise ValueError(f'Missing derivatives columns: {sorted(required - set(derivatives.columns))}')
@@ -118,8 +121,9 @@ def prepare_option_iv(derivatives, ticker, observation_dates, rate=OPTION_RATE,
     futures = futures[~ambiguous][['Date', 'Expiry', 'Settle Price', 'Close']].rename(
         columns={'Settle Price': 'Forward settlement', 'Close': 'Forward close'})
     options = frame[frame['Option type'].isin(['CE', 'PE'])].copy()
-    eligible = (np.isfinite(options[['Strike Price', 'Contracts']]).all(axis=1)
-                & (options['Strike Price'] > 0) & (options['Contracts'] >= min_contracts))
+    eligible = np.isfinite(options['Strike Price']) & (options['Strike Price'] > 0)
+    if not (include_unavailable_iv and min_contracts == 0):
+        eligible &= np.isfinite(options['Contracts']) & (options['Contracts'] >= min_contracts)
     options = options[eligible].drop_duplicates(
         ['Date', 'Expiry', 'Option type', 'Strike Price'], keep='last')
     options = options.merge(futures, on=['Date', 'Expiry'], how='left', validate='many_to_one')
@@ -201,7 +205,8 @@ def prepare_option_iv(derivatives, ticker, observation_dates, rate=OPTION_RATE,
             'Black-76 parity estimate' if parity else 'Black-76 estimate']
         diagnostics['estimated_iv'] += 1
         diagnostics['parity_iv'] += int(parity)
-    return options[options['IV'].notna()].reset_index(drop=True), diagnostics
+    result = options if include_unavailable_iv else options[options['IV'].notna()]
+    return result.reset_index(drop=True), diagnostics
 
 
 def score_option_smile(group, min_points=OPTION_MIN_SMILE_POINTS):
