@@ -91,11 +91,12 @@ class VolatilityGuideTests(unittest.TestCase):
             'Date': as_of, 'Option type': ['CE', 'CE', 'PE', 'PE'], 'IV': [0.14, 0.16, 0.17, 0.19],
             'Expiry': pd.to_datetime(['2026-10-27', '2026-10-27', '2026-10-27', '2026-11-03']),
             'Expiry type': ['Monthly', 'Monthly', 'Monthly', 'Weekly'], 'RV mean': 0.17,
+            'Is outlier': [False, True, True, True],
             'Tenor sessions': [4, 4, 4, 9]})
         count, figure, texts, body = self.render(self.profile(options={'points': points, 'as_of': as_of}))
         self.assertEqual(count, 7)
         self.assertIn('Option IV on the cone', texts)
-        self.assertIn('27 Oct expiry, 4 sessions: median CE 15%, PE 17% vs 17% realized mean.', body)
+        self.assertIn('27 Oct expiry, 4 sessions: median CE 16%, PE 17% vs 17% realized mean.', body)
         self.assert_no_overlaps(figure)
 
     def test_moment_estimator_guide_stays_off_option_pricing(self):

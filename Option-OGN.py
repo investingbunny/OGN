@@ -178,7 +178,7 @@ REPORT_SECTIONS = [
     'comparison',   # statistical comparison, only when a second symbol is given
     # 'japan_macro',
     # 'schiller_macro',
-    'india_schiller',
+    #'india_schiller',
 ]
 
 # ── Trendline page defaults (override on the CLI) ─────────────────────────
@@ -2973,14 +2973,23 @@ def _volatility_reading(percentile):
     return 'Middle of its historical range'
 
 
-def _cone_option_points(options):
-    """Latest-date option IV drawn on the cone: monthly expiries only, weeklies have their own pages."""
+def _cone_option_points(options, outliers_only=True):
+    """Latest-date monthly IV; show only Smile MAD outliers by default.
+
+    Use outliers_only=False to keep all monthly tenors for realized benchmarks.
+    """
     if options is None:
         return pd.DataFrame()
     points = options['points']
     latest = points[points['Date'].eq(options['as_of'])]
     if 'Expiry type' in latest.columns:
         latest = latest[latest['Expiry type'].eq('Monthly')]
+    if outliers_only:
+        plotted = latest[latest['Is outlier']]
+        # To restore the other nearby/top-volume strikes on the cone (and its
+        # guide), uncomment the next line. Expiry-page selections are unchanged.
+        # plotted = latest
+        return plotted
     return latest
 
 
@@ -3112,9 +3121,10 @@ def plot_volatility(profile, ticker, pdf_pages=None):
 
     notes = []
     if options is not None:
-        notes.append("Option IV: CE green, PE red; (strike, expiry) labels; outlined smile-MAD outliers. "
+        notes.append("Option IV: CE green, PE red; outlier labels show strike, expiry and quote-date "
+                     "option Close (N/A if missing). "
                      f"Black-76 estimates use {options['rate']:.2%} ACT/365; realized volatility uses 252/year. "
-                     'The cone shows monthly expiries.')
+                     'The cone defaults to monthly Smile MAD outliers.')
     if 'volatility_guide' in REPORT_SECTIONS:
         notes.append('Next page: how to read each graph.')
     if options is not None:
@@ -3224,8 +3234,8 @@ def _volatility_guide_blocks(profile, ticker):
         benchmark = (f'{label(realized)} realized mean' if np.isfinite(realized)
                      else 'no realized benchmark yet')
         blocks.append(('Option IV on the cone', [
-            ('Shows', "Today's option IV, calls green and puts red, placed at each monthly expiry's "
-                      'remaining weekday tenor; outlined dots are smile outliers.'),
+            ('Shows', "Today's plotted monthly option IV, calls green and puts red, at remaining "
+                      'weekday tenor. Only Smile MAD outliers by default; labels include quote-date option Close.'),
             ('Read', 'IV above the realized lines at the same tenor means options price more movement '
                      'than history has delivered; below them, less.'),
             ('Here', f"{nearest:%d %b} expiry, {int(near['Tenor sessions'].iloc[0])} sessions: median "
@@ -3299,7 +3309,7 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
             print(f'  [options unavailable] {type(error).__name__}: {error}')
     windows = list(VOLATILITY_WINDOWS)
     if options is not None:
-        latest = _cone_option_points(options)
+        latest = _cone_option_points(options, outliers_only=False)
         windows = sorted(set(windows) | set(latest.loc[latest['RV count'] > 0, 'Tenor sessions'].astype(int)))
     profile = compute_volatility_profile(price_data, estimator=estimator, windows=windows)
     if profile is None:

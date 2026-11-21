@@ -78,6 +78,21 @@ class OptionSelectionTests(unittest.TestCase):
         label = overlay.option_point_label({'Strike Price': 24500, 'Expiry': '2026-09-22'})
         self.assertEqual(label, '(24500, 22 Sep)')
 
+    def test_outlier_labels_include_option_close_not_underlying_or_solver_premium(self):
+        row = {'Strike Price': 24500, 'Expiry': '2026-09-22', 'Is outlier': True,
+               'Close': 123.45, 'Underlying Price': 25000, 'Premium': 120.0}
+        self.assertEqual(overlay.option_point_label(row), '(24500, 22 Sep)\nClose: 123.45')
+        row['Is outlier'] = False
+        self.assertEqual(overlay.option_point_label(row), '(24500, 22 Sep)')
+
+    def test_outlier_labels_show_unavailable_close_explicitly(self):
+        row = {'Strike Price': 24500, 'Expiry': '2026-09-22', 'Is outlier': True}
+        self.assertEqual(overlay.option_point_label(row), '(24500, 22 Sep)\nClose: N/A')
+        for close in [None, np.nan, np.inf, 0, -1]:
+            with self.subTest(close=close):
+                row['Close'] = close
+                self.assertEqual(overlay.option_point_label(row), '(24500, 22 Sep)\nClose: N/A')
+
     def test_no_foreign_tickers_in_selection(self):
         chain = self.chain(8)
         chain.loc[0, 'Symbol'] = 'BANKNIFTY'
@@ -210,7 +225,7 @@ class OptionPlotTests(unittest.TestCase):
         frames = []
         for side in ['CE', 'PE']:
             for date in pd.to_datetime(['2026-09-01', '2026-09-02']):
-                chain = fixture.chain().assign(**{'Option type': side, 'Date': date})
+                chain = fixture.chain().assign(**{'Option type': side, 'Date': date, 'Close': 123.45})
                 chain.loc[10, 'IV'] += 0.17
                 frames.append(chain)
         selected = overlay.select_option_points(pd.concat(frames, ignore_index=True))
@@ -230,6 +245,8 @@ class OptionPlotTests(unittest.TestCase):
         self.assertEqual(len(calls.texts), 12)
         self.assertEqual(len(puts.texts), 12)
         self.assertTrue(all('22 Sep)' in text.get_text() for text in calls.texts + puts.texts))
+        self.assertEqual(sum('Close: 123.45' in text.get_text()
+                             for text in calls.texts + puts.texts), 4)
         self.assertIn('CE IV', [collection.get_label() for collection in calls.collections])
         self.assertIn('PE IV', [collection.get_label() for collection in puts.collections])
         self.assertIn('Smile MAD outlier', [collection.get_label() for collection in calls.collections])
@@ -243,7 +260,7 @@ class OptionPlotTests(unittest.TestCase):
         frames = []
         for date_index, date in enumerate(pd.bdate_range(end='2026-09-02', periods=5)):
             for side in ['CE', 'PE']:
-                chain = fixture.chain().assign(**{'Date': date, 'Option type': side})
+                chain = fixture.chain().assign(**{'Date': date, 'Option type': side, 'Close': 1234.50})
                 chain['IV'] += date_index * 0.001 + (0.004 if side == 'PE' else 0)
                 chain.loc[10, 'IV'] += 0.17
                 chain.loc[7, 'IV'] -= 0.10
@@ -287,6 +304,58 @@ class OptionIntegrationTests(unittest.TestCase):
         close = 24500 + generator.normal(0, 80, len(dates)).cumsum()
         return pd.DataFrame({'Open': close - 5, 'High': close + 50, 'Low': close - 55,
                              'Close': close, 'Volume': 100}, index=dates)
+
+    def test_cone_shows_only_latest_monthly_mad_outliers(self):
+        as_of = pd.Timestamp('2026-09-02')
+        points = pd.DataFrame({
+            'Date': [as_of, as_of, as_of, as_of - pd.offsets.BDay(1), as_of],
+            'Expiry': pd.to_datetime(['2026-09-22'] * 4 + ['2026-09-08']),
+            'Expiry type': ['Monthly'] * 4 + ['Weekly'],
+            'Strike Price': [24000, 24500, 25000, 25500, 26000],
+            'Option type': ['CE', 'CE', 'PE', 'PE', 'CE'],
+            'IV': [0.20, 0.35, 0.40, 0.45, 0.30], 'Close': [100, 123.45, 67.89, 33, 44],
+            'Is outlier': [False, True, True, True, True],
+            'Selection': ['Top volume', 'Top volume', 'MAD outlier', 'MAD outlier', 'MAD outlier'],
+            'Tenor sessions': [14, 14, 14, 14, 4],
+        })
+        options = {'points': points, 'as_of': as_of, 'rate': 0.065}
+        selected = self.module._cone_option_points(options)
+        self.assertEqual(selected['Strike Price'].tolist(), [24500, 25000])
+        all_monthly = self.module._cone_option_points(options, outliers_only=False)
+        self.assertEqual(all_monthly['Strike Price'].tolist(), [24000, 24500, 25000])
+        self.assertEqual(len(options['points']), 5)
+
+        profile = self.module.compute_volatility_profile(self.prices())
+        profile['option_overlay'] = options
+        document = Mock()
+        with patch.object(self.module, 'VOLATILITY_PANELS', ['cone']):
+            self.module.plot_volatility(profile, 'NIFTY', pdf_pages=document)
+        axes = document.savefig.call_args.args[0].axes[0]
+        self.assertCountEqual([text.get_text() for text in axes.texts],
+                              ['(24500, 22 Sep)\nClose: 123.45', '(25000, 22 Sep)\nClose: 67.89'])
+        for side, implied in [('CE', 0.35), ('PE', 0.40)]:
+            collection = next(item for item in axes.collections if item.get_label() == f'{side} IV')
+            np.testing.assert_allclose(collection.get_offsets(), [[14, implied]])
+        outlined = next(item for item in axes.collections if item.get_label() == 'Smile MAD outlier')
+        np.testing.assert_allclose(outlined.get_offsets(), [[14, 0.35], [14, 0.40]])
+
+    def test_cone_without_mad_outliers_keeps_historical_lines(self):
+        as_of = pd.Timestamp('2026-09-02')
+        points = pd.DataFrame({'Date': [as_of], 'Expiry': [pd.Timestamp('2026-09-22')],
+                               'Expiry type': ['Monthly'], 'Is outlier': [False],
+                               'Strike Price': [24500], 'Option type': ['CE'],
+                               'IV': [0.20], 'Close': [123.45], 'Tenor sessions': [14]})
+        profile = self.module.compute_volatility_profile(self.prices())
+        profile['option_overlay'] = {'points': points, 'as_of': as_of, 'rate': 0.065}
+        document = Mock()
+        with patch.object(self.module, 'VOLATILITY_PANELS', ['cone']):
+            self.module.plot_volatility(profile, 'NIFTY', pdf_pages=document)
+        axes = document.savefig.call_args.args[0].axes[0]
+        self.assertFalse(axes.collections)
+        self.assertFalse(axes.texts)
+        self.assertEqual([line.get_label() for line in axes.lines],
+                         ['Max', '75th Prctl', 'Median', 'Historical mean', '25th Prctl',
+                          'Min', 'Realized (latest)'])
 
     def test_loader_uses_all_expiries_and_attaches_historical_benchmarks(self):
         fixture = OptionSelectionTests()
@@ -452,7 +521,7 @@ class WeeklyExpiryTests(unittest.TestCase):
         self.assertEqual(sorted(pd.to_datetime(profile['points']['Expiry'].unique())), profile['expiries'])
         weekly = profile['points'][profile['points']['Expiry type'].eq('Weekly')]
         self.assertTrue(weekly['IV source'].eq('Black-76 parity estimate').all())
-        cone = self.module._cone_option_points(profile)
+        cone = self.module._cone_option_points(profile, outliers_only=False)
         self.assertEqual(sorted(pd.to_datetime(cone['Expiry'].unique())), list(self.MONTHLY))
 
         document = Mock()

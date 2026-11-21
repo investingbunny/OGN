@@ -315,10 +315,15 @@ def select_report_expiries(points, monthly_count=OPTION_MONTHLY_EXPIRIES,
 
 
 def option_point_label(row):
-    """Compact strike and expiry label; strike is an identifier, not dot height."""
+    """Strike/expiry label; outliers also show option Close on the row's quote date."""
     strike = format(float(row['Strike Price']), 'g')
     expiry = pd.Timestamp(row['Expiry'])
-    return f'({strike}, {expiry.day} {expiry:%b})'
+    label = f'({strike}, {expiry.day} {expiry:%b})'
+    if row.get('Is outlier', False):
+        close = pd.to_numeric(row.get('Close', np.nan), errors='coerce')
+        price = f'{close:.2f}' if np.isfinite(close) and close > 0 else 'N/A'
+        label += f'\nClose: {price}'
+    return label
 
 
 def attach_realized_benchmarks(points, price_data, estimator_function):
@@ -545,6 +550,7 @@ def plot_option_history(overlay, ticker, pdf_pages=None):
         figure.text(0.05, 0.04,
                     f"Outlines: |smile residual MAD score| >= {OPTION_MAD_THRESHOLD:g}; "
                     f"up to {overlay['outlier_count']} extra contracts per side/date. "
+                    'Outlier labels add quote-date option Close (N/A if missing). '
                     'An IV-minus-realized gap is not itself an outlier, mispricing or a trade signal.',
                     fontsize=11, color='#555555')
         if pdf_pages is not None:

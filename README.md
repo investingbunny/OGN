@@ -208,7 +208,7 @@ Flat bars make GarmanKlass/Parkinson/RogersSatchell zero; warnings suggest Raw/H
 
 | Panel | Content |
 |---|---|
-| `cone` | Min/25th/mean/median/75th/max by window; latest realized value and eligible option IV |
+| `cone` | Min/25th/mean/median/75th/max by window; latest realized value and monthly Smile MAD outlier IV |
 | `box` | Per-window distributions |
 | `rolling` | History with quantile bands |
 | `histogram` | Distribution, normal fit, latest value |
@@ -224,8 +224,14 @@ Tune `VOLATILITY_WINDOWS = [3, 5, 10, 20, 30, 60, 90]`, `VOLATILITY_WINDOW = 30`
 First symbol only; requires stored derivatives and enabled `volatility` + `option_overlay`.
 Select five highest-volume calls/puts per expiry/date, plus qualifying smile outliers.
 Green/red dots show annualized CE/PE IV with strike/expiry labels; black outlines mark outliers.
-The cone uses latest-underlying-date monthly quotes at remaining weekday tenors, never stale quotes.
-Matching realized windows are added when history permits.
+Outlier labels on both the cone and expiry charts also show the option's `Close` on that quote's
+date, to two decimals (`N/A` for missing/invalid Close), not the underlying price or solver premium.
+The cone shows only Smile MAD outliers from latest-underlying-date monthly quotes at remaining
+weekday tenors, never stale quotes. With no outliers, the historical cone remains without option dots.
+To restore the other nearby/top-volume strikes, uncomment `# plotted = latest` in
+`_cone_option_points` in [Option-OGN.py](Option-OGN.py); the guide follows the same selection.
+Expiry pages retain all selected strikes. Matching realized windows still use all eligible
+monthly tenors when history permits, even when those strikes are hidden on the cone.
 
 Expiry pages: next three monthly expiries (last listed per month), plus next five expiries of
 any kind where weeklies exist; deduplicate overlap, use stored holiday-adjusted dates, exclude
