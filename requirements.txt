@@ -26,6 +26,8 @@ adjustText
 
 # ── Technical analysis (optional) ──────────────────────────────
 stocktrends              # Renko charts
+pandas-ta-classic>=0.8.32  # candlestick reversal page; native patterns, no TA-Lib needed
+swingtrend>=2.0.4        # swing-structure page (GPLv3)
 # TA-Lib                 # uncomment if you have TA-Lib C library installed
 #                        #   Windows: download .whl from https://github.com/cgohlke/talib-build
 #                        #   Linux/Mac: brew install ta-lib / apt install libta-lib-dev

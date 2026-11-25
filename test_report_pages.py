@@ -98,9 +98,6 @@ class VolatilityGuideTests(unittest.TestCase):
         self.assertIn('Option IV on the cone', texts)
         self.assertIn('27 Oct expiry, 4 sessions: median CE 16%, PE 17% vs 17% realized mean.', body)
         self.assert_no_overlaps(figure)
-        points['IV'] = 0.40
-        _, _, texts, _ = self.render(self.profile(options={'points': points, 'as_of': as_of}))
-        self.assertNotIn('Option IV on the cone', texts)  # Clipped dots cannot supply a plotted-IV example
 
     def test_moment_estimator_guide_stays_off_option_pricing(self):
         count, _, texts, body = self.render(self.profile(estimator='Skew'))

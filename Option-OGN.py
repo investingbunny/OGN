@@ -10,9 +10,11 @@ multi-panel technical analysis charts including:
   - Futures fair-value vs settle-price overlay
   - Renko charts
   - Support / resistance regression trendlines (scipy pivots + numpy polyfit)
+  - Swing-trading pages: reversal candles (pandas-ta-classic), swing structure (swingtrend),
+    confirmed pivots and ATR-normalized formations (scipy)
 
-Report pages: technical -> max pain & PCR -> trendlines -> volatility with IV trails
--> OI & spot battlefield -> volatility guide -> option IV
+Report pages: technical -> candlesticks -> swing structure -> pivots -> formations
+-> max pain & PCR -> trendlines -> volatility -> volatility guide -> option IV
 (next 3 monthly expiries, plus the next 5 expiries when weekly contracts are listed)
 -> comparison, then separate Japan, US Schiller and India Schiller appendices once
 per PDF. Edit REPORT_SECTIONS to drop any of them.
@@ -69,8 +71,8 @@ import numpy as np
 import seaborn as sns
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import adfuller, coint, grangercausalitytests
-from scipy.stats import norm
-from scipy.signal import find_peaks
+from scipy.stats import norm, linregress
+from scipy.signal import argrelextrema, find_peaks
 import japan_macro
 import nifty_macro
 import schiller_macro
@@ -89,6 +91,22 @@ try:
     HAS_TALIB = True
 except ImportError:
     HAS_TALIB = False
+
+# Optional: candlestick patterns, native implementations (pip install pandas-ta-classic)
+try:
+    import pandas_ta_classic
+    HAS_PANDAS_TA = True
+except ImportError:
+    pandas_ta_classic = None
+    HAS_PANDAS_TA = False
+
+# Optional: Dow-style swing structure (pip install swingtrend; GPLv3)
+try:
+    from swingtrend import Swing
+    HAS_SWINGTREND = True
+except ImportError:
+    Swing = None
+    HAS_SWINGTREND = False
 
 # Dynamic Time Warping. The compiled C extension is optional, so probe it once
 # here rather than per call and fall back to the pure-Python implementation.
@@ -171,10 +189,13 @@ CHARTS_DIR = Path(r"C:\OGN-OneDrive\OneDrive\Github projects\OGN") / "charts"
 # Comment out any line to drop that section from the generated report.
 REPORT_SECTIONS = [
     'technical',    # multi-panel indicator chart for the first symbol
+    'candlesticks',     # recent reversal candles (pandas-ta-classic) and their follow-through
+    'swing_structure',  # swingtrend trend, breaks of structure and change-of-character level
+    'pivots',           # SciPy-confirmed pivot highs / lows: nearest support and resistance
+    'formations',       # ATR-normalized head & shoulders, double tops / bottoms and triangles
     'max_pain',     # max pain and put-call ratio of the range's latest options, when stored
     'trendlines',   # candlestick page with support / resistance regression lines
     'volatility',   # volatility cone / rolling / histogram page
-    'option_battlefield',  # matched ATM +/-5 OI shifts, spot trajectory and nearest max pain
     'volatility_guide',  # one page explaining each volatility graph with this report's numbers
     'option_overlay',
     'comparison',   # statistical comparison, only when a second symbol is given
@@ -189,6 +210,26 @@ TREND_DISTANCE = 12           # Minimum bars between two pivots of the same kind
 TREND_PROMINENCE_PCT = 0.02   # Pivot must clear 2% of the window's high-low range
 TREND_RESISTANCE_COLOUR = '#ef5350'
 TREND_SUPPORT_COLOUR = '#26a69a'
+
+# ── Swing-trading pages (after the technical page) ────────────────────────
+SWING_WINDOW_MONTHS = 6       # Calendar months shown, unless a single-symbol window overrides it
+CANDLE_PATTERNS = {           # pandas-ta-classic pattern name -> label
+    'engulfing': 'Engulfing', 'hammer': 'Hammer', 'morningstar': 'Morning star',
+    'eveningstar': 'Evening star', 'shootingstar': 'Shooting star', 'piercing': 'Piercing line',
+}
+CANDLE_SIGNAL_ROWS = 10       # Latest signal days numbered on the chart and listed
+SWING_RETRACE_PCT = 5.0       # Pullback (%) before swingtrend moves its change-of-character level
+SWING_EVENT_ROWS = 6          # Latest breaks of structure and reversals listed
+PIVOT_ORDER = 5               # A pivot is the extreme of this many sessions on each side
+PIVOT_ROWS = 5                # Latest confirmed pivot highs and lows listed
+FORMATION_ATR_PERIOD = 14     # Formation tolerances below are multiples of this ATR
+FORMATION_ATR_FALLBACK = 0.015  # Fraction of the close used when the ATR is unavailable
+FORMATION_SHOULDER_ATR = 1.0  # Head and shoulders: shoulders within this many ATRs of each other
+FORMATION_HEAD_ATR = 1.0      # ... and the head at least this many ATRs beyond both
+FORMATION_TWIN_ATR = 0.75     # Double top / bottom: the twins within this many ATRs
+FORMATION_DEPTH_ATR = 1.5     # ... with a pullback of at least this many ATRs between them
+FORMATION_FLAT_ATR = 0.03     # A triangle side moving less than this many ATRs per session is flat
+FORMATION_FIT_ATR = 1.0       # ... and every triangle pivot lies within this many ATRs of its side
 
 # ── Technical page ────────────────────────────────────────────────────────
 # Whole calendar years shown by the indicator panels; Renko keeps its last 100 bricks.
@@ -233,7 +274,6 @@ RANGE_ESTIMATORS = {'GarmanKlass', 'Parkinson', 'RogersSatchell'}
 VOLATILITY_WINDOWS = [3, 5, 10, 20, 30, 60, 90]  # Cone x-axis
 VOLATILITY_WINDOW = 30                            # Rolling / histogram window
 VOLATILITY_QUANTILES = [0.25, 0.75]
-OPTION_OI_THRESHOLD = 0.0  # Absolute net Open Int shift required for IV/OI confluence
 
 
 # ---------------------------------------------------------------------------
@@ -1098,12 +1138,12 @@ def analyze_stock(data, ticker):
 # Main chart builder
 # ---------------------------------------------------------------------------
 
-def technical_window_bars(dates, years=TECHNICAL_WINDOW_YEARS):
-    """Count the bars dated within `years` calendar years of the latest bar."""
+def technical_window_bars(dates, years=TECHNICAL_WINDOW_YEARS, months=0):
+    """Count the bars dated within `years` calendar years and `months` months of the latest bar."""
     dates = pd.to_datetime(pd.Series(dates)).dropna()
     if dates.empty:
         return 0
-    start = dates.max() - pd.DateOffset(years=years)
+    start = dates.max() - pd.DateOffset(years=years, months=months)
     return int((dates >= start).sum())
 
 
@@ -1618,6 +1658,749 @@ def trendline_analysis(price_data, ticker, bars=TREND_BARS,
 
 
 # ---------------------------------------------------------------------------
+# Swing-trading pages: candlesticks, swing structure, confirmed pivots, formations
+# ---------------------------------------------------------------------------
+
+SWING_BULL_COLOUR, SWING_BEAR_COLOUR = TREND_SUPPORT_COLOUR, TREND_RESISTANCE_COLOUR
+SWING_NEUTRAL_COLOUR = '#c88a04'
+SWING_CHART_AXES = (0.05, 0.43, 0.90, 0.46)   # Price chart: left, bottom, width, height
+SWING_SUMMARY_LEFT, SWING_SUMMARY_TOP = 0.59, 0.36
+SWING_SUMMARY_WRAP = 76                        # Characters per line of the reading notes
+SWING_CELL = '#f7f7f7'
+SWING_CELL_COLOURS = {'Bullish': AUDIT_COLOURS['Buy'], 'Bearish': AUDIT_COLOURS['Sell'],
+                      'Mixed': AUDIT_COLOURS['Hold'], 'Consolidation': AUDIT_COLOURS['Hold'],
+                      'Confirmed': AUDIT_COLOURS['Buy'], 'Failed': AUDIT_COLOURS['Sell'],
+                      'Pending': AUDIT_COLOURS['Hold']}
+
+
+def _ohlc_bars(price_data):
+    """Date-sorted numeric Open/High/Low/Close bars; a bar missing any price is dropped."""
+    missing = {'Open', 'High', 'Low', 'Close'} - set(price_data.columns)
+    if missing:
+        raise ValueError(f"missing OHLC columns: {', '.join(sorted(missing))}")
+    frame = price_data[['Open', 'High', 'Low', 'Close']].apply(pd.to_numeric, errors='coerce')
+    frame.index = pd.DatetimeIndex(pd.to_datetime(frame.index, errors='coerce'))
+    frame = frame[frame.index.notna()].replace([np.inf, -np.inf], np.nan).dropna().sort_index()
+    frame = frame[~frame.index.duplicated(keep='last')]
+    if frame.empty:
+        raise ValueError('no complete OHLC bars')
+    return frame
+
+
+def _level_gap(level, close):
+    """A level's distance from the close, '+2.1%', or 'n/a'."""
+    if level is None or not np.isfinite(level) or not close > 0:
+        return 'n/a'
+    return f'{(level / close - 1) * 100:+.1f}%'
+
+
+def _swing_page(ticker, title, shown, subtitle):
+    """A new page: title with the shown range, a subtitle line and the price-chart axes."""
+    figure = plt.figure(figsize=(30, 17), facecolor='white')
+    figure.suptitle(f"{ticker}   {title}   |   {shown.index[0]:%d %b %Y} \u2192 {shown.index[-1]:%d %b %Y}"
+                    f"   |   {len(shown):,} sessions", fontsize=30, fontweight='bold', y=0.975)
+    figure.text(0.05, 0.928, subtitle, fontsize=15, color='#454c50')
+    return figure, figure.add_axes(SWING_CHART_AXES)
+
+
+def _style_price_axis(ax, shown):
+    """Date ticks on consecutive bar positions, a price grid and an open frame."""
+    _label_trading_days(ax, shown.index)
+    ax.yaxis.set_major_formatter(FuncFormatter(
+        lambda value, _: f'{value:,.2f}' if abs(value) < 100 else f'{value:,.0f}'))
+    ax.tick_params(labelsize=14)
+    ax.grid(axis='y', color='#d5dadd', alpha=0.6)
+    ax.set_axisbelow(True)
+    ax.spines[['top', 'right']].set_visible(False)
+    ax.set_ylabel('Price', fontsize=16)
+
+
+def _draw_price_bars(ax, shown):
+    """Candles at consecutive positions, so non-trading days leave no gap; flat bars get a close line."""
+    x = np.arange(len(shown))
+    if _has_intraday_range(shown):
+        opens, highs, lows, closes = (shown[column].to_numpy(dtype=float)
+                                      for column in ('Open', 'High', 'Low', 'Close'))
+        colours = np.where(closes >= opens, SWING_BULL_COLOUR, SWING_BEAR_COLOUR)
+        ax.vlines(x, lows, highs, colors=colours, linewidth=1.2, zorder=2)
+        ax.bar(x, np.abs(closes - opens), bottom=np.minimum(opens, closes), width=0.62,
+               color=colours, edgecolor=colours, linewidth=0.8, zorder=3)
+    else:
+        ax.plot(x, shown['Close'].to_numpy(dtype=float), color='#24282b', linewidth=2, zorder=3)
+    _style_price_axis(ax, shown)
+    return x
+
+
+def _price_pad(shown, fraction=0.025):
+    """Marker offset from a bar: a fraction of the shown high-low range."""
+    return float(shown['High'].max() - shown['Low'].min()) * fraction or 1.0
+
+
+def _price_text(value):
+    """Whole prices from 1,000 up, two decimals below, so table cells stay short."""
+    return f'{value:,.0f}' if abs(value) >= 1000 else f'{value:,.2f}'
+
+
+def _swing_table(figure, rect, title, columns, rows, widths, colours=None, fontsize=13):
+    """Bordered table with a blue header row in its own axes; no rows reads None."""
+    axes = figure.add_axes(rect)
+    axes.axis('off')
+    if not rows:
+        rows, colours = [['None'] + [''] * (len(columns) - 1)], None
+    table = axes.table(cellText=rows, colLabels=columns, colWidths=widths, cellColours=colours,
+                       cellLoc='left', colLoc='left', loc='upper left')
+    table.auto_set_font_size(False)
+    table.set_fontsize(fontsize)
+    table.scale(1.0, 1.9)
+    for (row, _), cell in table.get_celld().items():
+        cell.set_edgecolor('#cccccc')
+        if row == 0:
+            cell.set_facecolor('#4472c4')
+            cell.set_text_props(color='white', fontweight='bold')
+    axes.set_title(title, fontsize=18, fontweight='bold', loc='left', pad=10)
+    return axes
+
+
+def _swing_summary(figure, items):
+    """'How to read this page': (label, text) notes stacked beside the tables."""
+    left, y = SWING_SUMMARY_LEFT, SWING_SUMMARY_TOP
+    figure.text(left, y, 'How to read this page', fontsize=19, fontweight='bold', color='#1f3864', va='top')
+    y -= 0.034
+    for label, text in items:
+        figure.text(left, y, label, fontsize=14, fontweight='bold', color='#555555', va='top')
+        body = figure.text(left + 0.068, y, textwrap.fill(text, SWING_SUMMARY_WRAP), fontsize=14,
+                           va='top', linespacing=1.3)
+        y -= body.get_window_extent().height / figure.bbox.height + 0.013
+
+
+def _save_swing_page(figure, pdf_pages):
+    if pdf_pages is not None:
+        try:
+            pdf_pages.savefig(figure)
+        finally:
+            plt.close(figure)
+    else:
+        plt.show()
+
+
+def _follow_through(shown, position, direction):
+    """Confirmed or Failed, dated, on the first later close beyond the signal candle; else Pending."""
+    if direction == 'Mixed':
+        return 'Mixed: no direction'
+    later = shown.iloc[position + 1:]
+    above = later.index[later['Close'] > shown['High'].iloc[position]]
+    below = later.index[later['Close'] < shown['Low'].iloc[position]]
+    if above.empty and below.empty:
+        return 'Pending'
+    broke_up = not above.empty and (below.empty or above[0] < below[0])
+    worked = broke_up == (direction == 'Bullish')
+    return f"{'Confirmed' if worked else 'Failed'} {(above[0] if broke_up else below[0]):%d %b}"
+
+
+def compute_candlestick_signals(price_data, bars, patterns=CANDLE_PATTERNS):
+    """pandas-ta-classic reversal candles on all history to the range end, kept for the last `bars`.
+
+    Positive pattern values are bullish and negative bearish. Follow-through is the first later
+    close in the range beyond the signal candle: above its high confirms a bullish candle (and
+    fails a bearish one), below its low does the reverse.
+    """
+    if not HAS_PANDAS_TA:
+        raise ValueError('pandas-ta-classic is not installed (pip install pandas-ta-classic)')
+    history = _ohlc_bars(price_data)
+    if not _has_intraday_range(history):
+        raise ValueError('candle patterns need real open/high/low/close bars, not flat single-value bars')
+    found = pandas_ta_classic.cdl_pattern(history['Open'], history['High'], history['Low'],
+                                          history['Close'], name=list(patterns))
+    shown = history.tail(bars)
+    found = (pd.DataFrame(index=history.index) if found is None else found).reindex(shown.index).fillna(0.0)
+    signals = []
+    for position, (date, row) in enumerate(found.iterrows()):
+        values = {label: row.get(f'CDL_{name.upper()}', 0.0) for name, label in patterns.items()}
+        bullish = [label for label, value in values.items() if value > 0]
+        bearish = [label for label, value in values.items() if value < 0]
+        if not bullish and not bearish:
+            continue
+        direction = 'Mixed' if bullish and bearish else 'Bullish' if bullish else 'Bearish'
+        signals.append({'Date': date, 'Position': position, 'Close': shown['Close'].iloc[position],
+                        'High': shown['High'].iloc[position], 'Low': shown['Low'].iloc[position],
+                        'Direction': direction, 'Bullish': bullish, 'Bearish': bearish,
+                        'Follow-through': _follow_through(shown, position, direction)})
+    columns = ['Date', 'Position', 'Close', 'High', 'Low', 'Direction', 'Bullish', 'Bearish', 'Follow-through']
+    return {'shown': shown, 'signals': pd.DataFrame(signals, columns=columns)}
+
+
+def _candle_names(signal):
+    """'Hammer, Engulfing', or each name tagged bull / bear on a mixed day."""
+    if signal['Direction'] == 'Mixed':
+        return ', '.join([f'{name} (bull)' for name in signal['Bullish']]
+                         + [f'{name} (bear)' for name in signal['Bearish']])
+    return ', '.join(signal['Bullish'] or signal['Bearish'])
+
+
+def plot_candlesticks(profile, ticker, pdf_pages=None):
+    """Candles with reversal-pattern markers, the latest signal days and how to read them."""
+    shown, signals = profile['shown'], profile['signals']
+    figure, chart = _swing_page(
+        ticker, 'Candlestick Reversal Setups', shown,
+        'pandas-ta-classic native patterns: ' + ', '.join(label.lower() for label in CANDLE_PATTERNS.values())
+        + '   |   found on all history up to the range end')
+    _draw_price_bars(chart, shown)
+    pad = _price_pad(shown, 0.03)
+    for kind, marker, colour, below in (('Bullish', '^', SWING_BULL_COLOUR, True),
+                                        ('Bearish', 'v', SWING_BEAR_COLOUR, False)):
+        rows = signals[signals['Direction'].isin([kind, 'Mixed'])]
+        if len(rows):
+            chart.scatter(rows['Position'], rows['Low'] - pad if below else rows['High'] + pad, marker=marker,
+                          s=190, color=colour, edgecolors='#24282b', linewidths=0.7, zorder=5,
+                          label=f'{kind} pattern')
+    latest = signals.iloc[::-1].head(CANDLE_SIGNAL_ROWS).reset_index(drop=True)
+    for number, signal in latest.iterrows():
+        below = signal['Direction'] != 'Bearish'
+        chart.text(signal['Position'], signal['Low'] - 2.1 * pad if below else signal['High'] + 2.1 * pad,
+                   str(number + 1), ha='center', va='top' if below else 'bottom', fontsize=13,
+                   fontweight='bold', color='#24282b', zorder=6)
+    chart.set_ylim(shown['Low'].min() - 3.8 * pad, shown['High'].max() + 3.8 * pad)
+    if len(signals):
+        chart.legend(fontsize=13, loc='best', framealpha=0.85)
+
+    rows, colours = [], []
+    for number, signal in latest.iterrows():
+        outcome = signal['Follow-through'].split()[0]
+        rows.append([str(number + 1), f"{signal['Date']:%d %b %Y}", f"{signal['Close']:,.2f}",
+                     signal['Direction'], _candle_names(signal), signal['Follow-through']])
+        colours.append([SWING_CELL] * 3 + [SWING_CELL_COLOURS[signal['Direction']], SWING_CELL,
+                                           SWING_CELL_COLOURS.get(outcome, SWING_CELL)])
+    _swing_table(figure, (0.05, 0.04, 0.50, 0.32), f'Latest {CANDLE_SIGNAL_ROWS} signal days (#1 latest)',
+                 ['#', 'Date', 'Close', 'Signal', 'Patterns', 'Follow-through'], rows,
+                 [0.05, 0.15, 0.13, 0.12, 0.34, 0.21], colours)
+
+    counts = signals['Direction'].value_counts()
+    outcomes = signals['Follow-through'].str.split().str[0].value_counts()
+    if latest.empty:
+        now = f'No reversal pattern in these {len(shown)} sessions.'
+    else:
+        last = latest.iloc[0]
+        now = (f"{counts.get('Bullish', 0)} bullish and {counts.get('Bearish', 0)} bearish signal days"
+               + (f" ({counts['Mixed']} mixed)" if counts.get('Mixed', 0) else '')
+               + f"; follow-through {outcomes.get('Confirmed', 0)} confirmed, {outcomes.get('Failed', 0)} "
+               f"failed, {outcomes.get('Pending', 0)} pending. Latest (#1): {_candle_names(last)} "
+               f"({last['Direction'].lower()}) on {last['Date']:%d %b} at {last['Close']:,.2f}; "
+               f"follow-through: {last['Follow-through']}.")
+    _swing_summary(figure, [
+        ('What you see', 'Daily candles. A green \u25b2 below a candle marks a bullish reversal pattern '
+                         '(hammer, morning star, piercing line, bullish engulfing); a red \u25bc above marks '
+                         'a bearish one (shooting star, evening star, bearish engulfing). Numbers match '
+                         'the table.'),
+        ('How to read', 'A pattern is a prompt, not a trade: it matters most at support or resistance or '
+                        'after an extended move. It needs follow-through: a later close above the signal '
+                        "candle's high confirms a bullish pattern, below its low a bearish one; the "
+                        'opposite close means it failed.'),
+        ('Now', now)])
+    _save_swing_page(figure, pdf_pages)
+
+
+def candlestick_analysis(price_data, ticker, bars, pdf_pages=None):
+    """Compute and render the candlestick reversal page."""
+    profile = compute_candlestick_signals(price_data, bars)
+    counts = profile['signals']['Direction'].value_counts()
+    print(f"  [candlesticks] {len(profile['shown'])} sessions: {len(profile['signals'])} signal days "
+          f"({counts.get('Bullish', 0)} bullish, {counts.get('Bearish', 0)} bearish, "
+          f"{counts.get('Mixed', 0)} mixed)")
+    plot_candlesticks(profile, ticker, pdf_pages=pdf_pages)
+    return profile
+
+
+def compute_swing_structure(price_data, bars, retrace_pct=SWING_RETRACE_PCT):
+    """swingtrend's trend, breaks of structure and change-of-character level, bar by bar.
+
+    Bars reach Swing.identify() one at a time, over all history up to the range end so the state
+    is warm when the shown window starts; Swing.run() would read the columns by position, which
+    stored frames do not guarantee. In an up-trend the breakout level is the swing-point high (SPH)
+    and the reversal level the change of character (CoCh) below; a down-trend mirrors them.
+    """
+    if not HAS_SWINGTREND:
+        raise ValueError('swingtrend is not installed (pip install swingtrend)')
+    history = _ohlc_bars(price_data)
+    if not (history[['High', 'Low', 'Close']] > 0).all().all():
+        raise ValueError('swing retracements are percentages, so every price must be positive')
+    events = []
+
+    def record(kind):
+        def callback(swing, date, close, **level):
+            events.append({'Date': pd.Timestamp(date), 'Event': kind, 'Trend': swing.trend,
+                           'Close': float(close), 'Level': float(next(iter(level.values())))})
+        return callback
+
+    swing = Swing(retrace_threshold_pct=retrace_pct, on_breakout=record('BOS'),
+                  on_reversal=record('Reversal'))
+    states = []
+    for date, high, low, close in zip(history.index, history['High'], history['Low'], history['Close']):
+        swing.identify(date, float(high), float(low), float(close))
+        trigger = swing.sph if swing.trend == 'UP' else swing.spl if swing.trend == 'DOWN' else None
+        states.append((swing.trend or '', np.nan if swing.coc is None else swing.coc,
+                       np.nan if trigger is None else trigger))
+    state = pd.DataFrame(states, index=history.index, columns=['Trend', 'CoCh', 'Breakout'])
+    runs = state['Trend'].ne(state['Trend'].shift()).to_numpy()
+    up = swing.trend == 'UP'
+    current = {
+        'trend': swing.trend, 'since': state.index[runs][-1], 'legs': swing.leg_count,
+        'coc': swing.coc, 'coc_date': swing.coc_dt,
+        'breakout': swing.sph if up else swing.spl, 'breakout_date': swing.sph_dt if up else swing.spl_dt,
+        'bars_since': swing.bars_since, 'sideways': swing.is_sideways,
+        'sideways_bars': swing.sideways_threshold, 'close': float(history['Close'].iloc[-1]),
+    }
+    return {'shown': history.tail(bars), 'state': state.tail(bars), 'current': current,
+            'events': pd.DataFrame(events, columns=['Date', 'Event', 'Trend', 'Close', 'Level']),
+            'retrace_pct': retrace_pct}
+
+
+def _swing_level(value, when, close):
+    """'24,210.00 on 21 Oct 2026 (-3.4%)', or 'none yet'."""
+    if value is None:
+        return 'none yet: the leg is still extending'
+    return f'{value:,.2f} on {when:%d %b %Y} ({_level_gap(value, close)})'
+
+
+def plot_swing_structure(profile, ticker, pdf_pages=None):
+    """Candles shaded by trend with the CoCh and breakout levels, events, current state and notes."""
+    shown, state, current = profile['shown'], profile['state'], profile['current']
+    figure, chart = _swing_page(
+        ticker, 'Swing Structure', shown,
+        f"swingtrend Dow-style swings   |   CoCh moves only after a pullback of at least "
+        f"{profile['retrace_pct']:g}%   |   state built on all history up to the range end")
+    x = _draw_price_bars(chart, shown)
+    trend = state['Trend'].to_numpy()
+    for kind, colour, reversal, breakout in (('UP', SWING_BULL_COLOUR, SWING_BEAR_COLOUR, SWING_BULL_COLOUR),
+                                             ('DOWN', SWING_BEAR_COLOUR, SWING_BULL_COLOUR, SWING_BEAR_COLOUR)):
+        inside = trend == kind
+        edges = np.flatnonzero(np.diff(np.concatenate([[0], inside.astype(int), [0]])))
+        for start, stop in zip(edges[::2], edges[1::2]):
+            chart.axvspan(start - 0.5, stop - 0.5, color=colour, alpha=0.08, linewidth=0, zorder=0)
+        chart.plot(x, np.where(inside, state['CoCh'], np.nan), drawstyle='steps-mid', color=reversal,
+                   linestyle='--', linewidth=2.4, zorder=4)
+        chart.plot(x, np.where(inside, state['Breakout'], np.nan), drawstyle='steps-mid', color=breakout,
+                   linestyle=':', linewidth=2.6, zorder=4)
+    events = profile['events']
+    events = events[(events['Date'] >= shown.index[0]) & (events['Date'] <= shown.index[-1])]
+    for position, (_, event) in zip(shown.index.get_indexer(events['Date']), events.iterrows()):
+        colour = SWING_BULL_COLOUR if event['Trend'] == 'UP' else SWING_BEAR_COLOUR
+        reversal = event['Event'] == 'Reversal'
+        chart.scatter([position], [event['Close']], marker='*' if reversal else '^' if event['Trend'] == 'UP' else 'v',
+                      s=560 if reversal else 170, color=colour, edgecolors='#24282b', linewidths=0.8, zorder=6)
+    chart.legend(handles=[
+        matplotlib.patches.Patch(color=SWING_BULL_COLOUR, alpha=0.25, label='Up-trend'),
+        matplotlib.patches.Patch(color=SWING_BEAR_COLOUR, alpha=0.25, label='Down-trend'),
+        plt.Line2D([], [], color='#555b60', linestyle='--', linewidth=2.4, label='CoCh: a close beyond it reverses'),
+        plt.Line2D([], [], color='#555b60', linestyle=':', linewidth=2.6, label='Swing point: a close beyond it is a BOS'),
+        plt.Line2D([], [], color='#555b60', marker='^', linestyle='none', markersize=12, label='Break of structure (BOS)'),
+        plt.Line2D([], [], color='#555b60', marker='*', linestyle='none', markersize=18, label='Reversal'),
+    ], fontsize=13, loc='best', framealpha=0.85)
+    # Fit candles and today's levels; older far-off levels are clipped at the frame.
+    levels = [level for level in (current['coc'], current['breakout']) if level is not None]
+    low, high = min([shown['Low'].min(), *levels]), max([shown['High'].max(), *levels])
+    chart.set_ylim(low - (high - low) * 0.06, high + (high - low) * 0.06)
+
+    direction, close = current['trend'], current['close']
+    legs = f"{current['legs']} break{'' if current['legs'] == 1 else 's'} of structure"
+    pace = ('>', 'sideways') if current['sideways'] else ('\u2264', 'trending')
+    rows = [
+        ['Trend', f"{direction} since {current['since']:%d %b %Y}" if direction
+         else "Not set: no close beyond the first bar's range"],
+        ['Legs in this trend', legs],
+        ['Breakout level (' + ('SPL' if direction == 'DOWN' else 'SPH') + ')',
+         _swing_level(current['breakout'], current['breakout_date'], close)],
+        ['Reversal level (CoCh)', _swing_level(current['coc'], current['coc_date'], close)],
+        ['Sessions since swing', f"{current['bars_since']} ({pace[0]} {current['sideways_bars']}: {pace[1]})"],
+        ['Close', f'{close:,.2f}'],
+    ]
+    _swing_table(figure, (0.05, 0.04, 0.28, 0.32), 'Current structure', ['Measure', 'Value'], rows, [0.33, 0.67])
+    recent = profile['events'].iloc[::-1].head(SWING_EVENT_ROWS)
+    _swing_table(
+        figure, (0.35, 0.04, 0.21, 0.32), 'Latest structure events', ['Date', 'Event', 'Close', 'Level'],
+        [[f"{event['Date']:%d %b %Y}",
+          f"Reversal \u2192 {event['Trend']}" if event['Event'] == 'Reversal'
+          else f"BOS {'up' if event['Trend'] == 'UP' else 'down'}",
+          f"{event['Close']:,.2f}", f"{event['Level']:,.2f}"] for _, event in recent.iterrows()],
+        [0.3, 0.3, 0.2, 0.2],
+        [[SWING_CELL, SWING_CELL_COLOURS['Bullish' if event['Trend'] == 'UP' else 'Bearish'], SWING_CELL, SWING_CELL]
+         for _, event in recent.iterrows()])
+
+    if direction:
+        breakout = (f"breakout {current['breakout']:,.2f} ({_level_gap(current['breakout'], close)})"
+                    if current['breakout'] is not None else 'no swing point to break yet (the leg is extending)')
+        now = (f"{direction} since {current['since']:%d %b %Y} with {legs}. "
+               f"Close {close:,.2f}: {breakout}; reversal (CoCh) {current['coc']:,.2f} "
+               f"({_level_gap(current['coc'], close)}). {current['bars_since']} sessions since the last swing "
+               f"point, so {'sideways' if current['sideways'] else 'still trending'}.")
+    else:
+        now = "No trend yet: no close beyond the first bar's range."
+    _swing_summary(figure, [
+        ('What you see', 'Candles shaded by the swingtrend state: green up-trend, red down-trend. Dashed: the '
+                         'change-of-character (CoCh) level; a close beyond it reverses the trend. Dotted: the '
+                         'latest swing point; a close beyond it is a break of structure (BOS), a new leg. '
+                         'Triangles mark breaks of structure, stars reversals.'),
+        ('How to read', 'An up-trend keeps making higher swing highs while pullbacks hold above CoCh; a '
+                        f"down-trend mirrors it. Pullbacks under {profile['retrace_pct']:g}% are noise and "
+                        f"leave CoCh unchanged. Sideways means no new swing point for {current['sideways_bars']} "
+                        'sessions; the trend label holds until a break.'),
+        ('Now', now)])
+    _save_swing_page(figure, pdf_pages)
+
+
+def swing_structure_analysis(price_data, ticker, bars, pdf_pages=None):
+    """Compute and render the swing-structure page."""
+    profile = compute_swing_structure(price_data, bars)
+    current = profile['current']
+    print(f"  [swing structure] {current['trend'] or 'no trend'} since {current['since']:%Y-%m-%d}, "
+          f"{current['legs']} legs, CoCh {'none' if current['coc'] is None else format(current['coc'], ',.2f')}, "
+          f"breakout {'none' if current['breakout'] is None else format(current['breakout'], ',.2f')}")
+    plot_swing_structure(profile, ticker, pdf_pages=pdf_pages)
+    return profile
+
+
+def confirmed_pivots(frame, order=PIVOT_ORDER):
+    """Positions of pivot highs and lows that `order` bars on each side have confirmed.
+
+    argrelextrema with >= / <= marks the highest High / lowest Low of its 2 x order + 1 bars.
+    Bars within `order` of either end are unconfirmed, equal extremes on one plateau count once
+    (the first), and a window without any range (flat bars) has no turning point.
+    """
+    def confirmed(values, comparator):
+        kept = []
+        for position in argrelextrema(values, comparator, order=order)[0]:
+            if position < order or position >= len(values) - order:
+                continue
+            if np.ptp(values[position - order:position + order + 1]) == 0:
+                continue
+            if kept and position - kept[-1] <= order:
+                continue
+            kept.append(int(position))
+        return np.asarray(kept, dtype=int)
+
+    return (confirmed(frame['High'].to_numpy(dtype=float), np.greater_equal),
+            confirmed(frame['Low'].to_numpy(dtype=float), np.less_equal))
+
+
+def _window_pivots(history, positions, column, offset):
+    """[(position in the shown window, price, date)] for the pivots inside it."""
+    return [(int(position) - offset, float(history[column].iloc[position]), history.index[position])
+            for position in positions if position >= offset]
+
+
+def _pivot_structure(highs, lows):
+    """Dow reading of the last two confirmed pivot highs and lows."""
+    if len(highs) < 2 or len(lows) < 2:
+        return 'too few confirmed pivots for a structure reading'
+
+    def compare(last, previous, word):
+        return f'higher {word}' if last > previous else f'lower {word}' if last < previous else f'equal {word}s'
+
+    high, low = compare(highs[-1][1], highs[-2][1], 'high'), compare(lows[-1][1], lows[-2][1], 'low')
+    reading = {('higher high', 'higher low'): 'up-trend structure',
+               ('lower high', 'lower low'): 'down-trend structure',
+               ('lower high', 'higher low'): 'contracting range',
+               ('higher high', 'lower low'): 'expanding range'}.get((high, low), 'transitional structure')
+    return f'{high} and {low}: {reading}'
+
+
+def compute_pivot_levels(price_data, bars, order=PIVOT_ORDER):
+    """Confirmed pivots on all history to the range end, listed and levelled for the last `bars`."""
+    history = _ohlc_bars(price_data)
+    if len(history) < 2 * order + 1:
+        raise ValueError(f'only {len(history)} bars; a pivot needs {order} bars on each side')
+    high_idx, low_idx = confirmed_pivots(history, order)
+    shown = history.tail(bars)
+    offset = len(history) - len(shown)
+    highs = _window_pivots(history, high_idx, 'High', offset)
+    lows = _window_pivots(history, low_idx, 'Low', offset)
+    close = float(shown['Close'].iloc[-1])
+    return {'shown': shown, 'order': order, 'highs': highs, 'lows': lows, 'close': close,
+            'resistance': min((price for _, price, _ in highs if price > close), default=None),
+            'support': max((price for _, price, _ in lows if price < close), default=None),
+            'structure': _pivot_structure(highs, lows), 'unconfirmed': min(order, len(shown))}
+
+
+def _mark_pivots(chart, profile, pad, size=190, alpha=1.0, labels=True):
+    """Red down-triangles above pivot highs and green up-triangles below pivot lows."""
+    for pivots, marker, colour, sign, name in ((profile['highs'], 'v', SWING_BEAR_COLOUR, 1, 'Pivot high'),
+                                               (profile['lows'], '^', SWING_BULL_COLOUR, -1, 'Pivot low')):
+        if pivots:
+            positions, prices, _ = zip(*pivots)
+            chart.scatter(positions, np.asarray(prices) + sign * pad, marker=marker, s=size, color=colour,
+                          alpha=alpha, edgecolors='#24282b', linewidths=0.6, zorder=5,
+                          label=name if labels else '_nolegend_')
+
+
+def plot_pivots(profile, ticker, pdf_pages=None):
+    """Close with confirmed pivot markers above the pivot tables, levels and notes."""
+    shown, order, close = profile['shown'], profile['order'], profile['close']
+    figure, chart = _swing_page(
+        ticker, 'Confirmed Pivot Highs & Lows', shown,
+        f'SciPy argrelextrema, order {order}: the highest high / lowest low of {order} sessions on each side'
+        '   |   equal highs on a plateau count once   |   no look-ahead')
+    x = np.arange(len(shown))
+    chart.vlines(x, shown['Low'], shown['High'], colors='#b8bec3', linewidth=2.4, zorder=2)
+    chart.plot(x, shown['Close'], color='#24282b', linewidth=2, zorder=3, label='Close (grey: high-low range)')
+    _style_price_axis(chart, shown)
+    pad = _price_pad(shown)
+    _mark_pivots(chart, profile, pad)
+    for pivots, colour in ((profile['highs'], SWING_BEAR_COLOUR), (profile['lows'], SWING_BULL_COLOUR)):
+        for position, price, _ in pivots[-PIVOT_ROWS:]:
+            chart.hlines(price, position, len(shown) - 1, colors=colour, linestyles=':', linewidth=1.5,
+                         alpha=0.75, zorder=1)
+    edge = len(shown) - profile['unconfirmed'] - 0.5
+    for level, colour, va, name in ((profile['resistance'], SWING_BEAR_COLOUR, 'bottom', 'Nearest resistance'),
+                                    (profile['support'], SWING_BULL_COLOUR, 'top', 'Nearest support')):
+        if level is not None:
+            chart.axhline(level, color=colour, linestyle='--', linewidth=2.2, zorder=1)
+            chart.text(edge - 1, level, f'{name} {level:,.2f} ({_level_gap(level, close)})', ha='right', va=va,
+                       fontsize=13, fontweight='bold', color=colour, bbox=MAX_PAIN_LABEL_BOX, zorder=7)
+    chart.axvspan(edge, len(shown) - 0.5, color='#9aa0a6', alpha=0.18, linewidth=0, zorder=0)
+    chart.text(len(shown) - 0.5, 0.02, f"Unconfirmed\nlast {profile['unconfirmed']}", ha='right', va='bottom',
+               transform=chart.get_xaxis_transform(), fontsize=11, color='#555b60', zorder=7)
+    chart.set_ylim(shown['Low'].min() - 3 * pad, shown['High'].max() + 3 * pad)
+    chart.legend(fontsize=13, loc='best', framealpha=0.85)
+
+    for left, pivots, name in ((0.05, profile['highs'], 'High'), (0.315, profile['lows'], 'Low')):
+        recent = pivots[::-1][:PIVOT_ROWS]
+        _swing_table(figure, (left, 0.04, 0.245, 0.32),
+                     f"Latest pivot {name.lower()}s ({'resistance' if name == 'High' else 'support'})",
+                     ['Date', name, 'vs close'],
+                     [[f'{date:%d %b %Y}', f'{price:,.2f}', _level_gap(price, close)] for _, price, date in recent],
+                     [0.4, 0.33, 0.27])
+
+    levels = []
+    for level, name in ((profile['resistance'], 'resistance'), (profile['support'], 'support')):
+        levels.append(f'nearest {name} {level:,.2f} ({_level_gap(level, close)})' if level is not None
+                      else f'no confirmed pivot {name} in this window')
+    _swing_summary(figure, [
+        ('What you see', f"Close (black) with each session's high-low range (grey). A red \u25bc marks a confirmed "
+                         f"pivot high, the highest high of {order} sessions on each side; a green \u25b2 a pivot low. "
+                         f'Dotted lines carry the latest {PIVOT_ROWS} pivot levels forward; dashed ones are the '
+                         f'nearest resistance and support. The grey band is the last {order} sessions, not yet '
+                         'confirmable.'),
+        ('How to read', f'A pivot is confirmed {order} sessions after it prints and never repaints, so these '
+                        'levels carry no look-ahead but lag turns. Rising pivot highs and lows are up-trend '
+                        'structure, falling ones down-trend; a close through the nearest level breaks it.'),
+        ('Now', f"Close {close:,.2f}: {levels[0]}, {levels[1]}. Latest pivots: {profile['structure']}.")])
+    _save_swing_page(figure, pdf_pages)
+
+
+def pivot_analysis(price_data, ticker, bars, pdf_pages=None):
+    """Compute and render the confirmed-pivot page."""
+    profile = compute_pivot_levels(price_data, bars)
+    print(f"  [pivots] {len(profile['highs'])} highs / {len(profile['lows'])} lows confirmed in "
+          f"{len(profile['shown'])} sessions; {profile['structure']}")
+    plot_pivots(profile, ticker, pdf_pages=pdf_pages)
+    return profile
+
+
+def _formation_status(close, level, bearish):
+    """Confirmed once the close is through a neckline, else what is still needed."""
+    side = 'below' if bearish else 'above'
+    if (close < level) if bearish else (close > level):
+        return f'Confirmed: close {side} the neckline'
+    return f'Watching: needs a close {side} {_price_text(level)}'
+
+
+def compute_formations(price_data, bars, order=PIVOT_ORDER):
+    """ATR-normalized head and shoulders, double tops / bottoms and triangles on confirmed pivots.
+
+    Scans the confirmed pivots (confirmed_pivots) inside the shown window with the ATR at the range
+    end. Head and shoulders: the last three pivot highs, shoulders within FORMATION_SHOULDER_ATR of
+    each other and the head FORMATION_HEAD_ATR above both; the neckline is the lowest low from
+    shoulder to shoulder. Double top: the last two pivot highs within FORMATION_TWIN_ATR with a
+    pullback of FORMATION_DEPTH_ATR between, the neckline at its low. Inverse head and shoulders and
+    double bottoms mirror these on the lows. Triangles regress the last three pivot highs and lows;
+    a side moving less than FORMATION_FLAT_ATR per session is flat (drawn at the pivots' mean), and
+    every pivot must lie within FORMATION_FIT_ATR of its side, so three highs shaped like a head and
+    shoulders are not also read as a flat top. Status compares the latest close with each trigger.
+    """
+    history = _ohlc_bars(price_data)
+    if len(history) < 2 * order + 1:
+        raise ValueError(f'only {len(history)} bars; a pivot needs {order} bars on each side')
+    shown = history.tail(bars)
+    offset, last = len(history) - len(shown), len(history) - 1
+    high_idx, low_idx = (positions[positions >= offset] for positions in confirmed_pivots(history, order))
+    highs, lows = history['High'].to_numpy(dtype=float), history['Low'].to_numpy(dtype=float)
+    close = float(history['Close'].iloc[-1])
+    atr, basis = _number(ATR(history, FORMATION_ATR_PERIOD)['ATR'].iloc[-1]), f'ATR({FORMATION_ATR_PERIOD})'
+    if not atr > 0:
+        atr, basis = abs(close) * FORMATION_ATR_FALLBACK, f'{FORMATION_ATR_FALLBACK:.1%} of the close'
+    if not atr > 0:
+        raise ValueError('no price range to scale the formation tolerances')
+
+    def point(position, price, label):
+        return {'Position': int(position) - offset, 'Price': float(price),
+                'Date': history.index[position], 'Label': label}
+
+    def neckline_pattern(pattern, bias, points, level):
+        return {'Pattern': pattern, 'Bias': bias, 'Points': points, 'Neckline': level, 'Lines': [],
+                'Trigger': f'Neckline {_price_text(level)}',
+                'Status': _formation_status(close, level, bias == 'Bearish'),
+                'Detail': ' | '.join(f"{p['Label']} {p['Date']:%d %b} {_price_text(p['Price'])}" for p in points)}
+
+    formations = []
+    if len(high_idx) >= 3:
+        s1, head, s2 = high_idx[-3:]
+        if (abs(highs[s1] - highs[s2]) <= FORMATION_SHOULDER_ATR * atr
+                and highs[head] - max(highs[s1], highs[s2]) >= FORMATION_HEAD_ATR * atr):
+            formations.append(neckline_pattern(
+                'Head and Shoulders', 'Bearish',
+                [point(s1, highs[s1], 'LS'), point(head, highs[head], 'H'), point(s2, highs[s2], 'RS')],
+                float(lows[s1:s2 + 1].min())))
+    if len(low_idx) >= 3:
+        s1, head, s2 = low_idx[-3:]
+        if (abs(lows[s1] - lows[s2]) <= FORMATION_SHOULDER_ATR * atr
+                and min(lows[s1], lows[s2]) - lows[head] >= FORMATION_HEAD_ATR * atr):
+            formations.append(neckline_pattern(
+                'Inverse Head and Shoulders', 'Bullish',
+                [point(s1, lows[s1], 'LS'), point(head, lows[head], 'H'), point(s2, lows[s2], 'RS')],
+                float(highs[s1:s2 + 1].max())))
+    if len(high_idx) >= 2:
+        h1, h2 = high_idx[-2:]
+        valley = float(lows[h1:h2 + 1].min())
+        if (abs(highs[h1] - highs[h2]) <= FORMATION_TWIN_ATR * atr
+                and min(highs[h1], highs[h2]) - valley >= FORMATION_DEPTH_ATR * atr):
+            formations.append(neckline_pattern(
+                'Double Top', 'Bearish', [point(h1, highs[h1], 'P1'), point(h2, highs[h2], 'P2')], valley))
+    if len(low_idx) >= 2:
+        l1, l2 = low_idx[-2:]
+        peak = float(highs[l1:l2 + 1].max())
+        if (abs(lows[l1] - lows[l2]) <= FORMATION_TWIN_ATR * atr
+                and peak - max(lows[l1], lows[l2]) >= FORMATION_DEPTH_ATR * atr):
+            formations.append(neckline_pattern(
+                'Double Bottom', 'Bullish', [point(l1, lows[l1], 'T1'), point(l2, lows[l2], 'T2')], peak))
+    if len(high_idx) >= 3 and len(low_idx) >= 3:
+        upper_x, lower_x = high_idx[-3:], low_idx[-3:]
+        upper, lower = linregress(upper_x, highs[upper_x]), linregress(lower_x, lows[lower_x])
+        upper_slope, lower_slope = upper.slope / atr, lower.slope / atr
+        flat = FORMATION_FLAT_ATR
+        pattern, bias = (('Ascending Triangle', 'Bullish') if abs(upper_slope) <= flat and lower_slope > flat
+                         else ('Descending Triangle', 'Bearish') if upper_slope < -flat and abs(lower_slope) <= flat
+                         else ('Symmetrical Triangle', 'Consolidation') if upper_slope < -flat and lower_slope > flat
+                         else (None, None))
+        if pattern:
+            span = np.array([min(upper_x[0], lower_x[0]), last], dtype=float)
+
+            def side(fit, x, values, flat_side):
+                """The side at its pivots and over [start, last]: flat at their mean, else the regression."""
+                if flat_side:
+                    return np.full(len(x), values.mean()), np.full(2, values.mean())
+                return fit.intercept + fit.slope * x, fit.intercept + fit.slope * span
+
+            upper_fit, top = side(upper, upper_x, highs[upper_x], pattern == 'Ascending Triangle')
+            lower_fit, bottom = side(lower, lower_x, lows[lower_x], pattern == 'Descending Triangle')
+            if max(np.abs(highs[upper_x] - upper_fit).max(),
+                   np.abs(lows[lower_x] - lower_fit).max()) > FORMATION_FIT_ATR * atr:
+                pattern = None
+        if pattern:
+            if top[1] <= bottom[1]:
+                status = 'Apex passed: the sides have crossed'
+            elif close > top[1]:
+                status = f'Broken out: close above {_price_text(top[1])}'
+            elif close < bottom[1]:
+                status = f'Broken down: close below {_price_text(bottom[1])}'
+            else:
+                status = f'Inside: watch {_price_text(bottom[1])} / {_price_text(top[1])}'
+            formations.append({
+                'Pattern': pattern, 'Bias': bias, 'Status': status, 'Neckline': None,
+                'Points': [point(p, highs[p], '') for p in upper_x] + [point(p, lows[p], '') for p in lower_x],
+                'Lines': [((span[0] - offset, line[0]), (span[1] - offset, line[1])) for line in (top, bottom)],
+                'Trigger': f'{_price_text(bottom[1])} / {_price_text(top[1])}',
+                'Detail': f'Sides {upper_slope:+.3f} / {lower_slope:+.3f} ATR per session'})
+    return {'shown': shown, 'order': order, 'atr': atr, 'basis': basis, 'close': close, 'formations': formations,
+            'highs': _window_pivots(history, high_idx, 'High', offset),
+            'lows': _window_pivots(history, low_idx, 'Low', offset)}
+
+
+def _formation_colour(formation):
+    """Status cell colour: confirmed or broken in a direction, otherwise still forming."""
+    status = formation['Status']
+    if status.startswith('Confirmed'):
+        return SWING_CELL_COLOURS[formation['Bias']]
+    if status.startswith('Broken'):
+        return SWING_CELL_COLOURS['Bullish' if 'above' in status else 'Bearish']
+    return AUDIT_COLOURS['Hold'] if status.startswith(('Watching', 'Inside')) else '#e7e7e7'
+
+
+def plot_formations(profile, ticker, pdf_pages=None):
+    """Candles with each detected formation drawn on its pivots, the formation table and notes."""
+    shown, close = profile['shown'], profile['close']
+    figure, chart = _swing_page(
+        ticker, 'Geometric Formations', shown,
+        f"ATR-normalized scan of confirmed pivots (order {profile['order']})   |   {profile['basis']} = "
+        f"{profile['atr']:,.2f}   |   status compares the latest close with each trigger")
+    _draw_price_bars(chart, shown)
+    pad = _price_pad(shown)
+    _mark_pivots(chart, profile, pad, size=80, alpha=0.4, labels=False)
+    colours = {'Bullish': SWING_BULL_COLOUR, 'Bearish': SWING_BEAR_COLOUR, 'Consolidation': SWING_NEUTRAL_COLOUR}
+    for formation in profile['formations']:
+        colour, label = colours[formation['Bias']], f"{formation['Pattern']} ({formation['Trigger']})"
+        if formation['Neckline'] is None:
+            for number, ((x0, y0), (x1, y1)) in enumerate(formation['Lines']):
+                chart.plot([x0, x1], [y0, y1], color=colour, linewidth=2.6, linestyle='--', zorder=5,
+                           label=label if number == 0 else '_nolegend_')
+            continue
+        points = formation['Points']
+        on_highs = formation['Pattern'] in ('Head and Shoulders', 'Double Top')
+        chart.plot([p['Position'] for p in points], [p['Price'] for p in points], color=colour, linewidth=2.6,
+                   marker='o', markersize=11, zorder=6, label=label)
+        for p in points:
+            chart.annotate(p['Label'], (p['Position'], p['Price']), xytext=(0, 14 if on_highs else -14),
+                           textcoords='offset points', ha='center', va='bottom' if on_highs else 'top',
+                           fontsize=14, fontweight='bold', color=colour, zorder=7)
+        chart.hlines(formation['Neckline'], points[0]['Position'], len(shown) - 1, colors=colour,
+                     linestyles='--', linewidth=2.2, zorder=5)
+    chart.set_ylim(shown['Low'].min() - 4 * pad, shown['High'].max() + 4 * pad)
+    if profile['formations']:
+        chart.legend(fontsize=13, loc='best', framealpha=0.85)
+    else:
+        chart.text(0.5, 0.96, 'No active multi-swing pattern', transform=chart.transAxes, ha='center', va='top',
+                   fontsize=18, color='#555b60', bbox=MAX_PAIN_LABEL_BOX, zorder=7)
+
+    formations = profile['formations']
+    _swing_table(
+        figure, (0.05, 0.04, 0.50, 0.32), 'Detected formations', ['Pattern', 'Bias', 'Swing points', 'Trigger', 'Status'],
+        [[f['Pattern'], f['Bias'], f['Detail'], f['Trigger'], f['Status']] for f in formations]
+        or [['None', 'Neutral', 'No active multi-swing pattern', '', '']],
+        [0.18, 0.09, 0.38, 0.13, 0.22],
+        [[SWING_CELL, SWING_CELL_COLOURS[f['Bias']], SWING_CELL, SWING_CELL, _formation_colour(f)]
+         for f in formations] or None, fontsize=12)
+
+    if formations:
+        now = (f"{len(formations)} formation{'s' if len(formations) > 1 else ''}: "
+               + '; '.join(f"{f['Pattern']} ({f['Bias'].lower()}), {f['Status'][0].lower()}{f['Status'][1:]}"
+                           for f in formations) + f'. Close {close:,.2f}.')
+        if {f['Bias'] for f in formations} >= {'Bullish', 'Bearish'}:
+            now += ' Bullish and bearish formations overlap: let the first trigger to break decide.'
+    else:
+        now = f'No active multi-swing pattern: the latest pivots meet none of the ATR rules. Close {close:,.2f}.'
+    _swing_summary(figure, [
+        ('What you see', 'Candles with the confirmed pivots (faint markers) the scanner uses. Each detected '
+                         'formation is drawn on its pivots: head and shoulders (LS, H, RS) and double tops / '
+                         'bottoms with a dashed neckline, triangles with dashed sides through the last three '
+                         'pivot highs and lows.'),
+        ('How to read', f"Tolerances scale with volatility, {profile['basis']} {profile['atr']:,.2f}: shoulders "
+                        f'within {FORMATION_SHOULDER_ATR:g} ATR and the head {FORMATION_HEAD_ATR:g} ATR beyond '
+                        f'them; twins within {FORMATION_TWIN_ATR:g} ATR with a {FORMATION_DEPTH_ATR:g} ATR '
+                        f'pullback between; triangle sides moving under {FORMATION_FLAT_ATR:g} ATR a session '
+                        f'are flat, with every pivot within {FORMATION_FIT_ATR:g} ATR of its side. A formation '
+                        'is a hypothesis until a close breaks its trigger.'),
+        ('Now', now)])
+    _save_swing_page(figure, pdf_pages)
+
+
+def formation_analysis(price_data, ticker, bars, pdf_pages=None):
+    """Compute and render the geometric-formation page."""
+    profile = compute_formations(price_data, bars)
+    found = ', '.join(f"{f['Pattern']} ({f['Status'].split(':')[0].lower()})" for f in profile['formations'])
+    print(f"  [formations] {profile['basis']} {profile['atr']:,.2f}; {found or 'no active multi-swing pattern'}")
+    plot_formations(profile, ticker, pdf_pages=pdf_pages)
+    return profile
+
+
+# ---------------------------------------------------------------------------
 # Main analysis orchestrator
 # ---------------------------------------------------------------------------
 
@@ -1776,6 +2559,21 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
             display_bars = (technical_window_bars(Indicatordf['Date'])
                             if analysis_window is None else len(price_data))
             plot_chart(Indicatordf, display_bars, Scrip, 0, pdf_pages=pdf_pages)
+
+        # ── Swing-trading pages, on all history up to the range end ───
+        swing_pages = [(name, page) for name, page in (
+            ('candlesticks', candlestick_analysis), ('swing_structure', swing_structure_analysis),
+            ('pivots', pivot_analysis), ('formations', formation_analysis)) if name in REPORT_SECTIONS]
+        if swing_pages:
+            swing_history = OHLCdf.set_index('Date')
+            swing_history = swing_history[swing_history.index <= price_data.index[-1]]
+            swing_bars = (len(price_data) if analysis_window is not None else technical_window_bars(
+                swing_history.index, years=0, months=SWING_WINDOW_MONTHS))
+            for name, page in swing_pages:
+                try:
+                    page(swing_history, Scrip, swing_bars, pdf_pages=pdf_pages)
+                except (ValueError, KeyError) as e:
+                    print(f"  [{name.replace('_', ' ')} skipped] {e}")
 
         # ── Max pain and put-call ratio of the range's latest options ─
         if 'max_pain' in REPORT_SECTIONS:
@@ -2801,128 +3599,6 @@ def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None,
 # Volatility estimators (cone, rolling, distribution)
 # ---------------------------------------------------------------------------
 
-def compute_option_battlefield(df_today, df_prev, spot_today, spot_prev, rv_cone,
-                               threshold_oi=OPTION_OI_THRESHOLD):
-    """Match full close snapshots on today's ATM +/-5 grid; IV is an annualized decimal."""
-    if (not np.isfinite([spot_today, spot_prev, threshold_oi]).all()
-            or min(spot_today, spot_prev) <= 0 or threshold_oi < 0):
-        raise ValueError('Battlefield needs positive finite spots and a nonnegative finite OI threshold')
-    required = {'Date', 'Expiry', 'Strike Price', 'Option type', 'IV', 'Open Int',
-                'Contracts', 'Close', 'Tenor sessions'}
-    snapshots = []
-    keys = ['Expiry', 'Strike Price', 'Option type']
-    for source in (df_today, df_prev):
-        if not required.issubset(source.columns):
-            raise ValueError(f'Missing battlefield columns: {sorted(required - set(source.columns))}')
-        frame = source.copy()
-        for column in ['Date', 'Expiry']:
-            frame[column] = _naive_dates(frame[column]).dt.normalize()
-        if frame.empty or frame['Date'].isna().any() or frame['Date'].nunique() != 1:
-            raise ValueError('Battlefield requires a complete snapshot on each of the last two underlying dates')
-        frame['Option type'] = frame['Option type'].astype(str).str.strip().str.upper()
-        for column in ['Strike Price', 'IV', 'Close', 'Tenor sessions', 'Lot Size']:
-            values = pd.to_numeric(frame.get(column, pd.Series(np.nan, index=frame.index)), errors='coerce')
-            frame[column] = values.where(np.isfinite(values) & (values > 0))
-        for column in ['Open Int', 'Contracts']:
-            values = pd.to_numeric(frame[column], errors='coerce')
-            frame[column] = values.where(np.isfinite(values) & (values >= 0))
-        frame['Strike Price'] = frame['Strike Price'].round(8)
-        frame = frame[frame['Option type'].isin(['CE', 'PE']) & frame['Strike Price'].notna()
-                      & (frame['Expiry'] > frame['Date'])]
-        if frame.duplicated(keys).any():
-            raise ValueError('Duplicate expiry/strike/side contracts make the battlefield ambiguous')
-        snapshots.append(frame)
-    today, previous = snapshots
-    if today.empty or previous.empty or previous['Date'].iloc[0] >= today['Date'].iloc[0]:
-        raise ValueError('Battlefield requires unexpired options on T and the earlier T-1 date')
-    if ('Symbol' in today and 'Symbol' in previous
-            and pd.concat([today['Symbol'], previous['Symbol']]).dropna().nunique() > 1):
-        raise ValueError('Battlefield snapshots must belong to one underlying')
-
-    nearest_strikes = np.sort(today.loc[today['Expiry'].eq(today['Expiry'].min()),
-                                       'Strike Price'].unique())
-    if len(nearest_strikes) < 2:
-        raise ValueError('At least two nearest-expiry strikes are needed to infer strike spacing')
-    step = float(np.round(np.diff(nearest_strikes), 8).min())
-    anchor = nearest_strikes[0]
-    atm = round(float(anchor + math.floor((spot_today - anchor) / step + 0.5) * step), 8)
-    strikes = np.round(atm + np.arange(-5, 6) * step, 8)
-    merged = today[today['Strike Price'].isin(strikes)].merge(
-        previous[previous['Strike Price'].isin(strikes)], on=keys,
-        suffixes=('_T', '_T1'), how='inner', validate='one_to_one')
-    if merged.empty:
-        raise ValueError('No ATM +/-5 contracts match the last two underlying dates; stale quotes are not substituted')
-    merged['IV delta'] = merged['IV_T'] - merged['IV_T1']
-    merged['OI delta'] = merged['Open Int_T'] - merged['Open Int_T1']
-    merged['Vol/OI'] = (merged['Contracts_T'] * merged['Lot Size_T']
-                        / merged['Open Int_T'].clip(lower=1))
-    windows = np.asarray(rv_cone['windows'], dtype=float)
-    lower, upper = (np.asarray(rv_cone[key], dtype=float) for key in ('p10', 'p90'))
-    if (not len(windows) or len(lower) != len(windows) or len(upper) != len(windows)
-            or not np.isfinite(np.concatenate([windows, lower, upper])).all()
-            or (lower > upper).any() or len(np.unique(windows)) != len(windows)):
-        raise ValueError('Battlefield requires finite p10/p90 bounds at distinct realized-volatility tenors')
-    order = np.argsort(windows)
-    floor = np.interp(merged['Tenor sessions_T'], windows[order], lower[order], left=np.nan, right=np.nan)
-    ceiling = np.interp(merged['Tenor sessions_T'], windows[order], upper[order], left=np.nan, right=np.nan)
-    merged['IV regime'] = np.select([
-        (merged['IV_T1'] <= floor * 1.10) & (merged['IV delta'] > 0),
-        (merged['IV_T1'] >= ceiling * 0.90) & (merged['IV delta'] < 0),
-        (merged['IV_T'] > ceiling) & (merged['IV delta'] > 0),
-    ], ['RISING_FROM_BOTTOM', 'HOOKING_DOWN_TOP', 'SPIKED_ABOVE_CONE'], default='NEUTRAL')
-    available = (merged[['IV_T', 'IV_T1', 'Tenor sessions_T', 'Tenor sessions_T1']].notna().all(axis=1)
-                 & np.isfinite(floor) & np.isfinite(ceiling))
-    merged.loc[~available, 'IV regime'] = 'UNAVAILABLE'
-
-    summaries, grids = [], []
-    for expiry, group in merged.groupby('Expiry', sort=True):
-        ce, pe = (group[group['Option type'].eq(side)].set_index('Strike Price').reindex(strikes)
-                  for side in ('CE', 'PE'))
-        full = today[today['Expiry'].eq(expiry)]
-        calls, puts = (full[full['Option type'].eq(side)] for side in ('CE', 'PE'))
-        curve = (max_pain_curve(calls, puts) if full['Open Int'].notna().all()
-                 and full['Open Int'].sum() > 0 else pd.DataFrame())
-        call_total = group.loc[group['Option type'].eq('CE'), 'Open Int_T'].sum()
-        put_total = group.loc[group['Option type'].eq('PE'), 'Open Int_T'].sum()
-        straddle = ce.loc[atm, 'Close_T'] + pe.loc[atm, 'Close_T']
-        summaries.append({
-            'Expiry': expiry, 'PCR': put_total / max(call_total, 1) if group['Open Int_T'].notna().all() else np.nan,
-            'Max pain': curve['Total'].idxmin() if not curve.empty else np.nan,
-            'EM lower': spot_today - straddle, 'EM upper': spot_today + straddle,
-        })
-        paired = ce[['Open Int_T', 'Open Int_T1']].notna().all(axis=1) & pe[
-            ['Open Int_T', 'Open Int_T1']].notna().all(axis=1)
-        net = (pe['OI delta'] - ce['OI delta']).where(paired)
-        driver = np.where(ce['OI delta'].abs() > pe['OI delta'].abs(),
-                          np.where(ce['OI delta'] < 0, 'C-Unw', 'C-Add'),
-                          np.where(pe['OI delta'] > 0, 'P-Add', 'P-Unw'))
-        grid = pd.DataFrame({
-            'Strike Price': strikes, 'Expiry': expiry, 'Net OI shift': net.to_numpy(),
-            'Driver': driver, 'Available': paired.to_numpy(),
-            'Bullish confluence': (net.gt(threshold_oi) & ce['IV regime'].eq('RISING_FROM_BOTTOM')).to_numpy(),
-            'Bearish confluence': (net.lt(-threshold_oi) & pe['IV regime'].isin(
-                ['RISING_FROM_BOTTOM', 'SPIKED_ABOVE_CONE'])).to_numpy(),
-            'Ceiling': (ce['Open Int_T'].eq(calls['Open Int'].max() if calls['Open Int'].notna().all() else np.nan)
-                        & ce['OI delta'].gt(0) & paired).to_numpy(),
-            'Floor': (pe['Open Int_T'].eq(puts['Open Int'].max() if puts['Open Int'].notna().all() else np.nan)
-                      & pe['OI delta'].gt(0) & paired).to_numpy(),
-            'Volume spike': (ce['Vol/OI'].gt(1.5) | pe['Vol/OI'].gt(1.5)).to_numpy(),
-        })
-        grid.loc[~grid['Available'], 'Driver'] = 'Unavailable'
-        grid.loc[paired.to_numpy() & ce['OI delta'].eq(0).to_numpy()
-                 & pe['OI delta'].eq(0).to_numpy(), 'Driver'] = 'Flat'
-        grids.append(grid)
-    cells = pd.concat(grids, ignore_index=True)
-    return {'contracts': merged, 'cells': cells, 'expiry_summary': pd.DataFrame(summaries).set_index('Expiry'),
-            'date': today['Date'].iloc[0], 'previous_date': previous['Date'].iloc[0],
-            'spot_today': spot_today, 'spot_prev': spot_prev, 'atm_strike': atm,
-            'strike_step': step, 'strike_list': strikes, 'threshold_oi': threshold_oi,
-            'missing_cells': int((~cells['Available']).sum()),
-            'unavailable_iv': int(merged['IV regime'].eq('UNAVAILABLE').sum()),
-            'unavailable_volume': int(merged['Vol/OI'].isna().sum()),
-            'unmatched_expiries': int(today['Expiry'].nunique() - merged['Expiry'].nunique())}
-
-
 def build_volatility_option_overlay(price_data, ticker, estimator,
                                      date_count=option_overlay.OPTION_HISTORY_DATES,
                                      min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
@@ -2950,7 +3626,7 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
     if frequency != 'daily':
         print('  [options] Option IV overlays require daily underlying prices, not monthly/quarterly macro observations.')
         return None
-    dates = history.index[-max(date_count, 2):]
+    dates = history.index[-date_count:]
     try:
         derivatives = load_derivatives(ticker, start=f'{dates[0]:%Y-%m-%d}', end=f'{dates[-1]:%Y-%m-%d}')
     except FileNotFoundError:
@@ -2961,10 +3637,9 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
         return None
     chain, diagnostics = option_overlay.prepare_option_iv(
         derivatives, ticker, dates, rate=rate, reported_iv_unit=reported_iv_unit,
-        min_contracts=0, include_unavailable_iv=True)
-    points = option_overlay.select_option_points(
-        chain[chain['Date'].isin(history.index[-date_count:])], outlier_count=outlier_count,
         min_contracts=min_contracts)
+    points = option_overlay.select_option_points(chain, outlier_count=outlier_count,
+                                                 min_contracts=min_contracts)
     if points.empty:
         print(f"  [options] No valid IV points: {diagnostics['eligible_contracts']} eligible contracts, "
               f"{diagnostics['missing_forward']} without a same-expiry future or parity forward, "
@@ -2972,15 +3647,13 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
               f"{diagnostics['solver_failures']} solver failures.")
         if diagnostics['solver_unavailable']:
             print('  [options] Install vollib to estimate missing IV; reported IV can be used directly.')
-        if chain.empty or 'option_battlefield' not in REPORT_SECTIONS:
-            return None
+        return None
     # Next monthly expiries, plus the next expiries of any kind when weeklies are listed
-    expiries = option_overlay.select_report_expiries(chain[chain['Expiry'] > dates[-1]])
+    expiries = option_overlay.select_report_expiries(points)
     points = points[points['Expiry'].isin(expiries)].reset_index(drop=True)
     if points.empty:
         print('  [options] No upcoming expiries with valid IV points.')
-        if chain.empty or 'option_battlefield' not in REPORT_SECTIONS:
-            return None
+        return None
     points = option_overlay.attach_realized_benchmarks(
         points, history, lambda available, tenor: get_volatility_estimator(available, estimator, tenor))
     kinds = points.drop_duplicates('Expiry')['Expiry type'].value_counts()
@@ -2992,9 +3665,7 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
     return {'points': points, 'diagnostics': diagnostics, 'as_of': dates[-1],
             'estimator': estimator, 'top_count': option_overlay.OPTION_TOP_COUNT,
             'outlier_count': outlier_count, 'min_contracts': min_contracts, 'rate': rate,
-            'reported_iv_unit': reported_iv_unit, 'expiries': expiries, 'chain': chain,
-            'observation_dates': dates[-2:], 'spot_today': float(history['Close'].iloc[-1]),
-            'spot_prev': float(history['Close'].iloc[-2]) if len(history) > 1 else np.nan}
+            'reported_iv_unit': reported_iv_unit, 'expiries': expiries}
 
 
 def get_volatility_estimator(price_data, estimator=DEFAULT_ESTIMATOR,
@@ -3038,7 +3709,7 @@ def compute_volatility_profile(price_data, estimator=DEFAULT_ESTIMATOR,
     if not usable:
         return None
 
-    cone = {'windows': [], 'max': [], 'p10': [], 'p90': [], 'top_q': [], 'median': [], 'mean': [],
+    cone = {'windows': [], 'max': [], 'top_q': [], 'median': [], 'mean': [],
             'bottom_q': [], 'min': [], 'realized': [], 'series': []}
 
     for w in usable:
@@ -3048,8 +3719,6 @@ def compute_volatility_profile(price_data, estimator=DEFAULT_ESTIMATOR,
             continue
         cone['windows'].append(w)
         cone['max'].append(series.max())
-        cone['p10'].append(series.quantile(0.10))
-        cone['p90'].append(series.quantile(0.90))
         cone['top_q'].append(series.quantile(quantiles[1]))
         cone['median'].append(series.median())
         cone['mean'].append(series.mean())
@@ -3125,184 +3794,6 @@ def _cone_option_points(options, outliers_only=True):
     return latest
 
 
-def _plot_iv_trails(axes, battlefield, existing_labels):
-    """Hollow T-1 to solid T endpoints; keep non-neutral labels inside the clipped cone."""
-    from adjustText import adjust_text
-
-    contracts = battlefield['contracts']
-    trails = contracts[contracts['Strike Price'].isin(battlefield['strike_list'][3:8])
-                       & contracts[['IV_T', 'IV_T1', 'Tenor sessions_T', 'Tenor sessions_T1']].notna().all(axis=1)]
-    if trails.empty:
-        return
-    tenors = np.concatenate([trails['Tenor sessions_T1'], trails['Tenor sessions_T']])
-    left, right = axes.get_xlim()
-    axes.set_xlim(min(left, tenors.min() - 0.8), max(right, tenors.max() + 0.8))
-    styles = {
-        'RISING_FROM_BOTTOM': ('#15803d', 'Rising from bottom'),
-        'HOOKING_DOWN_TOP': ('#dc2626', 'Hooking down from top'),
-        'SPIKED_ABOVE_CONE': ('#f59e0b', 'Spiked above cone'),
-        'NEUTRAL': ('#9ca3af', 'Neutral IV trail'),
-        'UNAVAILABLE': ('#9ca3af', 'RV bounds unavailable'),
-    }
-    labels = list(existing_labels)
-    for regime, (colour, description) in styles.items():
-        group = trails[trails['IV regime'].eq(regime)]
-        if group.empty:
-            continue
-        axes.plot([], [], color=colour, marker='o', label=description)
-        axes.scatter(group['Tenor sessions_T1'], group['IV_T1'], s=35,
-                     facecolors='none', edgecolors=colour, linewidths=1.4, zorder=5)
-        axes.scatter(group['Tenor sessions_T'], group['IV_T'], s=35, color=colour, zorder=6)
-        for _, row in group.iterrows():
-            annotation = axes.annotate(
-                '', xy=(row['Tenor sessions_T'], row['IV_T']),
-                xytext=(row['Tenor sessions_T1'], row['IV_T1']), annotation_clip=False,
-                arrowprops=dict(arrowstyle='->', color=colour, alpha=0.85, lw=1.3,
-                                linestyle='--' if regime == 'UNAVAILABLE' else '-'), zorder=4)
-            if annotation.arrow_patch is not None:
-                annotation.arrow_patch.set_clip_path(axes.patch)
-            if regime not in ('NEUTRAL', 'UNAVAILABLE') and 0.05 <= row['IV_T'] <= 0.35:
-                labels.append(axes.text(
-                    row['Tenor sessions_T'], row['IV_T'],
-                    f"{row['Strike Price']:g}{row['Option type']} ({row['Expiry']:%d %b})\n"
-                    f"{row['IV_T1'] * 100:.1f}->{row['IV_T'] * 100:.1f}%",
-                    fontsize=8, ha='center', va='bottom', color=colour, zorder=7,
-                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.8, pad=0.3)))
-    legend = axes.legend(fontsize=9, ncol=3, loc='upper right')
-    if labels:
-        adjust_text(labels, x=tenors, y=np.concatenate([trails['IV_T1'], trails['IV_T']]),
-                    ax=axes, objects=[legend], ensure_inside_axes=True, iter_lim=500,
-                    expand=(1.1, 1.2), arrowprops=dict(arrowstyle='-', color='#777777', lw=0.5))
-
-
-def plot_option_battlefield(battlefield, ticker, pdf_pages=None):
-    """Layer per-expiry OI shifts, close-to-close spot, straddle range and full-chain max pain."""
-    from adjustText import adjust_text
-    from matplotlib.transforms import offset_copy
-
-    summary, cells = battlefield['expiry_summary'], battlefield['cells']
-    expiries, strikes, step = list(summary.index), battlefield['strike_list'], battlefield['strike_step']
-    figure = plt.figure(figsize=(30, 17), facecolor='white')
-    figure.suptitle(f"{ticker}   Multi-Expiry OI & Spot Battlefield   |   "
-                    f"{battlefield['previous_date']:%d %b} -> {battlefield['date']:%d %b %Y}",
-                    fontsize=30, fontweight='bold', y=0.975)
-    figure.text(0.055, 0.925, f"ATM {_strike_label(battlefield['atm_strike'])} +/-5 | "
-                f"Step {_strike_label(step)} | Positive: put additions / call unwinding | "
-                "PCR: matched ATM +/-5 OI; max pain and walls: full current expiry chain",
-                fontsize=15, color='#454c50')
-    columns = 3 if len(expiries) <= 24 else 4
-    bottom = min(0.50, 0.24 + 0.018 * math.ceil((len(expiries) + 3) / columns))
-    axes = figure.add_axes((0.055, bottom, 0.90, 0.84 - bottom))
-    colours = plt.get_cmap('tab20')(np.linspace(0, 1, len(expiries)))
-    width = step * 0.76 / len(expiries)
-    labels, used = [], set()
-    for number, (expiry, colour) in enumerate(zip(expiries, colours)):
-        group = cells[cells['Expiry'].eq(expiry)].set_index('Strike Price').reindex(strikes)
-        badge = summary.loc[expiry]
-        pain = _strike_label(badge['Max pain']) if np.isfinite(badge['Max pain']) else 'n/a'
-        move = (f"{badge['EM lower']:,.0f}-{badge['EM upper']:,.0f}"
-                if np.isfinite(badge['EM lower']) else 'n/a')
-        positions = strikes + (number - (len(expiries) - 1) / 2) * width
-        axes.bar(positions, group['Net OI shift'], width=width * 0.92, color=colour, alpha=0.85,
-                 label=f"{expiry:%d %b %Y} | MP:{pain} | PCR:{_ratio_text(badge['PCR'])} | EM:{move}")
-        for x, (_, cell) in zip(positions, group.iterrows()):
-            value = cell['Net OI shift']
-            if not np.isfinite(value):
-                axes.text(x, 0, 'n/a', fontsize=7, rotation=90, ha='center', va='bottom', color='#777777')
-                continue
-            confluence = cell['Bullish confluence'] or cell['Bearish confluence']
-            tags = []
-            if confluence:
-                axes.scatter([x], [value], marker='*', s=160, color='#d4a017', edgecolors='#785b09',
-                             zorder=6, label='IV/OI confluence' if 'star' not in used else '_nolegend_')
-                used.add('star')
-                tags.append('BULL' if cell['Bullish confluence'] else 'BEAR')
-            if cell['Ceiling']:
-                tags.append('CEILING')
-            if cell['Floor']:
-                tags.append('FLOOR')
-            if tags:
-                labels.append(axes.text(
-                    x, value, f"{' / '.join(tags)}\n{cell['Driver']}",
-                    ha='center', va='bottom' if value >= 0 else 'top', fontsize=9, zorder=7,
-                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.8, pad=0.3)))
-            if cell['Volume spike']:
-                axes.scatter([x], [value], marker='D', s=45, facecolors='none', edgecolors='#374151',
-                             transform=offset_copy(axes.transData, fig=figure, y=5, units='points'),
-                             zorder=7, label='Volume/OI >1.5' if 'diamond' not in used else '_nolegend_')
-                used.add('diamond')
-    magnitude = cells['Net OI shift'].abs().max()
-    magnitude = float(magnitude) if np.isfinite(magnitude) and magnitude > 0 else 1.0
-    axes.set_ylim(-magnitude * 1.25, magnitude * 1.55)
-    axes.set_xlim(strikes[0] - step * 0.6, strikes[-1] + step * 0.6)
-    axes.axhline(0, color='#6b7280', linewidth=1)
-    near = summary.iloc[0]
-    if np.isfinite(near['EM lower']) and np.isfinite(near['EM upper']):
-        axes.axvspan(near['EM lower'], near['EM upper'], color='#38bdf8', alpha=0.08,
-                     label=rf"Near expiry $\pm1\sigma$ proxy ({near['EM lower']:,.0f}-{near['EM upper']:,.0f})")
-    for key, caption, colour, style, height in [
-            ('spot_prev', 'Spot T-1', '#6b7280', '--', 0.95),
-            ('spot_today', 'Spot T', '#111827', '-', 0.89)]:
-        spot = battlefield[key]
-        axes.axvline(spot, color=colour, linestyle=style, linewidth=2)
-        if axes.get_xlim()[0] <= spot <= axes.get_xlim()[1]:
-            axes.text(spot, height, f'{caption} {spot:,.2f}', transform=axes.get_xaxis_transform(),
-                      ha='left' if spot <= battlefield['atm_strike'] else 'right', va='top',
-                      fontsize=12, color=colour, bbox=MAX_PAIN_LABEL_BOX)
-    trajectory = axes.annotate(
-        '', xy=(battlefield['spot_today'], 0.985), xytext=(battlefield['spot_prev'], 0.985),
-        xycoords=('data', 'axes fraction'), annotation_clip=False,
-        arrowprops=dict(arrowstyle='->', color='#15803d' if battlefield['spot_today'] >=
-                        battlefield['spot_prev'] else '#dc2626', lw=2.5))
-    if trajectory.arrow_patch is not None:
-        trajectory.arrow_patch.set_clip_path(axes.patch)
-    pain = near['Max pain']
-    if np.isfinite(pain):
-        axes.axvline(pain, color='#2b3fd6', linestyle=':', linewidth=2.5)
-        left, right = axes.get_xlim()
-        outside = not left <= pain <= right
-        at = min(max(pain, left + step * 0.15), right - step * 0.15)
-        gap = battlefield['spot_today'] / pain - 1
-        axes.text(at, 0.81, f"Max pain {_strike_label(pain)}"
-                  + (' (outside strike window)' if outside else '')
-                  + f"\nExpiry {expiries[0]:%d %b %Y} | quotes {battlefield['date']:%d %b}"
-                  + f"\nSpot {gap:+.1%} vs max pain", transform=axes.get_xaxis_transform(),
-                  fontsize=12, fontweight='bold', color='#2b3fd6', va='top',
-                  ha='left' if at <= battlefield['atm_strike'] else 'right', bbox=MAX_PAIN_LABEL_BOX)
-    axes.set_xticks(strikes)
-    axes.set_xticklabels([_strike_label(strike) for strike in strikes], fontsize=12)
-    axes.set_xlabel('Strike price (today ATM +/-5)', fontsize=16, fontweight='bold')
-    axes.set_ylabel('Net bullish OI shift (PE delta - CE delta)', fontsize=16, fontweight='bold')
-    axes.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f'{value:,.0f}'))
-    axes.tick_params(axis='y', labelsize=12)
-    axes.grid(axis='y', color='#d5dadd', alpha=0.6)
-    axes.set_axisbelow(True)
-    axes.spines[['top', 'right']].set_visible(False)
-    axes.legend(loc='upper center', bbox_to_anchor=(0.5, -0.14), ncol=columns,
-                fontsize=11 if len(expiries) <= 7 else 9, frameon=False)
-    if labels:
-        adjust_text(labels, ax=axes, ensure_inside_axes=True, iter_lim=300,
-                    expand=(1.15, 1.25), arrowprops=dict(arrowstyle='-', color='#777777', lw=0.5))
-    gaps = (f"Unavailable: {battlefield['missing_cells']} strike/expiry pairs, "
-            f"{battlefield['unavailable_iv']} IV regimes, {battlefield['unavailable_volume']} volume/OI ratios "
-            f"(missing volume, OI or lot size), {battlefield['unmatched_expiries']} expiries without matched quotes. "
-            f"{int(summary['EM lower'].isna().sum())} ATM straddles and "
-            f"{int(summary['Max pain'].isna().sum())} max-pain estimates unavailable.")
-    figure.text(0.055, 0.075, textwrap.fill(gaps, 190), fontsize=12, color='#555b60', va='top')
-    figure.text(0.055, 0.027, f"Stars: aligned IV regime and |net OI shift| > {battlefield['threshold_oi']:,.0f}. "
-                "Diamonds: Contracts x Lot Size / max(Open Int, 1) >1.5. "
-                "EM uses current ATM option Close prices, a straddle proxy, not a calibrated 1-sigma interval.\n"
-                "OI shifts identify additions/unwinding, not whether trades were bought or written; "
-                "positioning and max pain are not forecasts.", fontsize=11, color='#555b60')
-    if pdf_pages is not None:
-        try:
-            pdf_pages.savefig(figure)
-        finally:
-            plt.close(figure)
-    else:
-        plt.show()
-
-
 def plot_volatility(profile, ticker, pdf_pages=None):
     """Render the volatility page: cone, box, rolling series and distribution."""
     cone = profile['cone']
@@ -3311,7 +3802,6 @@ def plot_volatility(profile, ticker, pdf_pages=None):
     label = _volatility_formatter(profile)
     lower, upper = profile['quantiles']
     options = profile.get('option_overlay')
-    battlefield = profile.get('option_battlefield')
 
     figure = plt.figure(figsize=(30, 17))
     figure.suptitle(
@@ -3333,49 +3823,23 @@ def plot_volatility(profile, ticker, pdf_pages=None):
         ax_cone.plot(cone['windows'], cone['bottom_q'], marker='o',
                      label=f"{int(lower * 100)}th Prctl")
         ax_cone.plot(cone['windows'], cone['min'], marker='o', label='Min')
-        if not profile['is_moment']:
-            ax_cone.plot(cone['windows'], cone['p10'], linestyle=':', label='10th Prctl')
-            ax_cone.plot(cone['windows'], cone['p90'], linestyle=':', label='90th Prctl')
-            ax_cone.fill_between(cone['windows'], cone['p10'], cone['p90'], alpha=0.10,
-                                 color='#64748b', label='10th-90th percentile')
-            ax_cone.set_ylim(0.05, 0.35)
         ax_cone.plot(cone['windows'], cone['realized'], 'r-.', marker='*',
                      markersize=16, linewidth=2.5, label='Realized (latest)')
         ax_cone.set_xticks(cone['windows'])
         ax_cone.set_xlim(cone['windows'][0] - 3, cone['windows'][-1] + 3)
         ax_cone.set_xlabel('Rolling window (days)', fontsize=15)
         ax_cone.yaxis.set_major_formatter(FuncFormatter(lambda v, _: label(v)))
-        ax_cone.set_ylabel('Annualized volatility (%)' if not profile['is_moment'] else estimator, fontsize=13)
         ax_cone.grid(True, axis='y', alpha=0.4)
         ax_cone.tick_params(labelsize=13)
         ax_cone.legend(fontsize=13)
         ax_cone.set_title('Volatility Cone', fontsize=20, fontweight='bold', pad=8)
-        option_labels, clipped = [], []
         if options is not None:
             latest = _cone_option_points(options)
             if not latest.empty:
-                visible = latest[latest['IV'].between(0.05, 0.35)]
-                option_labels = option_overlay.plot_option_markers(ax_cone, visible, 'Tenor sessions', fontsize=9)
-                tails = latest[latest['IV'] > 0.35]
-                if battlefield is not None:
-                    matched = pd.MultiIndex.from_frame(battlefield['contracts'][['Expiry', 'Strike Price', 'Option type']])
-                    tails = tails[~pd.MultiIndex.from_frame(tails[['Expiry', 'Strike Price', 'Option type']]).isin(matched)]
-                if not tails.empty:
-                    clipped.append(f'{len(tails)} smile tail contracts >35% IV clipped')
+                option_overlay.plot_option_markers(ax_cone, latest, 'Tenor sessions', fontsize=9)
                 ax_cone.set_xlabel('Lookback / expiry tenor (weekday sessions)', fontsize=13)
                 ax_cone.set_title(f"Volatility Cone + Option IV | {options['as_of']:%d %b %Y}",
                                   fontsize=18, fontweight='bold', pad=8)
-        if battlefield is not None and not profile['is_moment']:
-            _plot_iv_trails(ax_cone, battlefield, option_labels)
-            ax_cone.set_xlabel('Lookback / expiry tenor (weekday sessions)', fontsize=13)
-            ax_cone.set_title(f"Volatility Cone + T-1 -> T IV Trails | {battlefield['date']:%d %b %Y}",
-                              fontsize=18, fontweight='bold', pad=8)
-            count = int(battlefield['contracts']['IV_T'].gt(0.35).sum())
-            if count:
-                clipped.insert(0, f'{count} ATM +/-5 contracts >35% IV clipped')
-        if clipped:
-            ax_cone.text(0.99, 0.02, '\n'.join(clipped), transform=ax_cone.transAxes, ha='right',
-                         va='bottom', fontsize=10, color='#555555', bbox=MAX_PAIN_LABEL_BOX)
 
     # --- Box plot of the same per-window distributions ---
     if has('box'):
@@ -3462,18 +3926,12 @@ def plot_volatility(profile, ticker, pdf_pages=None):
                      "option Close (N/A if missing). "
                      f"Black-76 estimates use {options['rate']:.2%} ACT/365; realized volatility uses 252/year. "
                      'The cone defaults to monthly Smile MAD outliers.')
-    if battlefield is not None:
-        notes.append('IV trails: ATM +/-2, all matched expiries; hollow T-1 -> solid T. '
-                     'Green rising from bottom, red hooking down, orange spiked, gray neutral/unavailable; '
-                     'cone view 5%-35%.')
     if 'volatility_guide' in REPORT_SECTIONS:
-        notes.append('Next page: OI battlefield; volatility guide follows.' if battlefield is not None
-                     and 'option_battlefield' in REPORT_SECTIONS else 'Next page: how to read each graph.')
+        notes.append('Next page: how to read each graph.')
     if options is not None:
         notes.append('Per-expiry option IV pages follow.')
     if notes:
-        figure.text(0.05, 0.015, textwrap.fill(' '.join(notes), 350), fontsize=11,
-                    color='#555555', va='bottom')
+        figure.text(0.05, 0.017, ' '.join(notes), fontsize=11, color='#555555')
     if pdf_pages:
         pdf_pages.savefig(figure)
         plt.close(figure)
@@ -3511,8 +3969,7 @@ def _volatility_guide_blocks(profile, ticker):
         blocks.append(('Volatility Cone', [
             ('Shows', f'The range of {estimator} {noun} for each look-back window ({windows[0]} to '
                       f'{windows[-1]} days): max, {upper}th percentile, median, mean, {lower}th '
-                      'percentile and min over the whole history. Red stars are today.'
-                      + (' Dotted 10th/90th bounds shade the historical cone; view is 5%-35%.' if not moment else '')),
+                      'percentile and min over the whole history. Red stars are today.'),
             ('Read', 'Short windows swing far more than long ones, so the cone narrows to the right. '
                      'A star near the top of the cone is high for that window, near the bottom low.'),
             ('Here', example)]))
@@ -3570,8 +4027,6 @@ def _volatility_guide_blocks(profile, ticker):
                      f'{len(rolling):,} readings: {reading}.')]))
 
     cone_points = _cone_option_points(profile.get('option_overlay'))
-    if not moment and not cone_points.empty:
-        cone_points = cone_points[cone_points['IV'].between(0.05, 0.35)]
     if has('cone') and not cone_points.empty:
         nearest = cone_points['Expiry'].min()
         near = cone_points[cone_points['Expiry'].eq(nearest)]
@@ -3588,19 +4043,6 @@ def _volatility_guide_blocks(profile, ticker):
                      + ', '.join(f'{side} {label(value)}' for side, value in sides.items()
                                  if np.isfinite(value))
                      + f' vs {benchmark}.')]))
-    battlefield = profile.get('option_battlefield')
-    if has('cone') and battlefield is not None and not moment:
-        counts = battlefield['contracts']['IV regime'].value_counts()
-        blocks.append(('Previous-day IV trails', [
-            ('Shows', 'ATM +/-2 contracts at each matched expiry: hollow T-1 IV to solid T IV, '
-                      'moving left as weekday tenor falls. Non-neutral labels show strike, side and IV change.'),
-            ('Read', 'Green: IV rising from near the 10th-percentile bottom. Red: IV falling from near '
-                     'the 90th-percentile top. Orange: rising above the 90th bound. Gray: neutral or '
-                     'unavailable bounds (dashed). These are regimes, not trade recommendations.'),
-            ('Here', f"{battlefield['previous_date']:%d %b} -> {battlefield['date']:%d %b}: ATM +/-5 has "
-                     f"{counts.get('RISING_FROM_BOTTOM', 0)} rising, {counts.get('HOOKING_DOWN_TOP', 0)} hooking, "
-                     f"{counts.get('SPIKED_ABOVE_CONE', 0)} spiked and {counts.get('NEUTRAL', 0)} neutral contracts; "
-                     f"{battlefield['unavailable_iv']} regimes unavailable.")]))
 
     if not moment and not rolling.empty:
         percentile = _percentile_rank(rolling, rolling.iloc[-1])
@@ -3615,14 +4057,14 @@ def _volatility_guide_blocks(profile, ticker):
 
 
 def plot_volatility_guide(profile, ticker, pdf_pages=None):
-    """Explain the volatility graphs using this report's numbers, after any OI battlefield."""
+    """Page after the volatility profile: what each graph shows, using this report's numbers."""
     blocks = _volatility_guide_blocks(profile, ticker)
     if not blocks:
         return 0
     figure = plt.figure(figsize=(30, 17))
     figure.suptitle(f"{ticker}   Volatility Profile - how to read it   |   "
                     f"{profile['estimator']} estimator", fontsize=32, fontweight='bold', y=0.975)
-    figure.text(0.05, 0.925, "One block per volatility graph: what it shows, how to read "
+    figure.text(0.05, 0.925, "One block per graph on the previous page: what it shows, how to read "
                 "it, and this report's numbers as the example.", fontsize=17, color='#444444')
     rows = math.ceil(len(blocks) / 2)
     size, wrap = (20, 82) if rows <= 3 else (17, 96)  # A fourth row needs smaller text
@@ -3658,21 +4100,18 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
         print(f"  [volatility] Use Raw, HodgesTompkins or YangZhang for this series.")
 
     options = None
-    if 'option_overlay' in REPORT_SECTIONS or 'option_battlefield' in REPORT_SECTIONS:
+    if 'option_overlay' in REPORT_SECTIONS:
         try:
             options = build_volatility_option_overlay(
                 price_data, ticker, estimator, date_count=option_dates,
                 min_contracts=option_min_contracts, outlier_count=option_outliers,
                 rate=option_rate, reported_iv_unit=option_iv_unit)
-        except (OSError, ValueError, KeyError) as error:
+        except Exception as error:
             print(f'  [options unavailable] {type(error).__name__}: {error}')
     windows = list(VOLATILITY_WINDOWS)
     if options is not None:
         latest = _cone_option_points(options, outliers_only=False)
         windows = sorted(set(windows) | set(latest.loc[latest['RV count'] > 0, 'Tenor sessions'].astype(int)))
-        current = options['chain'][options['chain']['Date'].eq(options['as_of'])]
-        tenors = current['Tenor sessions']
-        windows = sorted(set(windows) | set(tenors[(tenors >= 3) & (tenors + 1 < len(price_data))].astype(int)))
     profile = compute_volatility_profile(price_data, estimator=estimator, windows=windows)
     if profile is None:
         print(f"  [volatility] Not enough history for {ticker} "
@@ -3687,29 +4126,11 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
               f"median {label(rolling.median())}, "
               f"range {label(rolling.min())} to {label(rolling.max())}")
 
-    battlefield = None
-    if options is not None:
-        try:
-            dates = options['observation_dates']
-            if len(dates) < 2:
-                raise ValueError('Two underlying close dates are required for IV trails and OI shifts')
-            battlefield = compute_option_battlefield(
-                options['chain'][options['chain']['Date'].eq(dates[-1])],
-                options['chain'][options['chain']['Date'].eq(dates[-2])],
-                options['spot_today'], options['spot_prev'], profile['cone'])
-            print(f"  [battlefield] {len(battlefield['contracts'])} matched contracts; "
-                  f"{battlefield['missing_cells']} pairs, {battlefield['unavailable_iv']} IV regimes and "
-                  f"{battlefield['unavailable_volume']} volume/OI ratios unavailable.")
-        except (ValueError, KeyError) as error:
-            print(f'  [battlefield unavailable] {error}')
-    profile['option_overlay'] = options if 'option_overlay' in REPORT_SECTIONS else None
-    profile['option_battlefield'] = battlefield
+    profile['option_overlay'] = options
     plot_volatility(profile, ticker, pdf_pages=pdf_pages)
-    if battlefield is not None and 'option_battlefield' in REPORT_SECTIONS:
-        plot_option_battlefield(battlefield, ticker, pdf_pages=pdf_pages)
     if 'volatility_guide' in REPORT_SECTIONS:
         plot_volatility_guide(profile, ticker, pdf_pages=pdf_pages)
-    if options is not None and 'option_overlay' in REPORT_SECTIONS:
+    if options is not None:
         option_overlay.plot_option_history(options, ticker, pdf_pages=pdf_pages)
     return profile
 

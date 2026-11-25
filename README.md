@@ -4,7 +4,8 @@ NSE/macro downloads, zstd Parquet storage, Python loaders and technical/volatili
 
 ## Quick Start
 
-Python 3.10+; dependencies: [requirements.txt](requirements.txt). TA-Lib, trendln and stocktrends are optional.
+Python 3.10+; dependencies: [requirements.txt](requirements.txt). TA-Lib, trendln, stocktrends,
+pandas-ta-classic and swingtrend are optional.
 
 ```powershell
 pip install -r requirements.txt
@@ -64,7 +65,7 @@ python Option-OGN.py --pdf output.pdf       # custom output base name
   `Nd-Md` = N back to M back, excluding the latest M; `MonYYYY` or `MonYYYY-MonYYYY` = calendar
   months (`Jan` or `January`, any case). A bare number is rejected; `--periods N` equals `Nd`, use one.
   A window requires a symbol; shorter available history is used with a console notice.
-- **One symbol + window:** technical, trendline and volatility pages use only the window. Nothing after
+- **One symbol + window:** technical, swing-trading, trendline and volatility pages use only the window. Nothing after
   its last day is used; indicators warm up on earlier history, option IV pages are as of that day.
   Trendlines keep their own bar cap, Renko its last 100 bricks, macro appendices their five-year view.
 - **Two symbols + window:** only the comparison is limited, after alignment; primary pages keep
@@ -90,13 +91,14 @@ Explicit comparison settings enter filenames. **Every PDF**, including custom na
 `_YYYYMMDD_HHMMSS` before `.pdf`; same-second collisions gain `_2`, preventing overwrites.
 The console prints each saved PDF's full path, including custom relative names.
 
-Page order: technical/audit -> max pain & PCR -> trendlines -> volatility with IV trails -> OI & spot
-battlefield -> guide -> option IV by
+Page order: technical/audit -> candlesticks -> swing structure -> pivots -> formations -> max pain & PCR
+-> trendlines -> volatility -> guide -> option IV by
 expiry -> optional comparison. PDFs append Japan (3 pages), US Schiller (2), India Schiller (2), once each.
 Macro panels show five years of cached data, source/definition/frequency/units/latest date and gaps.
 
 In [Option-OGN.py](Option-OGN.py), comment `REPORT_SECTIONS` entries to disable sections:
-`technical`, `max_pain`, `trendlines`, `volatility`, `option_battlefield`, `volatility_guide`, `option_overlay`, `comparison`,
+`technical`, `candlesticks`, `swing_structure`, `pivots`, `formations`, `max_pain`, `trendlines`,
+`volatility`, `volatility_guide`, `option_overlay`, `comparison`,
 `japan_macro`, `schiller_macro`, `india_schiller`. `VOLATILITY_PANELS` controls individual panels.
 Unavailable sections print a reason without removing other pages.
 
@@ -171,6 +173,32 @@ Renko independently uses full history and shows 100 bricks.
 Buy/Sell/Hold are green/red/amber with a verdict. Missing inputs: Hold / *Not enough history*;
 no latest volume: omit volume row. Trendlines use scipy pivots and numpy regression.
 
+### Swing-Trading Pages
+
+Four pages follow the technical page. Each shows the last six calendar months (`SWING_WINDOW_MONTHS = 6`)
+or a single-symbol window, is computed on all history up to the range end (nothing after it) and ends
+with a *How to read this page* block: what is drawn, how to read it, and the current numbers.
+
+| Page | Engine | Shows |
+|---|---|---|
+| Candlestick reversal setups | [pandas-ta-classic](https://github.com/xgboosted/pandas-ta-classic) native patterns, no TA-Lib | Engulfing, hammer, morning/evening star, shooting star, piercing line; latest 10 signal days |
+| Swing structure | [swingtrend](https://github.com/BennyThadikaran/SwingTrend) (GPLv3), fed bar by bar | Trend, breaks of structure (BOS), change-of-character (CoCh) reversal level, latest events |
+| Confirmed pivots | SciPy `argrelextrema`, order 5 | Pivot highs/lows, nearest resistance/support, higher/lower high-low structure |
+| Geometric formations | Confirmed pivots, ATR(14), SciPy `linregress` | Head and shoulders (and inverse), double tops/bottoms, ascending/descending/symmetrical triangles |
+
+- **Follow-through:** the first later close above a bullish candle's high confirms it and below its low
+  fails it (mirrored for bearish candles); until then, Pending.
+- **Swing structure:** CoCh moves only after a pullback of `SWING_RETRACE_PCT = 5`%; a close beyond CoCh
+  reverses the trend, beyond the latest swing point is a BOS. Sideways: no swing point for 20 sessions.
+- **Pivots** need 5 sessions on each side, so the last 5 are unconfirmed and nothing repaints. Equal
+  highs on one plateau count once; flat stretches have none.
+- **Formations** scan the last pivots inside the window: shoulders within 1 ATR and the head 1 ATR beyond;
+  twins within 0.75 ATR with a 1.5 ATR pullback between; a triangle side moving under 0.03 ATR a session
+  is flat, and every triangle pivot must lie within 1 ATR of its side (`FORMATION_*`). Status compares
+  the latest close with the neckline or sides; opposite formations can coexist.
+- Flat single-value bars skip candlesticks; swing structure needs positive prices. A missing package or
+  too little history prints a skip reason.
+
 ### Max Pain & PCR Page
 
 Drawn when the symbol has stored options. "Latest options" are those of the last option date on or
@@ -209,7 +237,7 @@ Flat bars make GarmanKlass/Parkinson/RogersSatchell zero; warnings suggest Raw/H
 
 | Panel | Content |
 |---|---|
-| `cone` | Min/10th/25th/mean/median/75th/90th/max; shaded 10th-90th band, latest realized, monthly smile outliers and T-1 -> T IV trails |
+| `cone` | Min/25th/mean/median/75th/max by window; latest realized value and monthly Smile MAD outlier IV |
 | `box` | Per-window distributions |
 | `rolling` | History with quantile bands |
 | `histogram` | Distribution, normal fit, latest value |
@@ -219,33 +247,6 @@ Above the upper cone band means rich relative to realized history. The guide exp
 graphs with this report's numbers; moments omit combined option-pricing interpretation.
 Tune `VOLATILITY_WINDOWS = [3, 5, 10, 20, 30, 60, 90]`, `VOLATILITY_WINDOW = 30`,
 `VOLATILITY_QUANTILES = [0.25, 0.75]`, `DEFAULT_ESTIMATOR = 'YangZhang'` in the script.
-Non-moment cone charts use a fixed 5%-35% annualized-volatility view; IV above 35% is counted
-in a corner callout rather than compressing the actionable band. Moment charts keep their original scale.
-
-### Previous-Day IV Trails & OI Battlefield
-
-Full option snapshots on the last two **underlying observation dates** are matched by expiry,
-strike and CE/PE, never by substituting an older nonempty quote date. Today's ATM is rounded to
-the nearest-expiry strike grid (minimum listed spacing); that same ATM +/-5 grid filters both dates.
-The cone shows ATM +/-2 trails for all matched expiries: hollow T-1 IV -> solid T IV at their actual
-remaining weekday-session tenors. Green = rising from the p10 bottom, red = hooking down from the
-p90 top, orange = rising above p90, gray = neutral; unavailable bounds are dashed. Bounds interpolate
-at today's tenor without extrapolating outside supported realized history.
-
-The `option_battlefield` page follows volatility, before its guide. Grouped bars show
-`PE OI delta - CE OI delta` per strike/expiry, with dominant addition/unwinding tags, confluence
-stars, full-expiry call ceilings / put floors, and unusual-volume diamonds. Badges show matched-window
-PCR, **full current-chain max pain**, and each expiry's ATM straddle range. The nearest expiry's
-max pain has a blue dotted line and strike/expiry/quote-date/spot-gap label, using the existing
-max-pain calculation and label styling; an off-window value gets an explicit edge callout.
-Spot T-1/T lines and an arrow show the underlying close move.
-
-`OPTION_OI_THRESHOLD = 0.0` is the absolute net shift required for a star (strictly greater in
-stored `Open Int` units). Volume/OI is `Contracts * Lot Size / max(Open Int, 1)`; missing lot size
-means unavailable, not an assumed lot of one. Expected move uses current ATM CE + PE **Close**
-premiums around spot: a straddle-based +/-1-sigma **proxy**, not a calibrated probability interval.
-Missing contract pairs, IV, volume/lot sizes, ATM premiums and max pain are reported explicitly;
-missing sides never become zero OI shifts. OI changes do not establish trade direction or writing.
 
 ## CE/PE Implied-Volatility Overlays
 
@@ -254,12 +255,12 @@ Select five highest-volume calls/puts per expiry/date, plus qualifying smile out
 Green/red dots show annualized CE/PE IV with strike/expiry labels; black outlines mark outliers.
 Outlier labels on both the cone and expiry charts also show the option's `Close` on that quote's
 date, to two decimals (`N/A` for missing/invalid Close), not the underlying price or solver premium.
-Static cone dots show only Smile MAD outliers from latest-underlying-date monthly quotes at remaining
-weekday tenors, never stale quotes. Without outliers, only eligible ATM IV trails add option markers to the historical cone.
+The cone shows only Smile MAD outliers from latest-underlying-date monthly quotes at remaining
+weekday tenors, never stale quotes. With no outliers, the historical cone remains without option dots.
 To restore the other nearby/top-volume strikes, uncomment `# plotted = latest` in
-`_cone_option_points` in [Option-OGN.py](Option-OGN.py); the guide's static-IV block follows the same selection.
-Expiry pages retain all selected strikes. Matching realized windows use all eligible latest-expiry
-tenors when history permits, even when those strikes are hidden on the cone.
+`_cone_option_points` in [Option-OGN.py](Option-OGN.py); the guide follows the same selection.
+Expiry pages retain all selected strikes. Matching realized windows still use all eligible
+monthly tenors when history permits, even when those strikes are hidden on the cone.
 
 Expiry pages: next three monthly expiries (last listed per month), plus next five expiries of
 any kind where weeklies exist; deduplicate overlap, use stored holiday-adjusted dates, exclude
@@ -269,7 +270,7 @@ Counts: `OPTION_MONTHLY_EXPIRIES`, `OPTION_SERIES_EXPIRIES` in [option_overlay.p
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--option-dates N` | `5` | Latest N underlying dates for expiry IV pages; trails/battlefield always load the last two |
+| `--option-dates N` | `5` | Latest N underlying observation dates, not calendar days/nonempty snapshots |
 | `--option-min-contracts N` | `10` | Minimum traded `Contracts`, not OI/turnover |
 | `--option-outliers N` | `2` | Extra outliers per side/expiry/date: 0/1/2; 0 disables scoring |
 | `--option-rate R` | `0.065` | Fixed continuously compounded annual decimal rate; 0.055 = 5.5% |

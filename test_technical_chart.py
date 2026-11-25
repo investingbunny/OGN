@@ -1,7 +1,8 @@
-"""Regression checks for technical-page windows, gap-free axes and the Buy/Sell/Hold audit."""
+"""Regression checks for technical-page windows, gap-free axes, the Buy/Sell/Hold audit and swing pages."""
 
 import importlib.util
 import io
+import itertools
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -160,6 +161,33 @@ class TechnicalChartTests(unittest.TestCase):
             self.run_report(frame, REPORT_SECTIONS=['max_pain'], max_pain_analysis=pages['max_pain_analysis'])
         self.assertIn('[max pain skipped] no TEST options', output.getvalue())
 
+    def test_swing_pages_follow_the_technical_page_on_history_to_the_range_end(self):
+        frame = self.prices()
+        names = ('plot_chart', 'candlestick_analysis', 'swing_structure_analysis', 'pivot_analysis',
+                 'formation_analysis', 'max_pain_analysis')
+        order = []
+        pages = {name: Mock(side_effect=lambda *args, name=name, **kwargs: order.append(name)) for name in names}
+        self.run_report(frame, REPORT_SECTIONS=['max_pain', 'formations', 'pivots', 'swing_structure',
+                                                'candlesticks', 'technical'], **pages)
+        self.assertEqual(order, list(names))
+        six_months = int((frame['Date'] >= pd.Timestamp('2026-04-22')).sum())
+        for name in names[1:5]:
+            history, ticker, bars = pages[name].call_args.args
+            pd.testing.assert_frame_equal(history, frame.set_index('Date'))
+            self.assertEqual((ticker, bars), ('TEST', six_months))
+
+        self.run_report(frame, days='350d-25d', REPORT_SECTIONS=['pivots'], **pages)
+        history, _, bars = pages['pivot_analysis'].call_args.args
+        pd.testing.assert_frame_equal(history, frame.set_index('Date').iloc[:-25])  # nothing after the range end
+        self.assertEqual(bars, 325)
+
+        pages['pivot_analysis'].side_effect = ValueError('only 3 bars; a pivot needs 5 bars on each side')
+        pages['formation_analysis'].reset_mock()
+        with patch.object(self.module.sys, 'stdout', new_callable=io.StringIO) as output:
+            self.run_report(frame, REPORT_SECTIONS=['pivots', 'formations'], **pages)
+        self.assertIn('[pivots skipped] only 3 bars', output.getvalue())
+        pages['formation_analysis'].assert_called_once()
+
     def test_analysis_rejects_nonpositive_windows_before_opening_a_pdf(self):
         for days in (0, -1):
             with self.subTest(days=days), patch.object(self.module, 'PdfPages') as document:
@@ -296,6 +324,151 @@ class TechnicalChartTests(unittest.TestCase):
                 status = cell.get_text().get_text()
                 self.assertIn(status, self.module.AUDIT_COLOURS)
                 self.assertEqual(cell.get_facecolor(), to_rgba(self.module.AUDIT_COLOURS[status]))
+
+
+@unittest.skipUnless(importlib.util.find_spec('pandas_ta_classic') and importlib.util.find_spec('swingtrend'),
+                     'the swing pages need pandas-ta-classic and swingtrend')
+class SwingPageTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import matplotlib
+        matplotlib.use('Agg')
+        spec = importlib.util.spec_from_file_location(
+            'ogn_swing_pages_test', Path(__file__).with_name('Option-OGN.py'))
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    @staticmethod
+    def bars(knots, lead=40, spread=0.3):
+        """Flat closes at 100, then straight runs to each (target, sessions); bars open at the prior close."""
+        path = [100.0] * lead
+        for target, steps in knots:
+            path.extend(np.linspace(path[-1], target, steps + 1)[1:])
+        close = np.asarray(path)
+        opening = np.concatenate([[close[0]], close[:-1]])
+        return pd.DataFrame({'Symbol': 'TEST', 'Open': opening, 'High': np.maximum(opening, close) + spread,
+                             'Low': np.minimum(opening, close) - spread, 'Close': close},
+                            index=pd.bdate_range('2026-03-02', periods=len(close)))
+
+    def test_candlestick_signals_carry_direction_and_follow_through_without_look_ahead(self):
+        close = np.linspace(120, 100, 40)
+        frame = pd.DataFrame({'Open': close + 0.5, 'High': close + 1.0, 'Low': close - 1.0, 'Close': close},
+                             index=pd.bdate_range('2026-01-01', periods=40))
+        frame.iloc[30] = [104.5, 105.0, 102.8, 103.0]
+        frame.iloc[31] = [102.5, 106.0, 102.2, 105.5]  # Bullish engulfing
+        frame.iloc[35] = [101.0, 101.3, 96.0, 101.2]   # Hammer after the decline
+        signals = self.module.compute_candlestick_signals(frame.iloc[:36], 15)['signals']  # Ends on the hammer
+        self.assertEqual(signals[['Date', 'Direction']].values.tolist(),
+                         [[frame.index[31], 'Bullish'], [frame.index[35], 'Bullish']])
+        self.assertEqual(signals['Bullish'].tolist(), [['Engulfing'], ['Hammer']])
+        self.assertEqual(signals['Follow-through'].tolist(), [f'Failed {frame.index[35]:%d %b}', 'Pending'])
+
+        full = self.module.compute_candlestick_signals(frame, 15)['signals']
+        self.assertEqual(full['Date'].tolist(), signals['Date'].tolist())  # Later bars change no signal
+        self.assertEqual(full['Follow-through'].iloc[1], f'Confirmed {frame.index[36]:%d %b}')  # Close above 101.3
+
+        with self.assertRaisesRegex(ValueError, 'real open/high/low/close'):
+            self.module.compute_candlestick_signals(frame.assign(Open=close, High=close, Low=close), 15)
+        with patch.object(self.module, 'HAS_PANDAS_TA', False), \
+                self.assertRaisesRegex(ValueError, 'pip install pandas-ta-classic'):
+            self.module.compute_candlestick_signals(frame, 15)
+
+    def test_swing_structure_follows_breaks_and_reversals_bar_by_bar(self):
+        path = np.concatenate([np.linspace(100, 120, 15), np.linspace(120, 110, 6), np.linspace(110, 126, 12),
+                               np.linspace(126, 118, 5), np.linspace(118, 130, 8), np.linspace(130, 100, 14)])
+        # Close before High: swingtrend's own run() would read these columns by position.
+        frame = pd.DataFrame({'Symbol': 'TEST', 'Close': path, 'High': path + 0.6, 'Low': path - 0.6,
+                              'Open': path}, index=pd.bdate_range('2026-01-01', periods=len(path)))
+        profile = self.module.compute_swing_structure(frame, 30)
+        events = profile['events']
+        self.assertEqual(events[['Date', 'Event', 'Trend']].values.tolist(), [
+            [pd.Timestamp('2026-02-11'), 'BOS', 'UP'], [pd.Timestamp('2026-03-04'), 'BOS', 'UP'],
+            [pd.Timestamp('2026-03-16'), 'Reversal', 'DOWN']])
+        np.testing.assert_allclose(events['Level'], [120.6, 126.6, 117.4])
+        current = profile['current']
+        self.assertEqual((current['trend'], current['since'], current['legs']),
+                         ('DOWN', pd.Timestamp('2026-03-16'), 0))
+        self.assertAlmostEqual(current['coc'], 130.6)
+        self.assertIsNone(current['breakout'])  # Still making new lows: no swing point to break yet
+        self.assertEqual(len(profile['shown']), 30)
+        self.assertTrue(profile['state'].loc['2026-03-16':, 'Trend'].eq('DOWN').all())
+        with self.assertRaisesRegex(ValueError, 'positive'):
+            self.module.compute_swing_structure(frame.assign(Low=path - 200), 30)
+
+    def test_confirmed_pivots_skip_unconfirmed_edges_plateaus_and_flat_stretches(self):
+        path = np.array([5] * 12 + [6, 7, 8, 9, 10, 9, 8, 7, 6, 5, 6, 7, 8, 9, 9, 8, 7, 6, 5, 4, 5, 6, 7, 8, 10, 9],
+                        dtype=float)
+        frame = pd.DataFrame({'Open': path, 'High': path + 0.5, 'Low': path - 0.5, 'Close': path},
+                             index=pd.bdate_range('2026-06-01', periods=len(path)))
+        highs, lows = self.module.confirmed_pivots(frame)
+        self.assertEqual(highs.tolist(), [16, 25])    # Equal highs 25-26 count once; 36 lacks five later bars
+        self.assertEqual(lows.tolist(), [7, 21, 31])  # The flat base has one low, where it starts to lift
+        profile = self.module.compute_pivot_levels(frame, len(frame))
+        self.assertEqual((profile['resistance'], profile['support']), (9.5, 4.5))
+        self.assertEqual(profile['structure'], 'lower high and lower low: down-trend structure')
+        recent = self.module.compute_pivot_levels(frame, 15)
+        self.assertEqual([(position, price) for position, price, _ in recent['lows']], [(8, 3.5)])
+        with self.assertRaisesRegex(ValueError, 'a pivot needs 5 bars'):
+            self.module.compute_pivot_levels(frame.head(10), 10)
+
+    def test_formations_follow_the_atr_rules_and_reject_misfit_triangles(self):
+        shoulders = self.module.compute_formations(
+            self.bars([(110, 8), (103, 7), (116, 9), (106, 8), (110.5, 7), (101, 10)]), 120)
+        formation, = shoulders['formations']  # LS-H-RS highs are not also a flat triangle top
+        self.assertEqual((formation['Pattern'], formation['Bias'], shoulders['basis']),
+                         ('Head and Shoulders', 'Bearish', 'ATR(14)'))
+        self.assertEqual([point['Label'] for point in formation['Points']], ['LS', 'H', 'RS'])
+        np.testing.assert_allclose([point['Price'] for point in formation['Points']], [110.3, 116.3, 110.8])
+        self.assertAlmostEqual(formation['Neckline'], 102.7)  # Lowest low from shoulder to shoulder
+        self.assertEqual(formation['Status'], 'Confirmed: close below the neckline')
+
+        triangle = self.module.compute_formations(
+            self.bars([(110, 8), (100, 8), (110, 8), (103, 8), (110, 8), (106, 8), (108, 4)]), 120)
+        self.assertEqual([(f['Pattern'], f['Bias'], f['Status']) for f in triangle['formations']], [
+            ('Double Top', 'Bearish', 'Watching: needs a close below 102.70'),
+            ('Ascending Triangle', 'Bullish', 'Inside: watch 103.77 / 110.30')])
+        self.assertEqual(self.module.compute_formations(self.bars([(130, 60)]), 120)['formations'], [])
+
+    def test_each_page_draws_chart_tables_and_reading_notes_inside_the_page(self):
+        generator = np.random.default_rng(7)
+        dates = pd.bdate_range(end='2026-11-20', periods=400)
+        close = 24000 * np.exp(np.cumsum(generator.normal(0.0002, 0.011, len(dates))))
+        opening = np.concatenate([[close[0]], close[:-1]]) * (1 + generator.normal(0, 0.003, len(dates)))
+        spread = np.abs(generator.normal(0, 0.006, len(dates))) * close
+        frame = pd.DataFrame({'Open': opening, 'High': np.maximum(opening, close) + spread,
+                              'Low': np.minimum(opening, close) - spread, 'Close': close}, index=dates)
+        pages = [('Candlestick Reversal Setups', self.module.candlestick_analysis),
+                 ('Swing Structure', self.module.swing_structure_analysis),
+                 ('Confirmed Pivot Highs & Lows', self.module.pivot_analysis),
+                 ('Geometric Formations', self.module.formation_analysis)]
+        for title, page in pages:
+            with self.subTest(page=title), patch.object(self.module.sys, 'stdout', new_callable=io.StringIO):
+                document = Mock()
+                page(frame, 'TEST', 126, pdf_pages=document)
+                figure = document.savefig.call_args.args[0]
+                self.assertIn(f'TEST   {title}   |   ', figure.get_suptitle())
+                self.assertTrue({'How to read this page', 'What you see', 'How to read', 'Now'}
+                                <= {text.get_text() for text in figure.texts})
+                chart = figure.axes[0]
+                self.assertEqual(chart.get_xlim(), (-1.0, 126.0))  # The last 126 sessions, without gaps
+                tables = [axes for axes in figure.axes if axes.tables]
+                self.assertTrue(tables)
+                figure.canvas.draw()
+                renderer = figure.canvas.get_renderer()
+                blocks = [text.get_window_extent(renderer) for text in figure.texts if text.get_text()]
+                blocks += [axes.get_tightbbox(renderer) for axes in tables]
+                for box in blocks:
+                    self.assertTrue(figure.bbox.x0 <= box.x0 and box.x1 <= figure.bbox.x1
+                                    and figure.bbox.y0 <= box.y0 and box.y1 <= figure.bbox.y1)
+                for first, second in itertools.combinations(blocks, 2):
+                    self.assertFalse(first.overlaps(second))
+                area = chart.get_window_extent(renderer)
+                for text in chart.texts:
+                    box = text.get_window_extent(renderer)
+                    if text.get_text():
+                        self.assertTrue(area.x0 <= box.x0 and box.x1 <= area.x1
+                                        and area.y0 <= box.y0 and box.y1 <= area.y1, text.get_text())
+        self.assertFalse(self.module.plt.get_fignums())
 
 
 if __name__ == '__main__':
