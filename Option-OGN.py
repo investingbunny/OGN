@@ -31,6 +31,7 @@ Usage:
     python Option-OGN.py --pdf WTI JP10Y --compare-aggregation last
     python Option-OGN.py --pdf WTI JP10Y --compare-frequency quarterly
     python Option-OGN.py --estimator Raw WTI       # pick the volatility estimator
+    python Option-OGN.py --pdf NIFTY --live        # ... plus live 5paisa Smile MAD outliers on the cone
     python Option-OGN.py --trend-bars 250 GLD      # widen the trendline lookback
     python Option-OGN.py --trend-distance 20 GLD   # demand 20 bars between pivots
     python Option-OGN.py --trend-prominence 5 GLD  # absolute prominence, in price units
@@ -77,6 +78,7 @@ import japan_macro
 import nifty_macro
 import schiller_macro
 import option_overlay
+import live_option_chain
 
 # Optional: stocktrends for Renko (pip install stocktrends)
 try:
@@ -2413,7 +2415,7 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
                 option_dates=option_overlay.OPTION_HISTORY_DATES,
                 option_min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
                 option_outliers=option_overlay.OPTION_OUTLIER_COUNT,
-                option_rate=RiskFreeRate, option_iv_unit='percent'):
+                option_rate=RiskFreeRate, option_iv_unit='percent', live=False):
     """Run technical analysis for each symbol in the list.
 
     Sections are driven by REPORT_SECTIONS, so any of them can be commented out.
@@ -2442,6 +2444,9 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
         option_outliers:      Additional qualifying MAD outliers per side/expiry/date
         option_rate:          Annual decimal rate for Black-76 IV estimates
         option_iv_unit:       Unit of source-reported IV: percent or decimal
+        live:                 Overlay live Smile MAD outliers from a 5paisa option-chain
+                              snapshot on the volatility cone; logs in on first use
+                              (live_option_chain.connect)
 
     Returns:
         The saved PDF path (timestamped), or None for interactive charts.
@@ -2595,12 +2600,16 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
 
         # ── Volatility profile ────────────────────────────────────────
         if 'volatility' in REPORT_SECTIONS:
+            live_now = live and price_data.index[-1] >= OHLCdf['Date'].max()
+            if live and not live_now:
+                print(f"  [live] Skipped: the window ends {price_data.index[-1]:%Y-%m-%d}, before the latest "
+                      "stored day, and a live snapshot would look past it.")
             try:
                 volatility_analysis(price_data, Scrip,
                                     estimator=estimator, pdf_pages=pdf_pages,
                                     option_dates=option_dates, option_min_contracts=option_min_contracts,
                                     option_outliers=option_outliers, option_rate=option_rate,
-                                    option_iv_unit=option_iv_unit)
+                                    option_iv_unit=option_iv_unit, live=live_now)
             except (ValueError, KeyError) as e:
                 print(f"  [volatility skipped] {e}")
 
@@ -3599,19 +3608,13 @@ def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None,
 # Volatility estimators (cone, rolling, distribution)
 # ---------------------------------------------------------------------------
 
-def build_volatility_option_overlay(price_data, ticker, estimator,
-                                     date_count=option_overlay.OPTION_HISTORY_DATES,
-                                     min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
-                                     outlier_count=option_overlay.OPTION_OUTLIER_COUNT,
-                                     rate=RiskFreeRate, reported_iv_unit='percent'):
-    """Load all expiries for one underlying and build an as-of IV overlay."""
-    if date_count < 1 or min_contracts < 1 or not 0 <= outlier_count <= 2:
-        raise ValueError('Option dates and minimum contracts must be positive; outliers must be 0, 1 or 2')
+def _option_history(price_data, estimator, tag='options'):
+    """Daily underlying history an IV overlay can be benchmarked on, or None with the reason printed."""
     if estimator in MOMENT_ESTIMATORS:
-        print(f'  [options] IV overlays do not apply to the {estimator} moment estimator.')
+        print(f'  [{tag}] IV overlays do not apply to the {estimator} moment estimator.')
         return None
     if estimator in RANGE_ESTIMATORS and not _has_intraday_range(price_data):
-        print(f'  [options] {estimator} needs actual underlying high/low ranges for an IV comparison.')
+        print(f'  [{tag}] {estimator} needs actual underlying high/low ranges for an IV comparison.')
         return None
     history = price_data.copy()
     history.index = pd.DatetimeIndex(pd.to_datetime(history.index, errors='coerce'))
@@ -3620,11 +3623,25 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
     history.index = history.index.normalize()
     history = history[history.index.notna() & (history.index <= pd.Timestamp(datetime.date.today()))].sort_index()
     if history.empty or history.index.duplicated().any():
-        print('  [options] A unique daily underlying price history is required.')
+        print(f'  [{tag}] A unique daily underlying price history is required.')
         return None
     frequency, _ = _comp_native_frequency(history['Close'])
     if frequency != 'daily':
-        print('  [options] Option IV overlays require daily underlying prices, not monthly/quarterly macro observations.')
+        print(f'  [{tag}] Option IV overlays require daily underlying prices, not monthly/quarterly macro observations.')
+        return None
+    return history
+
+
+def build_volatility_option_overlay(price_data, ticker, estimator,
+                                     date_count=option_overlay.OPTION_HISTORY_DATES,
+                                     min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
+                                     outlier_count=option_overlay.OPTION_OUTLIER_COUNT,
+                                     rate=RiskFreeRate, reported_iv_unit='percent'):
+    """Load all expiries for one underlying and build an as-of IV overlay."""
+    if date_count < 1 or min_contracts < 1 or not 0 <= outlier_count <= 2:
+        raise ValueError('Option dates and minimum contracts must be positive; outliers must be 0, 1 or 2')
+    history = _option_history(price_data, estimator)
+    if history is None:
         return None
     dates = history.index[-date_count:]
     try:
@@ -3666,6 +3683,36 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
             'estimator': estimator, 'top_count': option_overlay.OPTION_TOP_COUNT,
             'outlier_count': outlier_count, 'min_contracts': min_contracts, 'rate': rate,
             'reported_iv_unit': reported_iv_unit, 'expiries': expiries}
+
+
+def build_live_option_overlay(price_data, ticker, estimator,
+                              min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
+                              outlier_count=option_overlay.OPTION_OUTLIER_COUNT, rate=RiskFreeRate):
+    """--live: Smile MAD selection on a real-time 5paisa snapshot of the next monthly expiries.
+
+    Priced like the stored overlay (Black-76 on put-call-parity forwards), from last-traded prices
+    with tenor running from the snapshot to 15:30 IST on expiry day. Raises LiveSnapshotError when
+    no snapshot can be taken.
+    """
+    history = _option_history(price_data, estimator, tag='live')
+    if history is None:
+        return None
+    snapshot = live_option_chain.snapshot(ticker, spot=float(history['Close'].iloc[-1]))
+    chain, diagnostics = option_overlay.prepare_option_iv(
+        snapshot['chain'], ticker, [snapshot['session']], rate=rate,
+        min_contracts=min_contracts, priced_at=snapshot['priced_at'])
+    points = option_overlay.select_option_points(chain, outlier_count=outlier_count,
+                                                 min_contracts=min_contracts)
+    points = option_overlay.attach_realized_benchmarks(
+        points, history, lambda available, tenor: get_volatility_estimator(available, estimator, tenor))
+    lots = '/'.join(str(lot) for lot in sorted(set(snapshot['lot sizes'].values())))
+    found = int(points['Is outlier'].sum())
+    print(f"  [live] 5paisa {snapshot['fetched']:%d %b %H:%M} IST: priced {diagnostics['estimated_iv']} of "
+          f"{diagnostics['eligible_contracts']} contracts trading >= {min_contracts} lots across "
+          f"{len(snapshot['expiries'])} monthly expiries (lot size {lots}); "
+          f"{found} Smile MAD outlier{'s' if found != 1 else ''}.")
+    return {**snapshot, 'points': points, 'diagnostics': diagnostics, 'as_of': snapshot['session'],
+            'rate': rate, 'min_contracts': min_contracts, 'outlier_count': outlier_count}
 
 
 def get_volatility_estimator(price_data, estimator=DEFAULT_ESTIMATOR,
@@ -3794,6 +3841,17 @@ def _cone_option_points(options, outliers_only=True):
     return latest
 
 
+def _live_note(live):
+    """Footer line for a --live overlay: snapshot time, outliers found and how they were priced."""
+    count = len(_cone_option_points(live))
+    found = (f"{count} Smile MAD outlier{'s' if count != 1 else ''} (diamonds; CE green, PE red; labels show LTP)"
+             if count else 'no Smile MAD outliers')
+    closed = " (market closed: last session's prices)" if live['priced_at'] != live['fetched'] else ''
+    return (f"Live: 5paisa snapshot {live['fetched']:%d %b %Y %H:%M} IST{closed} - {found} among "
+            f"{live['diagnostics']['estimated_iv']} priced contracts across {len(live['expiries'])} monthly "
+            'expiries; Black-76 on put-call-parity forwards from last-traded prices, tenor to 15:30 IST on expiry day.')
+
+
 def plot_volatility(profile, ticker, pdf_pages=None):
     """Render the volatility page: cone, box, rolling series and distribution."""
     cone = profile['cone']
@@ -3802,6 +3860,7 @@ def plot_volatility(profile, ticker, pdf_pages=None):
     label = _volatility_formatter(profile)
     lower, upper = profile['quantiles']
     options = profile.get('option_overlay')
+    live = profile.get('live_overlay')
 
     figure = plt.figure(figsize=(30, 17))
     figure.suptitle(
@@ -3833,13 +3892,17 @@ def plot_volatility(profile, ticker, pdf_pages=None):
         ax_cone.tick_params(labelsize=13)
         ax_cone.legend(fontsize=13)
         ax_cone.set_title('Volatility Cone', fontsize=20, fontweight='bold', pad=8)
-        if options is not None:
-            latest = _cone_option_points(options)
-            if not latest.empty:
-                option_overlay.plot_option_markers(ax_cone, latest, 'Tenor sessions', fontsize=9)
-                ax_cone.set_xlabel('Lookback / expiry tenor (weekday sessions)', fontsize=13)
-                ax_cone.set_title(f"Volatility Cone + Option IV | {options['as_of']:%d %b %Y}",
-                                  fontsize=18, fontweight='bold', pad=8)
+        stored = _cone_option_points(options)
+        live_points = _cone_option_points(live)
+        if not (stored.empty and live_points.empty):
+            shown = pd.concat([points.assign(Live=flag) for points, flag in [(stored, False), (live_points, True)]
+                               if not points.empty], ignore_index=True)
+            option_overlay.plot_option_markers(ax_cone, shown, 'Tenor sessions', fontsize=9)
+            ax_cone.set_xlabel('Lookback / expiry tenor (weekday sessions)', fontsize=13)
+            stamps = ([f"{options['as_of']:%d %b %Y}"] if not stored.empty else []) + (
+                [f"live {live['fetched']:%d %b %H:%M} IST"] if not live_points.empty else [])
+            ax_cone.set_title(f"Volatility Cone + Option IV | {' + '.join(stamps)}",
+                              fontsize=18, fontweight='bold', pad=8)
 
     # --- Box plot of the same per-window distributions ---
     if has('box'):
@@ -3932,6 +3995,8 @@ def plot_volatility(profile, ticker, pdf_pages=None):
         notes.append('Per-expiry option IV pages follow.')
     if notes:
         figure.text(0.05, 0.017, ' '.join(notes), fontsize=11, color='#555555')
+    if live is not None and has('cone'):
+        figure.text(0.05, 0.035, _live_note(live), fontsize=11, color='#1f3864')
     if pdf_pages:
         pdf_pages.savefig(figure)
         plt.close(figure)
@@ -4044,6 +4109,25 @@ def _volatility_guide_blocks(profile, ticker):
                                  if np.isfinite(value))
                      + f' vs {benchmark}.')]))
 
+    live = profile.get('live_overlay')
+    if has('cone') and live is not None:
+        shown = _cone_option_points(live)
+        if shown.empty:
+            here = (f"None flagged among {live['diagnostics']['estimated_iv']} priced contracts across "
+                    f"{len(live['expiries'])} monthly expiries.")
+        else:
+            ranked = shown.assign(score=shown['MAD score'].abs()).sort_values('score', ascending=False)
+            here = '; '.join(f"{row['Expiry']:%d %b} {row['Option type']} {row['Strike Price']:g}: "
+                             f"{label(row['IV'])} vs {label(row['Smile IV'])} smile, MAD {row['MAD score']:+.1f}"
+                             for _, row in ranked.head(2).iterrows())
+            here += f'; {len(ranked) - 2} more on the cone.' if len(ranked) > 2 else '.'
+        blocks.append(('Live option IV on the cone', [
+            ('Shows', f"Smile MAD outliers in the 5paisa snapshot of {live['fetched']:%d %b %H:%M} IST: monthly "
+                      'CE and PE diamonds at remaining weekday tenor, labelled with last-traded price (LTP).'),
+            ('Read', 'The same smile test as the circles, run on intraday trades. A diamond is a strike whose IV '
+                     "left its smile; a thin strike's last trade can be stale, so check its live quote first."),
+            ('Here', here)]))
+
     if not moment and not rolling.empty:
         percentile = _percentile_rank(rolling, rolling.iloc[-1])
         blocks.append(('Putting it together', [
@@ -4092,8 +4176,8 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
                         pdf_pages=None, option_dates=option_overlay.OPTION_HISTORY_DATES,
                         option_min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
                         option_outliers=option_overlay.OPTION_OUTLIER_COUNT,
-                        option_rate=RiskFreeRate, option_iv_unit='percent'):
-    """Compute and render the volatility page for one symbol."""
+                        option_rate=RiskFreeRate, option_iv_unit='percent', live=False):
+    """Compute and render the volatility page for one symbol; live adds a 5paisa snapshot's outliers."""
     if estimator in RANGE_ESTIMATORS and not _has_intraday_range(price_data):
         print(f"  [volatility] {estimator} needs an intraday high/low range, but "
               f"{ticker} has flat bars - it will read zero.")
@@ -4108,10 +4192,26 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
                 rate=option_rate, reported_iv_unit=option_iv_unit)
         except Exception as error:
             print(f'  [options unavailable] {type(error).__name__}: {error}')
+    live_options = None
+    if live:
+        try:
+            live_options = build_live_option_overlay(
+                price_data, ticker, estimator, min_contracts=option_min_contracts,
+                outlier_count=option_outliers, rate=option_rate)
+        except Exception as error:
+            print(f'  [live unavailable] {type(error).__name__}: {error}')
     windows = list(VOLATILITY_WINDOWS)
     if options is not None:
         latest = _cone_option_points(options, outliers_only=False)
         windows = sorted(set(windows) | set(latest.loc[latest['RV count'] > 0, 'Tenor sessions'].astype(int)))
+    if live_options is not None:
+        # Live tenors usually sit one session short of the stored ones; skipping such
+        # near-duplicates keeps the cone's tick labels legible.
+        latest = _cone_option_points(live_options, outliers_only=False)
+        for tenor in sorted(set(latest.loc[latest['RV count'] > 0, 'Tenor sessions'].astype(int))):
+            if all(abs(tenor - window) > 1 for window in windows):
+                windows.append(tenor)
+        windows.sort()
     profile = compute_volatility_profile(price_data, estimator=estimator, windows=windows)
     if profile is None:
         print(f"  [volatility] Not enough history for {ticker} "
@@ -4127,6 +4227,7 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
               f"range {label(rolling.min())} to {label(rolling.max())}")
 
     profile['option_overlay'] = options
+    profile['live_overlay'] = live_options
     plot_volatility(profile, ticker, pdf_pages=pdf_pages)
     if 'volatility_guide' in REPORT_SECTIONS:
         plot_volatility_guide(profile, ticker, pdf_pages=pdf_pages)
@@ -4470,6 +4571,7 @@ def main():
         python Option-OGN.py --pdf WTI JP10Y --periods 120  # monthly alignment
         python Option-OGN.py --pdf WTI JP10Y --compare-frequency quarterly
         python Option-OGN.py --estimator Raw WTI      # choose the volatility estimator
+        python Option-OGN.py --pdf NIFTY --live       # ... plus live 5paisa Smile MAD outliers on the cone
         python Option-OGN.py --trend-bars 250 GLD     # widen the trendline lookback
         python Option-OGN.py --trend-distance 20 GLD  # demand 20 bars between pivots
         python Option-OGN.py --trend-prominence 5 GLD # absolute prominence, price units
@@ -4488,12 +4590,18 @@ def main():
     use_pdf = '--pdf' in args
     if use_pdf:
         args.remove('--pdf')
+    live = '--live' in args
+    if live:
+        args.remove('--live')
 
     # Legacy Windows code pages cannot encode this script's Unicode output.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     if args and args[0].lower() == 'list':
+        if live:
+            print('  [error] --live overlays the volatility cone; List does not take it.')
+            return
         list_parquet(args[1:], use_pdf=use_pdf)
         return
 
@@ -4598,7 +4706,7 @@ def main():
         return
 
     if len(tokens) > 2:
-        print("Usage: python Option-OGN.py [--pdf] [--estimator NAME] "
+        print("Usage: python Option-OGN.py [--pdf] [--live] [--estimator NAME] "
               "[--trend-bars N] [--trend-distance N] [--trend-prominence X] "
               "[--compare-frequency FREQ] [--compare-aggregation METHOD] "
               "[symbol] [compare_symbol] [window]")
@@ -4616,6 +4724,7 @@ def main():
         print('  --option-outliers N       extra smile-MAD outliers per side/expiry/date (0, 1, 2)')
         print('  --option-rate R           annual decimal rate for Black-76 (default 0.065)')
         print('  --option-iv-unit UNIT     source IV units: percent (default) or decimal')
+        print('  --live                    overlay live Smile MAD outliers from a 5paisa snapshot on the cone')
         print(f"  --estimator       optional - default {DEFAULT_ESTIMATOR}; one of: "
               f"{', '.join(ESTIMATORS)}")
         print(f"  --trend-bars      optional - default {TREND_BARS}; trendline lookback")
@@ -4651,6 +4760,16 @@ def main():
         else:
             pdf_path = str(CHARTS_DIR / "FnO_Analysis.pdf")
 
+    if live and 'volatility' not in REPORT_SECTIONS:
+        print("  [live] Ignored: 'volatility' is off in REPORT_SECTIONS, so there is no cone to overlay.")
+        live = False
+    if live:
+        try:
+            live_option_chain.connect()
+        except live_option_chain.LiveSnapshotError as e:
+            print(f"  [error] {e}")
+            return
+
     try:
         FnOAnalysis(single_scrip=symbol,
                     pdf_path=pdf_path if use_pdf else None,
@@ -4665,7 +4784,7 @@ def main():
                     comparison_aggregation=comparison_aggregation,
                     option_dates=option_dates, option_min_contracts=option_min_contracts,
                     option_outliers=option_outliers, option_rate=option_rate,
-                    option_iv_unit=option_iv_unit)
+                    option_iv_unit=option_iv_unit, live=live)
     except (ValueError, FileNotFoundError) as e:
         print(f"  [error] {e}")
 

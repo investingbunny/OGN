@@ -36,6 +36,10 @@ swingtrend>=2.0.4        # swing-structure page (GPLv3)
 # ── Date utilities ─────────────────────────────────────────────
 python-dateutil
 
+# ── Live option chain (optional, only for Option-OGN.py --live) ─
+py5paisa                 # 5paisa Xstream SDK: TOTP login, option expiries and chains
+pyotp                    # TOTP codes for the 5paisa login
+
 # ── Legacy (no longer required by OGN.py / Option-OGN.py) ─────
 # nsepy                  # replaced by OGN v2.0-download.py
 # nsepython              # replaced by OGN v2.0-download.py

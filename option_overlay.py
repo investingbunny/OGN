@@ -30,6 +30,7 @@ OPTION_MONTHLY_EXPIRIES = 3     # Upcoming monthly expiries, one page each
 OPTION_SERIES_EXPIRIES = 5      # Upcoming expiries of any kind, when weekly contracts are listed
 OPTION_PARITY_STRIKES = 3       # Call/put pairs nearest the money behind a parity forward
 OPTION_PARITY_MAX_GAP = 0.10    # Parity forwards this far from the underlying price are rejected
+OPTION_EXPIRY_CLOSE = pd.Timedelta(hours=15, minutes=30)  # NSE F&O close (IST); intraday tenors end here
 
 
 def classify_expiries(expiries):
@@ -75,7 +76,8 @@ def parity_forwards(options, rate=OPTION_RATE, strikes=OPTION_PARITY_STRIKES):
 
 
 def prepare_option_iv(derivatives, ticker, observation_dates, rate=OPTION_RATE,
-                       reported_iv_unit='percent', min_contracts=OPTION_MIN_CONTRACTS):
+                       reported_iv_unit='percent', min_contracts=OPTION_MIN_CONTRACTS,
+                       priced_at=None):
     """Read reported IV or infer Black-76 IV from a same-expiry forward.
 
     The forward is the exactly matched futures price; when no future with that
@@ -85,7 +87,10 @@ def prepare_option_iv(derivatives, ticker, observation_dates, rate=OPTION_RATE,
     close for both legs. Tenor is actual calendar days / 365 for pricing; expiry
     day itself is excluded because daily data cannot identify its remaining
     intraday option lifetime. Each row is labelled Monthly or Weekly expiry.
+    A live snapshot passes priced_at, the naive IST moment its prices belong to;
+    the pricing tenor then runs from it to OPTION_EXPIRY_CLOSE on expiry day.
     """
+    priced_at = None if priced_at is None else pd.Timestamp(priced_at)
     if reported_iv_unit not in ('percent', 'decimal'):
         raise ValueError('Reported IV unit must be percent or decimal')
     if not np.isfinite(rate) or not -1 < rate < 1 or min_contracts < 1:
@@ -177,7 +182,8 @@ def prepare_option_iv(derivatives, ticker, observation_dates, rate=OPTION_RATE,
             diagnostics[key] += 1
             continue
         strike = float(contract['Strike Price'])
-        lifetime = float(contract['Calendar days']) / 365.0
+        lifetime = (float(contract['Calendar days']) / 365.0 if priced_at is None else
+                    (contract['Expiry'] + OPTION_EXPIRY_CLOSE - priced_at).total_seconds() / (365.0 * 86400.0))
         discount = math.exp(-rate * lifetime)
         call = contract['Option type'] == 'CE'
         lower = discount * max(forward - strike if call else strike - forward, 0.0)
@@ -315,14 +321,15 @@ def select_report_expiries(points, monthly_count=OPTION_MONTHLY_EXPIRIES,
 
 
 def option_point_label(row):
-    """Strike/expiry label; outliers also show option Close on the row's quote date."""
+    """Strike/expiry label; outliers also show option Close on the row's quote date (LTP when Live)."""
     strike = format(float(row['Strike Price']), 'g')
     expiry = pd.Timestamp(row['Expiry'])
     label = f'({strike}, {expiry.day} {expiry:%b})'
     if row.get('Is outlier', False):
         close = pd.to_numeric(row.get('Close', np.nan), errors='coerce')
         price = f'{close:.2f}' if np.isfinite(close) and close > 0 else 'N/A'
-        label += f'\nClose: {price}'
+        live = row.get('Live', False)
+        label += f"\n{'LTP' if pd.notna(live) and bool(live) else 'Close'}: {price}"
     return label
 
 
@@ -359,7 +366,10 @@ def attach_realized_benchmarks(points, price_data, estimator_function):
 
 
 def plot_option_markers(axes, points, x_column, fontsize=10):
-    """Draw side-coloured IV dots, outlined anomalies and collision-adjusted labels."""
+    """Draw side-coloured IV dots, outlined anomalies and collision-adjusted labels.
+
+    Rows with a true `Live` column (real-time snapshot quotes) are diamonds instead of circles.
+    """
     from adjustText import adjust_text
     from matplotlib.dates import date2num
 
@@ -372,16 +382,20 @@ def plot_option_markers(axes, points, x_column, fontsize=10):
     else:
         positions = frame[x_column].to_numpy(dtype=float)
     implied = frame['IV'].to_numpy(dtype=float)
-    for side, colour in OPTION_COLOURS.items():
-        mask = frame['Option type'].eq(side).to_numpy()
-        if mask.any():
-            axes.scatter(positions[mask], implied[mask], s=38, color=colour,
-                         marker='o', zorder=5, label=f'{side} IV')
+    live = frame['Live'].eq(True).to_numpy() if 'Live' in frame else np.zeros(len(frame), dtype=bool)
     outliers = frame['Is outlier'].to_numpy(dtype=bool)
-    if outliers.any():
-        axes.scatter(positions[outliers], implied[outliers], s=100,
-                     facecolors='none', edgecolors='#202020', linewidths=1.4,
-                     zorder=6, label='Smile MAD outlier')
+    for source, marker, suffix in [(~live, 'o', ''), (live, 'D', ' (live)')]:
+        for side, colour in OPTION_COLOURS.items():
+            mask = frame['Option type'].eq(side).to_numpy() & source
+            if mask.any():
+                axes.scatter(positions[mask], implied[mask], s=38, color=colour,
+                             marker=marker, zorder=5, label=f'{side} IV{suffix}')
+    for source, marker, name in [(~live, 'o', 'Smile MAD outlier'), (live, 'D', 'Live Smile MAD outlier')]:
+        mask = outliers & source
+        if mask.any():
+            axes.scatter(positions[mask], implied[mask], s=100, marker=marker,
+                         facecolors='none', edgecolors='#202020', linewidths=1.4,
+                         zorder=6, label=name)
     padding = max(float(np.ptp(positions)) * 0.08, 0.8)
     left, right = axes.get_xlim()
     axes.set_xlim(min(left, positions.min() - padding), max(right, positions.max() + padding))

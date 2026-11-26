@@ -5,7 +5,7 @@ NSE/macro downloads, zstd Parquet storage, Python loaders and technical/volatili
 ## Quick Start
 
 Python 3.10+; dependencies: [requirements.txt](requirements.txt). TA-Lib, trendln, stocktrends,
-pandas-ta-classic and swingtrend are optional.
+pandas-ta-classic and swingtrend are optional; py5paisa and pyotp are needed only for `--live`.
 
 ```powershell
 pip install -r requirements.txt
@@ -41,6 +41,7 @@ online-only files; JSON and `--timing` rewrite copies go to the temp folder.
 | [schiller_macro.py](schiller_macro.py) | US-only Shiller/Multpl valuations. |
 | [nifty_macro.py](nifty_macro.py) | Indian-only NIFTY valuations/CAPE estimate. |
 | [option_overlay.py](option_overlay.py) | CE/PE IV selection, Black-76 and smile diagnostics. |
+| [live_option_chain.py](live_option_chain.py) | 5paisa login and real-time option-chain snapshots for `--live`. |
 | [diagnose_store.py](diagnose_store.py) | Read-only store diagnostics. |
 | [models.py](models.py) | Estimator dispatch: `get_estimator(price_data, window, clean)`. |
 
@@ -237,7 +238,7 @@ Flat bars make GarmanKlass/Parkinson/RogersSatchell zero; warnings suggest Raw/H
 
 | Panel | Content |
 |---|---|
-| `cone` | Min/25th/mean/median/75th/max by window; latest realized value and monthly Smile MAD outlier IV |
+| `cone` | Min/25th/mean/median/75th/max by window; latest realized value and monthly Smile MAD outlier IV (end-of-day, plus live with `--live`) |
 | `box` | Per-window distributions |
 | `rolling` | History with quantile bands |
 | `histogram` | Distribution, normal fit, latest value |
@@ -275,6 +276,7 @@ Counts: `OPTION_MONTHLY_EXPIRIES`, `OPTION_SERIES_EXPIRIES` in [option_overlay.p
 | `--option-outliers N` | `2` | Extra outliers per side/expiry/date: 0/1/2; 0 disables scoring |
 | `--option-rate R` | `0.065` | Fixed continuously compounded annual decimal rate; 0.055 = 5.5% |
 | `--option-iv-unit UNIT` | `percent` | Explicit `percent`/`decimal`, never magnitude-inferred |
+| `--live` | off | Also overlay live Smile MAD outliers from a 5paisa snapshot on the cone; see below |
 
 Example: `python Option-OGN.py --pdf BANKNIFTY --option-dates 10 --option-min-contracts 50`.
 Moments, monthly/quarterly data, duplicate underlying dates and flat-bar range estimators exclude IV.
@@ -317,6 +319,30 @@ expiries, NIFTY-only weekly index contracts and monthly parity within 0.1% of ma
 No market-outlier claim is made.
 
 </details>
+
+### Live Smile MAD Outliers (`--live`)
+
+`python Option-OGN.py --pdf NIFTY --live` adds, on each volatility cone, the Smile MAD outliers of a
+real-time 5paisa option-chain snapshot, next to the stored end-of-day ones.
+
+- **Setup:** `pip install py5paisa pyotp`, then fill in the `FILL IN` placeholders at the top of
+  [live_option_chain.py](live_option_chain.py): `APP_NAME`, `APP_SOURCE`, `USER_ID`, `PASSWORD`,
+  `USER_KEY`, `ENCRYPTION_KEY` (Xstream dashboard), `CLIENT_CODE`, `PIN`, `TOTP_SECRET`. Each can
+  instead be an environment variable `FIVEPAISA_<NAME>`, which wins and keeps secrets out of git.
+  Missing values or a failed TOTP login stop the run before any page is drawn; login happens once.
+- **Snapshot:** the next three monthly expiries (`OPTION_MONTHLY_EXPIRIES`), one expiry list plus one
+  chain request each, paced to 50 requests/minute (`REQUESTS_PER_MINUTE`). 5paisa quotes `Volume`/`OI`
+  in units, so each expiry's lot size is their greatest common divisor and contracts = units / lot.
+- **Pricing:** last-traded prices (`LTP`), Black-76 on put-call-parity forwards checked against 5paisa's
+  underlying LTP (else the latest stored close), tenor ACT/365 from the snapshot to 15:30 IST on
+  expiry day. Outside 09:15-15:30 IST on weekdays, prices count as the last weekday close.
+  `--option-min-contracts`, `--option-outliers` and `--option-rate` apply; scoring is unchanged.
+- **Page:** live outliers are diamonds labelled with LTP; stored ones stay circles labelled with Close.
+  The cone title and a footer line stamp the snapshot; the guide adds a *Live option IV on the cone*
+  block. A live tenor within one session of a cone window adds no window, keeping ticks legible.
+- **Limits:** a window ending before the latest stored day skips the live overlay (it would look past
+  the window). A thin strike's LTP can be stale, so check its quote. py5paisa disables TLS certificate
+  checks on its requests; this code resends no login fields and hides the SDK's request-token line.
 
 ## Statistical Comparison
 
@@ -586,5 +612,5 @@ python -m unittest test_option_overlay test_comparison test_japan_macro test_val
 ```
 
 statsmodels/scikit-learn/dtaidistance: comparisons; scipy: fits/pivots; vollib>=1.0.11: IV;
-adjustText: labels; statsmodels: robust smiles; yfinance: Yahoo downloads.
+adjustText: labels; statsmodels: robust smiles; yfinance: Yahoo downloads; py5paisa/pyotp: `--live`.
 Full list: [requirements.txt](requirements.txt).

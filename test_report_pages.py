@@ -99,6 +99,28 @@ class VolatilityGuideTests(unittest.TestCase):
         self.assertIn('27 Oct expiry, 4 sessions: median CE 16%, PE 17% vs 17% realized mean.', body)
         self.assert_no_overlaps(figure)
 
+    def test_guide_explains_live_outliers_without_overlaps(self):
+        as_of, fetched = pd.Timestamp('2026-10-21'), pd.Timestamp('2026-10-22 10:40')
+        stored = pd.DataFrame({'Date': as_of, 'Expiry': pd.Timestamp('2026-10-27'), 'Expiry type': 'Monthly',
+                               'Option type': ['CE', 'PE'], 'IV': [0.16, 0.17], 'RV mean': 0.17,
+                               'Is outlier': True, 'Tenor sessions': 4})
+        live_points = pd.DataFrame({
+            'Date': fetched.normalize(), 'Expiry': pd.Timestamp('2026-11-24'), 'Expiry type': 'Monthly',
+            'Option type': ['CE', 'PE', 'CE', 'PE'], 'Strike Price': [26000.0, 24000.0, 25000.0, 23500.0],
+            'IV': [0.15, 0.21, 0.14, 0.13], 'Smile IV': [0.14, 0.16, 0.14, 0.17], 'MAD score': [3.9, 6.4, 0.2, -4.5],
+            'Is outlier': [True, True, False, True], 'Tenor sessions': 23})
+        profile = self.profile(options={'points': stored, 'as_of': as_of})
+        profile['live_overlay'] = {'points': live_points, 'as_of': fetched.normalize(), 'fetched': fetched,
+                                   'priced_at': fetched, 'expiries': [pd.Timestamp('2026-11-24')],
+                                   'diagnostics': {'estimated_iv': 96}}
+        count, figure, texts, body = self.render(profile)
+        self.assertEqual(count, 8)
+        self.assertIn('Live option IV on the cone', texts)
+        self.assertIn('snapshot of 22 Oct 10:40 IST', body)
+        self.assertIn('24 Nov PE 24000: 21% vs 16% smile, MAD +6.4; 24 Nov PE 23500: 13% vs 17% smile, '
+                      'MAD -4.5; 1 more on the cone.', body)
+        self.assert_no_overlaps(figure)
+
     def test_moment_estimator_guide_stays_off_option_pricing(self):
         count, _, texts, body = self.render(self.profile(estimator='Skew'))
         self.assertNotIn('Putting it together', texts)

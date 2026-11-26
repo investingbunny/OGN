@@ -1,6 +1,9 @@
 """Focused tests for option volume selection, IV diagnostics and chart overlays."""
 
+import contextlib
+import io
 import math
+import os
 import unittest
 import importlib.util
 from pathlib import Path
@@ -10,6 +13,7 @@ from unittest.mock import Mock
 import numpy as np
 import pandas as pd
 
+import live_option_chain as live
 import option_overlay as overlay
 from vollib.black import black
 
@@ -412,6 +416,80 @@ class OptionIntegrationTests(unittest.TestCase):
         self.assertEqual(parameters['option_rate'], 0.055)
         self.assertEqual(parameters['option_iv_unit'], 'decimal')
         self.assertIsNone(parameters['days'])
+        self.assertFalse(parameters['live'])
+
+    def test_cli_live_logs_in_before_the_report_and_stops_when_unconfigured(self):
+        arguments = ['Option-OGN.py', '--pdf', 'NIFTY', '--live']
+        with patch.object(self.module.sys, 'argv', arguments), patch.object(self.module, 'FnOAnalysis') as analyse, \
+                patch.object(live, 'connect') as connect:
+            self.module.main()
+        connect.assert_called_once_with()
+        self.assertTrue(analyse.call_args.kwargs['live'])
+        output = io.StringIO()
+        with patch.object(self.module.sys, 'argv', arguments), patch.object(self.module, 'FnOAnalysis') as analyse, \
+                patch.object(live, 'connect', side_effect=live.LiveSnapshotError('Fill in the 5paisa PIN')), \
+                contextlib.redirect_stdout(output):
+            self.module.main()
+        analyse.assert_not_called()
+        self.assertIn('[error] Fill in the 5paisa PIN', output.getvalue())
+
+    def test_cone_overlays_live_outliers_beside_stored_ones(self):
+        as_of, fetched = pd.Timestamp('2026-09-01'), pd.Timestamp('2026-09-02 11:05')
+        monthly = {'Expiry': pd.Timestamp('2026-09-29'), 'Expiry type': 'Monthly'}
+        stored = pd.DataFrame([{**monthly, 'Date': as_of, 'Strike Price': 24500, 'Option type': 'CE',
+                                'IV': 0.35, 'Close': 123.45, 'Is outlier': True, 'Tenor sessions': 20}])
+        live_points = pd.DataFrame([
+            {**monthly, 'Date': fetched.normalize(), 'Strike Price': 25000, 'Option type': 'PE', 'IV': 0.40,
+             'Close': 67.8, 'Is outlier': True, 'Tenor sessions': 19},
+            {**monthly, 'Date': fetched.normalize(), 'Strike Price': 24000, 'Option type': 'CE', 'IV': 0.20,
+             'Close': 300.0, 'Is outlier': False, 'Tenor sessions': 19}])
+        profile = self.module.compute_volatility_profile(self.prices())
+        profile['option_overlay'] = {'points': stored, 'as_of': as_of, 'rate': 0.065}
+        profile['live_overlay'] = {'points': live_points, 'as_of': fetched.normalize(), 'fetched': fetched,
+                                   'priced_at': fetched, 'expiries': [monthly['Expiry']],
+                                   'diagnostics': {'estimated_iv': 120}}
+        document = Mock()
+        self.module.plot_volatility(profile, 'NIFTY', pdf_pages=document)
+        figure = document.savefig.call_args.args[0]
+        axes = figure.axes[0]
+        self.assertEqual(axes.get_title(), 'Volatility Cone + Option IV | 01 Sep 2026 + live 02 Sep 11:05 IST')
+        self.assertCountEqual([text.get_text() for text in axes.texts],
+                              ['(24500, 29 Sep)\nClose: 123.45', '(25000, 29 Sep)\nLTP: 67.80'])
+        offsets = {item.get_label(): item.get_offsets().tolist() for item in axes.collections}
+        self.assertEqual(offsets, {'CE IV': [[20, 0.35]], 'PE IV (live)': [[19, 0.40]],
+                                   'Smile MAD outlier': [[20, 0.35]], 'Live Smile MAD outlier': [[19, 0.40]]})
+        note = next(text for text in figure.texts if text.get_text().startswith('Live: 5paisa snapshot'))
+        self.assertIn('02 Sep 2026 11:05 IST - 1 Smile MAD outlier (diamonds', note.get_text())
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        box = note.get_window_extent(renderer)
+        others = [text.get_window_extent(renderer) for text in figure.texts if text is not note and text.get_text()]
+        others += [panel.get_tightbbox(renderer) for panel in figure.axes]
+        self.assertLessEqual(box.x1, figure.bbox.x1)
+        self.assertFalse(any(box.overlaps(other) for other in others))
+
+    def test_live_overlay_prices_the_snapshot_and_widens_the_cone(self):
+        now = pd.Timestamp('2026-09-02 11:05')
+        near, far = pd.Timestamp('2026-09-29'), pd.Timestamp('2026-10-27')
+        rows = []
+        for expiry, bump in [(near, None), (far, ('PE', 24300.0))]:
+            reply = LiveSnapshotTests.chain_reply(expiry, now, forward=24600.0, bump=bump)
+            rows.append(live._chain_rows(pd.DataFrame(reply['Options']), 'NIFTY', now.normalize(), expiry, 24580.0)[0])
+        snapshot = {'chain': pd.concat(rows, ignore_index=True), 'session': now.normalize(), 'fetched': now,
+                    'priced_at': now, 'expiries': [near, far], 'spot': 24580.0, 'lot sizes': {near: 65, far: 65}}
+        with patch.object(live, 'snapshot', return_value=snapshot) as take, \
+                patch.object(self.module, 'REPORT_SECTIONS', ['volatility']), \
+                patch.object(self.module, 'plot_volatility'):
+            profile = self.module.volatility_analysis(self.prices(), 'NIFTY', live=True)
+        take.assert_called_once_with('NIFTY', spot=float(self.prices()['Close'].iloc[-1]))
+        self.assertIsNone(profile['option_overlay'])
+        shown = self.module._cone_option_points(profile['live_overlay'])
+        self.assertEqual(shown[['Expiry', 'Option type', 'Strike Price']].values.tolist(), [[far, 'PE', 24300.0]])
+        self.assertAlmostEqual(shown['IV'].iloc[0], LiveSnapshotTests.smile(24300.0, 24600.0) + 0.05, places=6)
+        self.assertGreaterEqual(shown['MAD score'].iloc[0], overlay.OPTION_MAD_THRESHOLD)
+        # Weekday tenors 19 (next to the 20-day window, so skipped) and 39 (added to the cone)
+        self.assertIn(39, profile['cone']['windows'])
+        self.assertNotIn(19, profile['cone']['windows'])
 
 
 class WeeklyExpiryTests(unittest.TestCase):
@@ -550,6 +628,129 @@ class WeeklyExpiryTests(unittest.TestCase):
             self.assertLessEqual(box.x1, figure.bbox.x1)
             self.assertFalse(any(box.overlaps(other) for other in others + boxes[position + 1:]))
         self.assertFalse(plt.get_fignums())
+
+
+class FakeFivePaisa:
+    """Stands in for py5paisa.FivePaisaClient: replays replies and records each request's body."""
+
+    def __init__(self, expiries, chain):
+            self.payload = {'head': {'key': 'user-key'}, 'body': {'PIN': '123456', 'TOTP': '654321'}}
+            self.expiries, self.chain, self.requests = expiries, chain, []
+
+    def get_expiry(self, exchange, symbol):
+            self.requests.append(('get_expiry', exchange, symbol, dict(self.payload['body'])))
+            return self.expiries
+
+    def get_option_chain(self, exchange, symbol, expiry_ms):
+            self.requests.append(('get_option_chain', exchange, symbol, expiry_ms, dict(self.payload['body'])))
+            return self.chain(expiry_ms)
+
+
+class LiveSnapshotTests(unittest.TestCase):
+    """5paisa replies shaped as quoted in OpenApi-5p/py5paisa issues #154 and #288."""
+    NOW = pd.Timestamp('2026-11-26 10:15')  # Thursday, in session (IST)
+    LISTED = {'2026-11-24': '14:30', '2026-12-01': '14:30', '2026-12-29': '14:30',
+                  '2027-01-25': '00:00', '2027-02-23': '14:30', '2027-03-30': '14:30'}
+
+    @staticmethod
+    def epoch_ms(ist):
+            return int((pd.Timestamp(ist) - live.IST).value // 1_000_000)
+
+    @staticmethod
+    def smile(strike, forward):
+            return 0.14 + 1.5 * np.log(strike / forward) ** 2 + 0.0005 * np.sin(strike / 100)
+
+    @classmethod
+    def chain_reply(cls, expiry, priced_at, forward=26200.0, lot=65, bump=None):
+            """Black-76 prices off one smile; Volume and OpenInterest in units (lots x lot size)."""
+            lifetime = (pd.Timestamp(expiry) + overlay.OPTION_EXPIRY_CLOSE - priced_at).total_seconds() / (365 * 86400)
+            rows = []
+            for index, strike in enumerate(forward + np.arange(-1000.0, 1100.0, 100.0)):
+                for side, flag in [('CE', 'c'), ('PE', 'p')]:
+                    implied = cls.smile(strike, forward) + (0.05 if bump == (side, strike) else 0.0)
+                    rows.append({'CPType': side, 'ChangeInOI': 0, 'EXCH': 'N', 'ExchType': 'D',
+                                 'LastRate': black(flag, forward, strike, lifetime, 0.065, implied),
+                                 'Name': f'NIFTY {pd.Timestamp(expiry):%d %b %Y} {side} {strike:.2f}',
+                                 'OpenInterest': lot * (2000 + 7 * index), 'Prev_OI': 0, 'PreviousClose': 0,
+                                 'ScripCode': 40000 + index, 'StrikeRate': strike,
+                                 'Volume': lot * (101 + 3 * index + (side == 'PE'))})
+            return {'Message': 'Success', 'Options': rows, 'Status': 0}
+
+    def test_snapshot_fetches_the_next_monthly_chains_in_contracts(self):
+            expiries = {'Expiry': [{'Exch': 'N', 'ExchType': 'D', 'ExpiryDate': f'/Date({self.epoch_ms(f"{day} {clock}")}+0530)/'}
+                                   for day, clock in self.LISTED.items()],
+                        'Message': 'Success', 'Status': 0,
+                        'lastrate': [{'Exch': 'N', 'ExchType': 'C', 'LTP': 26150.5, 'ScripCode': 999920000}]}
+            client = FakeFivePaisa(expiries, lambda ms: self.chain_reply(
+                (pd.Timestamp(ms, unit='ms') + live.IST).normalize(), self.NOW))
+            with patch.object(live, 'now_ist', return_value=self.NOW), \
+                    patch.object(live, '_last_request', float('-inf')), patch.object(live.time, 'sleep') as sleep:
+                snap = live.snapshot('nifty', spot=25000.0, client=client)
+            # Past (24 Nov) and weekly (1 Dec) expiries are skipped; 25 Jan is stamped 00:00 IST, i.e. 24 Jan in UTC
+            self.assertEqual([f'{expiry:%d %b %Y}' for expiry in snap['expiries']],
+                             ['29 Dec 2026', '25 Jan 2027', '23 Feb 2027'])
+            self.assertEqual([request[:3] for request in client.requests],
+                             [('get_expiry', 'N', 'NIFTY')] + [('get_option_chain', 'N', 'NIFTY')] * 3)
+            self.assertEqual(client.requests[2][3], self.epoch_ms('2027-01-25 00:00'))
+            self.assertEqual([request[-1] for request in client.requests], [{}] * 4)  # no login fields resent
+            self.assertEqual(sleep.call_count, 3)
+            self.assertTrue(all(1.1 < call.args[0] <= 60 / live.REQUESTS_PER_MINUTE for call in sleep.call_args_list))
+            self.assertEqual((snap['session'], snap['priced_at'], snap['spot']), (self.NOW.normalize(), self.NOW, 26150.5))
+            self.assertEqual(snap['lot sizes'], dict.fromkeys(snap['expiries'], 65))
+            chain = snap['chain']
+            self.assertEqual(len(chain), 3 * 42)
+            self.assertEqual(chain[['Contracts', 'Open Int']].iloc[:2].values.tolist(), [[101, 2000], [102, 2000]])
+            self.assertTrue(chain['Underlying Price'].eq(26150.5).all())
+
+    def test_settings_name_each_placeholder_and_prefer_environment_values(self):
+            names = [*live.FIVEPAISA_CREDENTIALS, *live.FIVEPAISA_LOGIN]
+            with patch.dict(os.environ, {f'FIVEPAISA_{name}': '' for name in names}):
+                with self.assertRaises(live.LiveSnapshotError) as missing:
+                    live.connect()
+            for name in names:
+                self.assertIn(name, str(missing.exception))
+            with patch.dict(os.environ, {f'FIVEPAISA_{name}': f'my-{name}' for name in names}):
+                credentials, login = live.settings()
+            self.assertEqual(credentials, {name: f'my-{name}' for name in live.FIVEPAISA_CREDENTIALS})
+            self.assertEqual(login['TOTP_SECRET'], 'my-TOTP_SECRET')
+
+    @unittest.skipUnless(importlib.util.find_spec('py5paisa') and importlib.util.find_spec('pyotp'),
+                             'py5paisa and pyotp are optional (--live only)')
+    def test_connect_logs_in_once_with_a_short_issued_totp_secret(self):
+            logins = []
+
+            class Client:
+                def __init__(self, cred):
+                    self.cred = cred
+
+                def get_totp_session(self, client_code, totp, pin):
+                    logins.append((client_code, totp, pin))
+                    return 'access-token'
+
+            names = [*live.FIVEPAISA_CREDENTIALS, *live.FIVEPAISA_LOGIN]
+            settings = {f'FIVEPAISA_{name}': f'my-{name}' for name in names}
+            settings['FIVEPAISA_TOTP_SECRET'] = 'JBSWY3DPEHPK3PXP'  # 80 bits, under pyotp's 112-bit default minimum
+            with patch.dict(os.environ, settings), patch('py5paisa.FivePaisaClient', Client), \
+                    patch.object(live, '_client', None), patch.object(live.time, 'sleep'):
+                client = live.connect()
+                self.assertIs(live.connect(), client)
+            self.assertEqual(sorted(client.cred), sorted(live.FIVEPAISA_CREDENTIALS))
+            self.assertEqual(len(logins), 1)
+            self.assertEqual((logins[0][0], logins[0][2]), ('my-CLIENT_CODE', 'my-PIN'))
+            self.assertRegex(logins[0][1], r'^\d{6}$')
+
+    def test_live_iv_runs_from_the_pricing_moment_to_the_expiry_close(self):
+            for fetched, priced in [('2026-11-26 10:15', '2026-11-26 10:15'), ('2026-11-26 18:40', '2026-11-26 15:30'),
+                                    ('2026-11-28 11:00', '2026-11-27 15:30'), ('2026-11-30 08:55', '2026-11-27 15:30')]:
+                self.assertEqual(live.pricing_moment(pd.Timestamp(fetched)), pd.Timestamp(priced))
+            expiry = pd.Timestamp('2026-12-01')
+            reply = self.chain_reply(expiry, self.NOW)
+            rows, _ = live._chain_rows(pd.DataFrame(reply['Options']), 'NIFTY', self.NOW.normalize(), expiry, 26150.5)
+            exact, diagnostics = overlay.prepare_option_iv(rows, 'NIFTY', [self.NOW.normalize()], priced_at=self.NOW)
+            self.assertEqual(diagnostics['parity_iv'], len(rows))
+            np.testing.assert_allclose(exact['IV'], self.smile(exact['Strike Price'], 26200.0), atol=1e-6)
+            whole_days, _ = overlay.prepare_option_iv(rows, 'NIFTY', [self.NOW.normalize()])
+            self.assertTrue((whole_days['IV'] > exact['IV'] + 0.001).all())
 
 
 if __name__ == '__main__':
