@@ -25,17 +25,17 @@ import option_overlay
 # (e.g. FIVEPAISA_APP_NAME, FIVEPAISA_TOTP_SECRET) overrides each value below. Prefer those:
 # this file is tracked by git, so real values typed here could be committed.
 FIVEPAISA_CREDENTIALS = {
-    'APP_NAME': 'YOUR_APP_NAME',              # FILL IN: App name
-    'APP_SOURCE': 'YOUR_APP_SOURCE',          # FILL IN: App source
-    'USER_ID': 'YOUR_USER_ID',                # FILL IN: API user ID
-    'PASSWORD': 'YOUR_API_PASSWORD',          # FILL IN: API password
-    'USER_KEY': 'YOUR_USER_KEY',              # FILL IN: User key (the API key)
-    'ENCRYPTION_KEY': 'YOUR_ENCRYPTION_KEY',  # FILL IN: Encryption key
+    'APP_NAME': 'FIVEPAISA__APP_NAME',              # FILL IN: App name
+    'APP_SOURCE': 'FIVEPAISA__APP_SOURCE',          # FILL IN: App source
+    'USER_ID': 'FIVEPAISA__USER_ID',                # FILL IN: API user ID
+    'PASSWORD': 'FIVEPAISA__PASSWORD',          # FILL IN: API password
+    'USER_KEY': 'FIVEPAISA__USER_KEY',              # FILL IN: User key (the API key)
+    'ENCRYPTION_KEY': 'FIVEPAISA__ENCRYPTION_KEY',  # FILL IN: Encryption key
 }
 FIVEPAISA_LOGIN = {
-    'CLIENT_CODE': 'YOUR_CLIENT_CODE',        # FILL IN: 8-digit 5paisa client code
-    'PIN': 'YOUR_PIN',                        # FILL IN: login PIN
-    'TOTP_SECRET': 'YOUR_TOTP_SECRET',        # FILL IN: authenticator (TOTP) secret
+    'CLIENT_CODE': 'FIVEPAISA__CLIENT_CODE',        # FILL IN: 8-digit 5paisa client code
+    'PIN': 'FIVEPAISA__PIN',                        # FILL IN: login PIN
+    'TOTP_SECRET': 'FIVEPAISA__TOTP_SECRET',        # FILL IN: authenticator (TOTP) secret
 }
 
 LIVE_EXCHANGES = {'SENSEX': 'B', 'BANKEX': 'B'}  # 5paisa exchange per symbol; the rest are NSE ('N')
