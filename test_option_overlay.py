@@ -714,6 +714,15 @@ class LiveSnapshotTests(unittest.TestCase):
             self.assertEqual(credentials, {name: f'my-{name}' for name in live.FIVEPAISA_CREDENTIALS})
             self.assertEqual(login['TOTP_SECRET'], 'my-TOTP_SECRET')
 
+    def test_settings_reject_placeholder_totp_values_from_environment(self):
+            names = [*live.FIVEPAISA_CREDENTIALS, *live.FIVEPAISA_LOGIN]
+            settings = {f'FIVEPAISA_{name}': f'my-{name}' for name in names}
+            for secret in ('YOUR_TOTP_SECRET', 'FIVEPAISA_TOTP_SECRET', 'FIVEPAISA__TOTP_SECRET'):
+                settings['FIVEPAISA_TOTP_SECRET'] = secret
+                with self.subTest(secret=secret), patch.dict(os.environ, settings):
+                    with self.assertRaisesRegex(live.LiveSnapshotError, 'Fill in the 5paisa TOTP_SECRET'):
+                        live.settings()
+
     @unittest.skipUnless(importlib.util.find_spec('py5paisa') and importlib.util.find_spec('pyotp'),
                              'py5paisa and pyotp are optional (--live only)')
     def test_connect_logs_in_once_with_a_short_issued_totp_secret(self):
@@ -738,6 +747,23 @@ class LiveSnapshotTests(unittest.TestCase):
             self.assertEqual(len(logins), 1)
             self.assertEqual((logins[0][0], logins[0][2]), ('my-CLIENT_CODE', 'my-PIN'))
             self.assertRegex(logins[0][1], r'^\d{6}$')
+
+    @unittest.skipUnless(importlib.util.find_spec('py5paisa') and importlib.util.find_spec('pyotp'),
+                             'py5paisa and pyotp are optional (--live only)')
+    def test_connect_invalid_totp_explains_setup_key_without_echoing_it(self):
+            names = [*live.FIVEPAISA_CREDENTIALS, *live.FIVEPAISA_LOGIN]
+            settings = {f'FIVEPAISA_{name}': f'my-{name}' for name in names}
+            secret = 'not-a-base32-secret'
+            settings['FIVEPAISA_TOTP_SECRET'] = secret
+            with patch.dict(os.environ, settings), patch('py5paisa.FivePaisaClient') as client, \
+                    patch.object(live, '_client', None), patch.object(live, '_filter_sdk_log'), \
+                    patch.object(live.time, 'sleep'):
+                with self.assertRaises(live.LiveSnapshotError) as invalid:
+                    live.connect()
+            client.assert_not_called()
+            self.assertIn('FIVEPAISA_TOTP_SECRET', str(invalid.exception))
+            self.assertIn('authenticator setup key', str(invalid.exception))
+            self.assertNotIn(secret, str(invalid.exception))
 
     def test_live_iv_runs_from_the_pricing_moment_to_the_expiry_close(self):
             for fetched, priced in [('2026-11-26 10:15', '2026-11-26 10:15'), ('2026-11-26 18:40', '2026-11-26 15:30'),

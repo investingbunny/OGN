@@ -25,17 +25,17 @@ import option_overlay
 # (e.g. FIVEPAISA_APP_NAME, FIVEPAISA_TOTP_SECRET) overrides each value below. Prefer those:
 # this file is tracked by git, so real values typed here could be committed.
 FIVEPAISA_CREDENTIALS = {
-    'APP_NAME': 'FIVEPAISA__APP_NAME',              # FILL IN: App name
-    'APP_SOURCE': 'FIVEPAISA__APP_SOURCE',          # FILL IN: App source
-    'USER_ID': 'FIVEPAISA__USER_ID',                # FILL IN: API user ID
-    'PASSWORD': 'FIVEPAISA__PASSWORD',          # FILL IN: API password
-    'USER_KEY': 'FIVEPAISA__USER_KEY',              # FILL IN: User key (the API key)
-    'ENCRYPTION_KEY': 'FIVEPAISA__ENCRYPTION_KEY',  # FILL IN: Encryption key
+    'APP_NAME': 'FIVEPAISA_APP_NAME',              # FILL IN: App name
+    'APP_SOURCE': 'FIVEPAISA_APP_SOURCE',          # FILL IN: App source
+    'USER_ID': 'FIVEPAISA_USER_ID',                # FILL IN: API user ID
+    'PASSWORD': 'FIVEPAISA_PASSWORD',          # FILL IN: API password
+    'USER_KEY': 'FIVEPAISA_USER_KEY',              # FILL IN: User key (the API key)
+    'ENCRYPTION_KEY': 'FIVEPAISA_ENCRYPTION_KEY',  # FILL IN: Encryption key
 }
 FIVEPAISA_LOGIN = {
-    'CLIENT_CODE': 'FIVEPAISA__CLIENT_CODE',        # FILL IN: 8-digit 5paisa client code
-    'PIN': 'FIVEPAISA__PIN',                        # FILL IN: login PIN
-    'TOTP_SECRET': 'FIVEPAISA__TOTP_SECRET',        # FILL IN: authenticator (TOTP) secret
+    'CLIENT_CODE': 'FIVEPAISA_CLIENT_CODE',        # FILL IN: 8-digit 5paisa client code
+    'PIN': 'FIVEPAISA_PIN',                        # FILL IN: login PIN
+    'TOTP_SECRET': 'FIVEPAISA_TOTP_SECRET',        # FILL IN: authenticator (TOTP) secret
 }
 
 LIVE_EXCHANGES = {'SENSEX': 'B', 'BANKEX': 'B'}  # 5paisa exchange per symbol; the rest are NSE ('N')
@@ -58,7 +58,8 @@ def settings():
     groups = [{name: os.environ.get(f'FIVEPAISA_{name}', '').strip() or str(value).strip()
                for name, value in group.items()} for group in (FIVEPAISA_CREDENTIALS, FIVEPAISA_LOGIN)]
     missing = [name for group in groups for name, value in group.items()
-               if not value or value.startswith('YOUR_')]
+               if not value or value.startswith('YOUR_')
+               or value in (f'FIVEPAISA_{name}', f'FIVEPAISA__{name}')]
     if missing:
         raise LiveSnapshotError(f"Fill in the 5paisa {', '.join(missing)} at the top of live_option_chain.py, "
                                 'or set them as FIVEPAISA_<NAME> environment variables.')
@@ -97,7 +98,10 @@ def connect():
             time.sleep(remaining)
         code = totp.now()
     except (TypeError, ValueError) as error:
-        raise LiveSnapshotError('TOTP_SECRET is not a valid base32 authenticator secret.') from error
+        raise LiveSnapshotError('TOTP_SECRET is not a valid base32 authenticator secret. '
+                                'Set FIVEPAISA_TOTP_SECRET to the 5paisa authenticator setup key '
+                                '(letters A-Z and digits 2-7, without spaces), not a six-digit OTP, '
+                                'otpauth:// URL or variable name.') from error
     client = FivePaisaClient(cred=credentials)
     if not client.get_totp_session(login['CLIENT_CODE'], code, login['PIN']):
         raise LiveSnapshotError('5paisa login failed (reason above); check CLIENT_CODE, PIN, TOTP_SECRET and USER_KEY.')

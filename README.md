@@ -325,11 +325,22 @@ No market-outlier claim is made.
 `python Option-OGN.py --pdf NIFTY --live` adds, on each volatility cone, the Smile MAD outliers of a
 real-time 5paisa option-chain snapshot, next to the stored end-of-day ones.
 
-- **Setup:** `pip install py5paisa pyotp`, then fill in the `FILL IN` placeholders at the top of
+- **Setup:** `pip install py5paisa pyotp "requests>=2.34.2"`, then fill in the `FILL IN` placeholders at the top of
   [live_option_chain.py](live_option_chain.py): `APP_NAME`, `APP_SOURCE`, `USER_ID`, `PASSWORD`,
   `USER_KEY`, `ENCRYPTION_KEY` (Xstream dashboard), `CLIENT_CODE`, `PIN`, `TOTP_SECRET`. Each can
   instead be an environment variable `FIVEPAISA_<NAME>`, which wins and keeps secrets out of git.
-  Missing values or a failed TOTP login stop the run before any page is drawn; login happens once.
+  The quoted `FIVEPAISA_...` strings in the file are placeholders, not credentials. The script
+  reads process environment variables; it does not automatically load a `.env` file.
+  Missing values, unchanged placeholders or a failed TOTP login stop the run before any page is drawn;
+  login happens once.
+- **TOTP troubleshooting:** `FIVEPAISA_TOTP_SECRET` must be the authenticator setup key issued when
+  enabling 5paisa TOTP: Base32 letters A-Z (case-insensitive) and digits 2-7, without spaces.
+  Do not use the changing six-digit OTP, the name `FIVEPAISA_TOTP_SECRET`, or a full `otpauth://` URL.
+  Enter the key locally and keep it out of source code, logs and shared diagnostics.
+- **Dependency warnings:** a Requests compatibility warning is separate from a TOTP setup error.
+  In the same virtual environment used to run the script, run
+  `python -m pip install --upgrade "requests>=2.34.2"`, then `python -m pip check`.
+  A successful `pip check` alone does not verify Requests' optional character-detector compatibility.
 - **Snapshot:** the next three monthly expiries (`OPTION_MONTHLY_EXPIRIES`), one expiry list plus one
   chain request each, paced to 50 requests/minute (`REQUESTS_PER_MINUTE`). 5paisa quotes `Volume`/`OI`
   in units, so each expiry's lot size is their greatest common divisor and contracts = units / lot.
