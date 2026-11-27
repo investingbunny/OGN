@@ -77,6 +77,7 @@ class VolatilityGuideTests(unittest.TestCase):
         self.assertIn(f"30-day: min {cone['min'][focus] * 100:.0f}%, median {cone['median'][focus] * 100:.0f}%, "
                       f"max {cone['max'][focus] * 100:.0f}%", body)
         self.assertIn(f"Peak {rolling.max() * 100:.0f}% in {rolling.idxmax():%b %Y}", body)
+        self.assertIn('The y-axis is logarithmic, shared with the box plot', body)
         self.assert_no_overlaps(figure)
         self.assertFalse(self.module.plt.get_fignums())
 
@@ -126,6 +127,7 @@ class VolatilityGuideTests(unittest.TestCase):
         self.assertNotIn('Putting it together', texts)
         self.assertNotIn('rich', body)
         self.assertNotIn('option', body.lower())
+        self.assertNotIn('logarithmic', body)
         self.assertEqual(count, len(GUIDE_TITLES) - 1)
 
     def test_volatility_page_points_to_the_guide(self):

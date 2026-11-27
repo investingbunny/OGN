@@ -4,6 +4,7 @@ import contextlib
 import io
 import math
 import os
+import tempfile
 import unittest
 import importlib.util
 from pathlib import Path
@@ -121,6 +122,14 @@ class OptionBenchmarkTests(unittest.TestCase):
         np.testing.assert_allclose(result['RV mean'], [0.15, 0.15, 0.15])
         np.testing.assert_allclose(result['IV minus RV'], [0.15, 0.05, 0.10])
         self.assertEqual(result['RV count'].tolist(), [51, 51, 76])
+
+    def test_percentile_ranks_iv_among_the_same_tenor_readings(self):
+        dates = pd.bdate_range('2024-01-01', periods=100)
+        prices = pd.DataFrame({'Close': np.arange(100)}, index=dates)
+        points = pd.DataFrame({'Date': dates[60], 'Tenor sessions': 10, 'IV': [0.05, 0.25, 0.50]})
+        readings = pd.Series(np.linspace(0.10, 0.40, 40))
+        result = overlay.attach_realized_benchmarks(points, prices, lambda history, window: readings)
+        np.testing.assert_allclose(result['RV percentile'], [0.0, 50.0, 100.0])
 
     def test_too_short_or_expiry_day_baseline_is_unavailable(self):
         dates = pd.bdate_range('2024-01-01', periods=40)
@@ -357,9 +366,115 @@ class OptionIntegrationTests(unittest.TestCase):
         axes = document.savefig.call_args.args[0].axes[0]
         self.assertFalse(axes.collections)
         self.assertFalse(axes.texts)
+        self.assertEqual(len(document.savefig.call_args.args[0].axes), 1)  # no High / Low table either
         self.assertEqual([line.get_label() for line in axes.lines],
                          ['Max', '75th Prctl', 'Median', 'Historical mean', '25th Prctl',
                           'Min', 'Realized (latest)'])
+
+    def test_cone_and_box_share_a_log_axis_fitted_to_the_data(self):
+        as_of = pd.Timestamp('2026-09-02')
+        profile = self.module.compute_volatility_profile(self.prices())
+        lowest, implied = min(profile['cone']['min']), 3 * max(profile['cone']['max'])  # IV above every reading
+        profile['option_overlay'] = {'points': pd.DataFrame([{
+            'Date': as_of, 'Expiry': pd.Timestamp('2026-09-22'), 'Expiry type': 'Monthly', 'Option type': 'CE',
+            'Strike Price': 24500, 'IV': implied, 'Close': 1.0, 'Is outlier': True, 'Tenor sessions': 14}]),
+            'as_of': as_of, 'rate': 0.065}
+        document = Mock()
+        self.module.plot_volatility(profile, 'NIFTY', pdf_pages=document)
+        figure = document.savefig.call_args.args[0]
+        cone_axes = figure.axes[0]
+        box_axes = next(axes for axes in figure.axes if axes.get_title() == 'Distribution by window')
+        low, high = cone_axes.get_ylim()
+        self.assertEqual((cone_axes.get_yscale(), box_axes.get_yscale()), ('log', 'log'))
+        self.assertEqual(box_axes.get_ylim(), (low, high))
+        self.assertTrue(lowest / 2 < low < lowest and implied < high < 2 * implied)
+        ticks = cone_axes.yaxis.get_major_locator()()
+        self.assertGreaterEqual(len(ticks), 4)
+        self.assertTrue(all(low <= tick <= high for tick in ticks))
+        self.assertTrue(all(cone_axes.yaxis.get_major_formatter()(tick, 0).endswith('%') for tick in ticks))
+
+    def test_log_ticks_thin_out_over_wide_ranges_and_fill_in_narrow_ones(self):
+        for limits, expected in [((0.063, 29.1), [0.1, 0.2, 0.5, 1, 2, 5, 10, 20]),
+                                 ((0.039, 2.36), [0.05, 0.1, 0.2, 0.3, 0.5, 1, 2]),
+                                 ((0.075, 0.42), [0.08, 0.1, 0.15, 0.2, 0.3, 0.4])]:
+            with self.subTest(limits=limits):
+                np.testing.assert_allclose(self.module._log_ticks(*limits), expected)
+
+    def test_moments_zero_readings_and_the_switch_keep_a_linear_axis(self):
+        flat = self.prices().assign(Open=lambda frame: frame['Close'], High=lambda frame: frame['Close'],
+                                    Low=lambda frame: frame['Close'])
+        for profile in [self.module.compute_volatility_profile(self.prices(), estimator='Skew'),
+                        self.module.compute_volatility_profile(flat, estimator='Parkinson')]:
+            self.assertIsNone(self.module._volatility_log_limits(profile))
+        profile = self.module.compute_volatility_profile(self.prices())
+        document = Mock()
+        with patch.object(self.module, 'VOLATILITY_LOG_SCALE', False):
+            self.module.plot_volatility(profile, 'NIFTY', pdf_pages=document)
+        self.assertEqual(document.savefig.call_args.args[0].axes[0].get_yscale(), 'linear')
+
+    def test_stock_block_deal_and_bond_rows_leave_one_price_a_day_and_the_overlay(self):
+        prices = self.prices().rename_axis('Date').reset_index().assign(Symbol='ABC', Series='EQ')
+        prices.loc[150, 'Series'] = 'BE'  # Trade-for-trade day: no EQ row
+        equity = pd.concat([prices, prices.iloc[[100]].assign(Series='BL', Close=1.0),
+                            prices.iloc[[200]].assign(Series='N1', Close=1010.0)])
+        with tempfile.TemporaryDirectory() as folder:
+            equity.sample(frac=1, random_state=3).to_parquet(Path(folder) / 'ABC.parquet', index=False)
+            with patch.object(self.module, '_COMP_SOURCES', [('Equity', Path(folder))]), \
+                    patch.object(self.module, 'EQUITY_PROCESSED', Path(folder)):
+                frame, _ = self.module.load_analysis_frame('ABC')
+        self.assertEqual(frame['Date'].tolist(), prices['Date'].tolist())
+        np.testing.assert_allclose(frame['Close'], prices['Close'])
+        chain = pd.concat([OptionSelectionTests().chain().assign(**{'Date': date, 'Option type': side,
+                                                                    'Symbol': 'ABC', 'IV': 20.0})
+                           for date in pd.to_datetime(['2026-09-01', '2026-09-02']) for side in ['CE', 'PE']])
+        with patch.object(self.module, 'load_derivatives', return_value=chain):
+            options = self.module.build_volatility_option_overlay(frame.set_index('Date'), 'ABC', 'YangZhang',
+                                                                  date_count=2)
+        self.assertIsNotNone(options)
+        self.assertTrue(options['points']['RV count'].ge(30).all())
+
+    def test_cone_table_lists_outliers_outside_the_band_most_extreme_first(self):
+        as_of, fetched = pd.Timestamp('2026-09-01'), pd.Timestamp('2026-09-02 11:05')
+        monthly = {'Expiry': pd.Timestamp('2026-09-29'), 'Expiry type': 'Monthly', 'Is outlier': True}
+        stored = pd.DataFrame([
+            {**monthly, 'Date': as_of, 'Option type': side, 'Strike Price': strike, 'IV': iv, 'Close': close,
+             'Tenor sessions': 20, 'RV percentile': rank}
+            for side, strike, iv, close, rank in [
+                ('CE', 24500, 0.35, 123.45, 91.6), ('PE', 23000, 0.09, 4.5, 3.2), ('PE', 25500, 0.20, 1.0, 50.0),
+                ('CE', 26000, 0.30, 2.0, 99.7), ('CE', 25000, 0.25, 9.0, 75.3), ('CE', 22000, 0.10, 2500.0, np.nan)]])
+        live_points = pd.DataFrame([{**monthly, 'Date': fetched.normalize(), 'Option type': 'PE',
+                                     'Strike Price': 24000, 'IV': 0.08, 'Close': 67.8, 'Tenor sessions': 19,
+                                     'RV percentile': 0.4}])
+        profile = self.module.compute_volatility_profile(self.prices())
+        profile['option_overlay'] = {'points': stored, 'as_of': as_of, 'rate': 0.065}
+        profile['live_overlay'] = {'points': live_points, 'as_of': fetched.normalize(), 'fetched': fetched,
+                                   'priced_at': fetched, 'expiries': [monthly['Expiry']],
+                                   'diagnostics': {'estimated_iv': 120}}
+        document = Mock()
+        self.module.plot_volatility(profile, 'ABC', pdf_pages=document)
+        figure = document.savefig.call_args.args[0]
+        table_axes = next(axes for axes in figure.axes if axes.get_title() == 'Smile MAD outliers vs the cone')
+        cells = table_axes.tables[0].get_celld()
+        column = lambda number: [(cells[row, number].get_text().get_text(), cells[row, number].get_text().get_color())
+                                 for row in range(1, 6)]
+        green, red, blank = overlay.OPTION_COLOURS['CE'], overlay.OPTION_COLOURS['PE'], ('', '#777777')
+        self.assertEqual([cells[0, number].get_text().get_text() for number in (0, 1)], ['High', 'Low'])
+        self.assertEqual(column(0), [('(26000, Close 2.00, 29 Sep, 100th)', green),
+                                     ('(24500, Close 123.45, 29 Sep, 92nd)', green)] + [blank] * 3)
+        self.assertEqual(column(1), [('(24000, LTP 67.80, 29 Sep, 0th)', red),
+                                     ('(23000, Close 4.50, 29 Sep, 3rd)', red)] + [blank] * 3)
+        rolling = next(axes for axes in figure.axes if axes.get_title().startswith('Rolling'))
+        self.assertLess(rolling.get_position().x1, table_axes.get_position().x0)
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        caption = next(text for text in figure.texts if text.get_text().startswith('Each cell:'))
+        table_box, caption_box = table_axes.get_tightbbox(renderer), caption.get_window_extent(renderer)
+        others = [panel.get_tightbbox(renderer) for panel in figure.axes if panel is not table_axes]
+        others += [text.get_window_extent(renderer) for text in figure.texts if text is not caption and text.get_text()]
+        self.assertFalse(table_box.overlaps(caption_box))
+        for box in (table_box, caption_box):
+            self.assertFalse(any(box.overlaps(other) for other in others))
+        self.assertLessEqual(caption_box.x1, figure.bbox.x1)
 
     def test_loader_uses_all_expiries_and_attaches_historical_benchmarks(self):
         fixture = OptionSelectionTests()

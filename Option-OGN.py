@@ -65,7 +65,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.dates import date2num, AutoDateLocator, ConciseDateFormatter
-from matplotlib.ticker import FixedLocator, FuncFormatter
+from matplotlib.ticker import FixedLocator, FuncFormatter, NullFormatter
 import mplfinance as mpf
 import pandas as pd
 import numpy as np
@@ -276,6 +276,11 @@ RANGE_ESTIMATORS = {'GarmanKlass', 'Parkinson', 'RogersSatchell'}
 VOLATILITY_WINDOWS = [3, 5, 10, 20, 30, 60, 90]  # Cone x-axis
 VOLATILITY_WINDOW = 30                            # Rolling / histogram window
 VOLATILITY_QUANTILES = [0.25, 0.75]
+CONE_EXTREME_ROWS = 5  # High / Low table rows: cone outliers above the upper / below the lower quantile
+VOLATILITY_LOG_SCALE = True  # Cone and box plot share a data-fitted log y-axis; False keeps them linear
+# Log-axis tick multiples per decade, sparse to dense; the axis uses the set nearest LOG_TICK_TARGET ticks.
+LOG_TICK_STEPS = [(1,), (1, 2, 5), (1, 2, 3, 5), (1, 1.5, 2, 3, 4, 5, 6, 8), (1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8)]
+LOG_TICK_TARGET = 7
 
 
 # ---------------------------------------------------------------------------
@@ -2676,6 +2681,12 @@ _COMP_SOURCES = [
     ("WDM", WDM_PROCESSED),
 ]
 
+# NSE lists a company's block deals (BL) and bonds (N1, ...) under its own symbol, so a stored
+# equity file can hold several rows on one date. These series carry the share price, preferred
+# in this order: EQ, then trade-for-trade BE and BZ (a stock moved there has no EQ row that day),
+# then the SME platform's SM and ST.
+EQUITY_PRICE_SERIES = ('EQ', 'BE', 'BZ', 'SM', 'ST')
+
 # First match wins when reducing a source frame to one comparable number.
 _COMP_VALUE_COLUMNS = [
     'Close', 'Value', 'Settle Price', 'PE', 'Daily Volatility',
@@ -2906,14 +2917,38 @@ def _comp_to_daily_series(df, label):
     return series, column
 
 
+def _equity_price_rows(frame):
+    """One share-price row per date of a stored equity file, by EQUITY_PRICE_SERIES preference.
+
+    Rows of other series (block deals, bonds) are dropped. A frame without a Series column,
+    or without any of those series, is returned unchanged.
+    """
+    if not {'Date', 'Series'}.issubset(frame.columns):
+        return frame
+    rank = frame['Series'].astype(str).str.strip().str.upper().map(
+        {series: position for position, series in enumerate(EQUITY_PRICE_SERIES)})
+    if rank.isna().all():
+        return frame
+    # The preferred series sorts last within its date; among equal ones, the last stored row stays.
+    return (frame.assign(_rank=rank.to_numpy())[rank.notna().to_numpy()]
+            .sort_values(['Date', '_rank'], ascending=[True, False], kind='stable')
+            .drop_duplicates('Date', keep='last').drop(columns='_rank').reset_index(drop=True))
+
+
 def _comp_load_symbol(symbol):
-    """Locate `symbol` in any processed directory. Returns (df, source)."""
+    """Locate `symbol` in any processed directory. Returns (df, source).
+
+    Equity files come back with one share-price row per date (_equity_price_rows).
+    """
     for source, directory in _COMP_SOURCES:
         if (directory / f"{symbol}.parquet").exists():
             if directory == DERIVATIVES_PROCESSED:
                 # The loader maps UDiFF instrument codes, so futures stay detectable.
                 return load_derivatives(symbol), source
-            return _load_parquet(directory, symbol), source
+            frame = _load_parquet(directory, symbol)
+            if directory == EQUITY_PROCESSED:
+                frame = _equity_price_rows(frame)
+            return frame, source
     return None, None
 
 
@@ -3799,6 +3834,43 @@ def _volatility_formatter(profile):
     return lambda x: f"{x * 100:.0f}%"
 
 
+def _volatility_log_limits(profile, implied=()):
+    """(low, high) for a log y-axis holding every cone value and the plotted IVs, or None for linear.
+
+    Moments (Skew, Kurtosis) and readings at or below zero, such as range estimators on flat
+    bars, stay linear. The limits pad the data by 8% of the decades it spans (at least 0.05).
+    """
+    if not VOLATILITY_LOG_SCALE or profile['is_moment']:
+        return None
+    cone = profile['cone']
+    values = np.concatenate([np.asarray(cone[key], dtype=float) for key in
+                             ('max', 'top_q', 'median', 'mean', 'bottom_q', 'min', 'realized')]
+                            + [np.asarray(implied, dtype=float)])
+    values = values[np.isfinite(values)]
+    if not len(values) or values.min() <= 0:
+        return None
+    low, high = np.log10(values.min()), np.log10(values.max())
+    pad = max(0.08 * (high - low), 0.05)
+    return 10 ** (low - pad), 10 ** (high + pad)
+
+
+def _log_ticks(low, high):
+    """Ticks between low and high from the LOG_TICK_STEPS set giving closest to LOG_TICK_TARGET ticks."""
+    powers = range(math.floor(math.log10(low)), math.ceil(math.log10(high)) + 1)
+    candidates = [[step * 10.0 ** power for power in powers for step in steps if low <= step * 10.0 ** power <= high]
+                  for steps in LOG_TICK_STEPS]
+    return min(candidates, key=lambda ticks: abs(len(ticks) - LOG_TICK_TARGET))
+
+
+def _set_log_volatility_axis(axes, limits):
+    """Log y-axis over `limits`, with percent ticks spaced for the decades it spans."""
+    axes.set_yscale('log')
+    axes.set_ylim(*limits)
+    axes.yaxis.set_major_locator(FixedLocator(_log_ticks(*limits)))
+    axes.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f'{value * 100:g}%'))
+    axes.yaxis.set_minor_formatter(NullFormatter())
+
+
 def _percentile_rank(series, value):
     """Share of readings at or below `value`, in percent."""
     series = pd.Series(series).dropna()
@@ -3852,6 +3924,65 @@ def _live_note(live):
             'expiries; Black-76 on put-call-parity forwards from last-traded prices, tenor to 15:30 IST on expiry day.')
 
 
+def _cone_outliers(profile):
+    """Smile MAD outliers drawn on the cone: the stored ones (Live False), then the live ones (Live True)."""
+    frames = [points.assign(Live=flag) for points, flag in [
+        (_cone_option_points(profile.get('option_overlay')), False),
+        (_cone_option_points(profile.get('live_overlay')), True)] if not points.empty]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _cone_extremes(shown, quantiles, rows=CONE_EXTREME_ROWS):
+    """(high, low): cone outliers whose RV percentile is above the upper / below the lower quantile.
+
+    High runs from the highest percentile down, Low from the lowest up. Both compare the whole
+    percentile the table prints; outliers without a realized benchmark have none and are left out.
+    """
+    lower, upper = (quantile * 100 for quantile in quantiles)
+    ranked = shown.assign(Percentile=pd.to_numeric(shown.get('RV percentile', np.nan), errors='coerce'))
+    printed = ranked['Percentile'].round()
+    high = ranked[printed > upper].sort_values(['Percentile', 'IV'], ascending=False, kind='stable')
+    low = ranked[printed < lower].sort_values(['Percentile', 'IV'], kind='stable')
+    return high.head(rows), low.head(rows)
+
+
+def _cone_extreme_text(row):
+    """'(strike, price, expiry, percentile)' for one cone outlier; the price is its Close, or LTP when live."""
+    kind, price = option_overlay.option_quote(row)
+    expiry = pd.Timestamp(row['Expiry'])
+    return (f"({format(float(row['Strike Price']), 'g')}, {kind} {price}, "
+            f"{expiry.day} {expiry:%b}, {_ordinal(row['Percentile'])})")
+
+
+def _plot_cone_extremes(figure, shown, quantiles):
+    """High / Low table of the cone's outliers, beside the rolling chart; CE green, PE red."""
+    lower, upper = (round(quantile * 100) for quantile in quantiles)
+    columns = []
+    for chosen, empty in zip(_cone_extremes(shown, quantiles), [f'None above the {_ordinal(upper)} percentile',
+                                                                 f'None below the {_ordinal(lower)} percentile']):
+        cells = [(_cone_extreme_text(row), option_overlay.OPTION_COLOURS[row['Option type']])
+                 for _, row in chosen.iterrows()] or [(empty, '#777777')]
+        columns.append(cells + [('', '#777777')] * (CONE_EXTREME_ROWS - len(cells)))
+    axes = figure.add_axes((0.65, 0.31, 0.30, 0.17))
+    axes.axis('off')
+    table = axes.table(cellText=[[text for text, _ in row] for row in zip(*columns)],
+                       colLabels=['High', 'Low'], cellLoc='center', bbox=(0, 0, 1, 1))
+    table.auto_set_font_size(False)
+    table.set_fontsize(13)
+    for (row, column), cell in table.get_celld().items():
+        cell.set_edgecolor('#cccccc')
+        if row == 0:
+            cell.set_facecolor('#4472c4')
+            cell.set_text_props(color='white', fontweight='bold')
+        else:
+            cell.get_text().set_color(columns[column][row - 1][1])
+    axes.set_title('Smile MAD outliers vs the cone', fontsize=20, fontweight='bold', pad=8)
+    figure.text(0.65, 0.297, textwrap.fill(
+        'Each cell: (strike, price, expiry, percentile), where the percentile ranks the IV among realized '
+        f'volatility at the same tenor. High: above the {_ordinal(upper)}, highest first; Low: below the '
+        f'{_ordinal(lower)}, lowest first.', 125), fontsize=11, color='#555555', va='top')
+
+
 def plot_volatility(profile, ticker, pdf_pages=None):
     """Render the volatility page: cone, box, rolling series and distribution."""
     cone = profile['cone']
@@ -3869,6 +4000,15 @@ def plot_volatility(profile, ticker, pdf_pages=None):
         fontsize=32, fontweight='bold', y=0.975)
 
     has = lambda name: name in VOLATILITY_PANELS
+    shown = _cone_outliers(profile) if has('cone') else pd.DataFrame()
+    log_limits = _volatility_log_limits(profile, shown['IV'] if not shown.empty else ())
+
+    def scale(axes):
+        """The cone and box plot share one y-axis: fitted log when the data allows, else linear."""
+        if log_limits:
+            _set_log_volatility_axis(axes, log_limits)
+        else:
+            axes.yaxis.set_major_formatter(FuncFormatter(lambda v, _: label(v)))
 
     # --- Cone: estimator distribution across rolling windows ---
     if has('cone'):
@@ -3887,22 +4027,19 @@ def plot_volatility(profile, ticker, pdf_pages=None):
         ax_cone.set_xticks(cone['windows'])
         ax_cone.set_xlim(cone['windows'][0] - 3, cone['windows'][-1] + 3)
         ax_cone.set_xlabel('Rolling window (days)', fontsize=15)
-        ax_cone.yaxis.set_major_formatter(FuncFormatter(lambda v, _: label(v)))
+        scale(ax_cone)  # Before the option labels, which are packed on the final scale
         ax_cone.grid(True, axis='y', alpha=0.4)
         ax_cone.tick_params(labelsize=13)
         ax_cone.legend(fontsize=13)
         ax_cone.set_title('Volatility Cone', fontsize=20, fontweight='bold', pad=8)
-        stored = _cone_option_points(options)
-        live_points = _cone_option_points(live)
-        if not (stored.empty and live_points.empty):
-            shown = pd.concat([points.assign(Live=flag) for points, flag in [(stored, False), (live_points, True)]
-                               if not points.empty], ignore_index=True)
-            option_overlay.plot_option_markers(ax_cone, shown, 'Tenor sessions', fontsize=9)
+        if not shown.empty:
+            option_overlay.plot_option_markers(ax_cone, shown, 'Tenor sessions', fontsize=9, legend_columns=2)
             ax_cone.set_xlabel('Lookback / expiry tenor (weekday sessions)', fontsize=13)
-            stamps = ([f"{options['as_of']:%d %b %Y}"] if not stored.empty else []) + (
-                [f"live {live['fetched']:%d %b %H:%M} IST"] if not live_points.empty else [])
+            stamps = ([f"{options['as_of']:%d %b %Y}"] if (~shown['Live']).any() else []) + (
+                [f"live {live['fetched']:%d %b %H:%M} IST"] if shown['Live'].any() else [])
             ax_cone.set_title(f"Volatility Cone + Option IV | {' + '.join(stamps)}",
                               fontsize=18, fontweight='bold', pad=8)
+            _plot_cone_extremes(figure, shown, profile['quantiles'])
 
     # --- Box plot of the same per-window distributions ---
     if has('box'):
@@ -3913,15 +4050,15 @@ def plot_volatility(profile, ticker, pdf_pages=None):
                     color='r', marker='*', markersize=16, linestyle='none',
                     markeredgecolor='k')
         ax_box.set_xlabel('Rolling window (days)', fontsize=15)
-        ax_box.yaxis.set_major_formatter(FuncFormatter(lambda v, _: label(v)))
+        scale(ax_box)
         ax_box.grid(True, axis='y', alpha=0.4)
         ax_box.tick_params(labelsize=13)
         ax_box.set_title('Distribution by window', fontsize=20,
                          fontweight='bold', pad=8)
 
-    # --- Rolling estimator with quantile bands ---
+    # --- Rolling estimator with quantile bands (narrowed beside the cone outliers' table) ---
     if has('rolling') and not rolling.empty:
-        ax_roll = figure.add_axes((0.05, 0.31, 0.90, 0.17))
+        ax_roll = figure.add_axes((0.05, 0.31, 0.90 if shown.empty else 0.55, 0.17))
         w = profile['rolling_window']
         ax_roll.plot(rolling.index, rolling, color='tab:red', linewidth=1.4,
                      label=f"Realized ({w}d)")
@@ -4036,7 +4173,10 @@ def _volatility_guide_blocks(profile, ticker):
                       f'{windows[-1]} days): max, {upper}th percentile, median, mean, {lower}th '
                       'percentile and min over the whole history. Red stars are today.'),
             ('Read', 'Short windows swing far more than long ones, so the cone narrows to the right. '
-                     'A star near the top of the cone is high for that window, near the bottom low.'),
+                     'A star near the top of the cone is high for that window, near the bottom low.'
+                     + (' The y-axis is logarithmic' + (', shared with the box plot' if has('box') else '')
+                        + ': equal gaps are equal ratios, so 10% to 20% spans as much as 50% to 100%.'
+                        if _volatility_log_limits(profile) else '')),
             ('Here', example)]))
 
     if has('box'):
@@ -4092,6 +4232,9 @@ def _volatility_guide_blocks(profile, ticker):
                      f'{len(rolling):,} readings: {reading}.')]))
 
     cone_points = _cone_option_points(profile.get('option_overlay'))
+    # The High / Low table beside the rolling chart is explained once, in the first block on cone outliers.
+    table_note = (f' The High / Low table lists those above the {_ordinal(upper)} / below the {_ordinal(lower)} '
+                  'percentile of realized volatility at their tenor, most extreme first.')
     if has('cone') and not cone_points.empty:
         nearest = cone_points['Expiry'].min()
         near = cone_points[cone_points['Expiry'].eq(nearest)]
@@ -4103,7 +4246,7 @@ def _volatility_guide_blocks(profile, ticker):
             ('Shows', "Today's plotted monthly option IV, calls green and puts red, at remaining "
                       'weekday tenor. Only Smile MAD outliers by default; labels include quote-date option Close.'),
             ('Read', 'IV above the realized lines at the same tenor means options price more movement '
-                     'than history has delivered; below them, less.'),
+                     'than history has delivered; below them, less.' + table_note),
             ('Here', f"{nearest:%d %b} expiry, {int(near['Tenor sessions'].iloc[0])} sessions: median "
                      + ', '.join(f'{side} {label(value)}' for side, value in sides.items()
                                  if np.isfinite(value))
@@ -4125,7 +4268,8 @@ def _volatility_guide_blocks(profile, ticker):
             ('Shows', f"Smile MAD outliers in the 5paisa snapshot of {live['fetched']:%d %b %H:%M} IST: monthly "
                       'CE and PE diamonds at remaining weekday tenor, labelled with last-traded price (LTP).'),
             ('Read', 'The same smile test as the circles, run on intraday trades. A diamond is a strike whose IV '
-                     "left its smile; a thin strike's last trade can be stale, so check its live quote first."),
+                     "left its smile; a thin strike's last trade can be stale, so check its live quote first."
+                     + (table_note if cone_points.empty and not shown.empty else '')),
             ('Here', here)]))
 
     if not moment and not rolling.empty:

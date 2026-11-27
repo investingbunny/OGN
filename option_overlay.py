@@ -320,25 +320,35 @@ def select_report_expiries(points, monthly_count=OPTION_MONTHLY_EXPIRIES,
     return sorted(chosen)
 
 
+def option_quote(row):
+    """(kind, price): 'LTP' for a Live row, else 'Close'; the option price to two decimals, or 'N/A'."""
+    close = pd.to_numeric(row.get('Close', np.nan), errors='coerce')
+    price = f'{close:.2f}' if np.isfinite(close) and close > 0 else 'N/A'
+    live = row.get('Live', False)
+    return ('LTP' if pd.notna(live) and bool(live) else 'Close'), price
+
+
 def option_point_label(row):
     """Strike/expiry label; outliers also show option Close on the row's quote date (LTP when Live)."""
     strike = format(float(row['Strike Price']), 'g')
     expiry = pd.Timestamp(row['Expiry'])
     label = f'({strike}, {expiry.day} {expiry:%b})'
     if row.get('Is outlier', False):
-        close = pd.to_numeric(row.get('Close', np.nan), errors='coerce')
-        price = f'{close:.2f}' if np.isfinite(close) and close > 0 else 'N/A'
-        live = row.get('Live', False)
-        label += f"\n{'LTP' if pd.notna(live) and bool(live) else 'Close'}: {price}"
+        kind, price = option_quote(row)
+        label += f'\n{kind}: {price}'
     return label
 
 
 def attach_realized_benchmarks(points, price_data, estimator_function):
-    """Compare IV to same-tenor realized history available on the observation date."""
+    """Compare IV to same-tenor realized history available on the observation date.
+
+    RV percentile ranks each IV among those realized readings: the share at or below it, in percent.
+    """
     result = points.copy()
     result['RV mean'] = np.nan
     result['RV std'] = np.nan
     result['RV count'] = 0
+    result['RV percentile'] = np.nan
     result['IV minus RV'] = np.nan
     if result.empty:
         return result
@@ -361,14 +371,19 @@ def attach_realized_benchmarks(points, price_data, estimator_function):
             continue
         result.loc[group.index, ['RV mean', 'RV std', 'RV count']] = [
             float(values.mean()), float(values.std()), len(values)]
+        readings = np.sort(values.to_numpy(dtype=float))
+        implied = group['IV'].to_numpy(dtype=float)
+        result.loc[group.index, 'RV percentile'] = np.where(
+            np.isfinite(implied), np.searchsorted(readings, implied, side='right') / len(readings) * 100, np.nan)
     result['IV minus RV'] = result['IV'] - result['RV mean']
     return result
 
 
-def plot_option_markers(axes, points, x_column, fontsize=10):
+def plot_option_markers(axes, points, x_column, fontsize=10, legend_columns=1):
     """Draw side-coloured IV dots, outlined anomalies and collision-adjusted labels.
 
     Rows with a true `Live` column (real-time snapshot quotes) are diamonds instead of circles.
+    Fixed y-limits (such as the volatility cone's log axis) are kept; otherwise the y-axis gets room for labels.
     """
     from adjustText import adjust_text
     from matplotlib.dates import date2num
@@ -400,7 +415,7 @@ def plot_option_markers(axes, points, x_column, fontsize=10):
     left, right = axes.get_xlim()
     axes.set_xlim(min(left, positions.min() - padding), max(right, positions.max() + padding))
     axes.margins(y=0.25)
-    legend = axes.legend(fontsize=10, loc='upper right')
+    legend = axes.legend(fontsize=10, loc='upper right', ncol=legend_columns)
     axes.figure.canvas.draw()
     targets = axes.transData.transform(np.column_stack([positions, implied]))
     label_positions = targets.copy()

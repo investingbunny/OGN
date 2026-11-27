@@ -74,6 +74,8 @@ python Option-OGN.py --pdf output.pdf       # custom output base name
 - `NUM__DEN` computes a ratio in memory after aligning legs to the slower cadence; zero denominators
   are excluded. Exactly one `__` is allowed. `GLD_SLV` loads stored data; `GLD__SLV` computes it.
   Single-value sources become flat OHLC bars with zero volume; volume indicators are inert.
+  Equity files keep one share-price row per date: EQ, else trade-for-trade BE/BZ, else SME SM/ST
+  (`EQUITY_PRICE_SERIES`); block-deal (BL) and bond rows listed under the same symbol are dropped.
 
 | Option | Meaning |
 |---|---|
@@ -238,7 +240,7 @@ Flat bars make GarmanKlass/Parkinson/RogersSatchell zero; warnings suggest Raw/H
 
 | Panel | Content |
 |---|---|
-| `cone` | Min/25th/mean/median/75th/max by window; latest realized value and monthly Smile MAD outlier IV (end-of-day, plus live with `--live`) |
+| `cone` | Min/25th/mean/median/75th/max by window; latest realized value and monthly Smile MAD outlier IV (end-of-day, plus live with `--live`), with a High / Low table of those outliers |
 | `box` | Per-window distributions |
 | `rolling` | History with quantile bands |
 | `histogram` | Distribution, normal fit, latest value |
@@ -249,6 +251,14 @@ graphs with this report's numbers; moments omit combined option-pricing interpre
 Tune `VOLATILITY_WINDOWS = [3, 5, 10, 20, 30, 60, 90]`, `VOLATILITY_WINDOW = 30`,
 `VOLATILITY_QUANTILES = [0.25, 0.75]`, `DEFAULT_ESTIMATOR = 'YangZhang'` in the script.
 
+The cone and box plot share a logarithmic y-axis, so an extreme maximum (a crash, or an
+unadjusted split) no longer flattens everything else: equal gaps are equal ratios. Its limits fit
+every plotted line and option IV, padded by 8% of the decades spanned, and its percent ticks
+thin out over wide ranges (10%, 20%, 50%, ...) and fill in narrow ones (10%, 15%, 20%, ...):
+`LOG_TICK_STEPS` lists the step sets, and the one nearest `LOG_TICK_TARGET = 7` ticks is used.
+Skew/Kurtosis and zero readings (range estimators on flat bars) stay linear;
+`VOLATILITY_LOG_SCALE = False` restores linear axes.
+
 ## CE/PE Implied-Volatility Overlays
 
 First symbol only; requires stored derivatives and enabled `volatility` + `option_overlay`.
@@ -258,6 +268,11 @@ Outlier labels on both the cone and expiry charts also show the option's `Close`
 date, to two decimals (`N/A` for missing/invalid Close), not the underlying price or solver premium.
 The cone shows only Smile MAD outliers from latest-underlying-date monthly quotes at remaining
 weekday tenors, never stale quotes. With no outliers, the historical cone remains without option dots.
+With outliers, a *High / Low* table beside the (narrowed) rolling chart lists up to `CONE_EXTREME_ROWS`
+(5) plotted outliers above the 75th percentile, highest first, and below the 25th, lowest first, each
+as `(strike, price, expiry, percentile)` in CE green / PE red. The price is `Close`, or `LTP` when live;
+the percentile ranks the IV among realized volatility at the same tenor (`RV percentile`), and the
+bands follow `VOLATILITY_QUANTILES`.
 To restore the other nearby/top-volume strikes, uncomment `# plotted = latest` in
 `_cone_option_points` in [Option-OGN.py](Option-OGN.py); the guide follows the same selection.
 Expiry pages retain all selected strikes. Matching realized windows still use all eligible
@@ -304,7 +319,8 @@ Missing derivatives/valid IV leave historical charts usable.
   historical curves or intraday expiry time.
 - Realized references use history through each option's date, its remaining tenor >=2 sessions,
   and >=30 valid estimator observations. Mean +/- SD is descriptive, not a confidence interval;
-  volume leaders can change daily. Tables show contracts, IV/source, realized mean,
+  `RV percentile` is the share of those readings at or below the IV; volume leaders can change daily.
+  Tables show contracts, IV/source, realized mean,
   IV-minus-mean (percentage points), MAD score and selection reason.
 - Per date/expiry/side, fit a Huber quadratic to centered/scaled log strike across >=12 distinct
   eligible strikes. Median-center residuals; normally adjusted MAD floor: 0.005 annualized IV
