@@ -46,7 +46,7 @@ class VolatilityGuideTests(unittest.TestCase):
         return profile
 
     def render(self, profile):
-        document = Mock()
+        document = Mock(infodict=Mock(return_value={}))
         count = self.module.plot_volatility_guide(profile, 'TEST', pdf_pages=document)
         figure = document.savefig.call_args.args[0]
         texts = [text.get_text() for text in figure.texts]
@@ -153,15 +153,14 @@ class TimestampedReportTests(unittest.TestCase):
         window = self.module.ReportWindow
         last_250 = window('250d', last=250)
         cases = [
-            (['--pdf', 'WTI', '250d'], 'WTI_250d_Analysis.pdf', last_250),
-            (['WTI', '250D', '--pdf'], 'WTI_250d_Analysis.pdf', last_250),
-            (['--pdf', '--periods', '250', 'WTI'], 'WTI_250d_Analysis.pdf', last_250),
-            (['WTI', '250d'], None, last_250),
-            (['WTI', '--periods', '250'], None, last_250),
-            (['--pdf', 'WTI', '350d-25d'], 'WTI_350d-25d_Analysis.pdf', window('350d-25d', last=350, skip=25)),
-            (['--pdf', 'WTI', 'jan2026'], 'WTI_Jan2026_Analysis.pdf',
+            (['WTI', '250d'], 'WTI_250d_Analysis.pdf', last_250),
+            (['WTI', '250D'], 'WTI_250d_Analysis.pdf', last_250),
+            (['--periods', '250', 'WTI'], 'WTI_250d_Analysis.pdf', last_250),
+            (['WTI', '--periods', '250'], 'WTI_250d_Analysis.pdf', last_250),
+            (['WTI', '350d-25d'], 'WTI_350d-25d_Analysis.pdf', window('350d-25d', last=350, skip=25)),
+            (['WTI', 'jan2026'], 'WTI_Jan2026_Analysis.pdf',
              window('Jan2026', start=pd.Timestamp('2026-01-01'), end=pd.Timestamp('2026-01-31'))),
-            (['--pdf', 'WTI', 'January2026-Mar2026'], 'WTI_Jan2026-Mar2026_Analysis.pdf',
+            (['WTI', 'January2026-Mar2026'], 'WTI_Jan2026-Mar2026_Analysis.pdf',
              window('Jan2026-Mar2026', start=pd.Timestamp('2026-01-01'), end=pd.Timestamp('2026-03-31'))),
         ]
         for arguments, filename, expected_window in cases:
@@ -174,8 +173,7 @@ class TimestampedReportTests(unittest.TestCase):
                 self.assertEqual(options['single_scrip'], 'WTI')
                 self.assertIsNone(options['compare_with'])
                 self.assertEqual(options['days'], expected_window)
-                expected = str(self.module.CHARTS_DIR / filename) if filename else None
-                self.assertEqual(options['pdf_path'], expected)
+                self.assertEqual(options['pdf_path'], str(self.module.CHARTS_DIR / filename))
 
     def test_cli_preserves_default_and_pairwise_windows(self):
         cases = [
@@ -187,7 +185,7 @@ class TimestampedReportTests(unittest.TestCase):
         ]
         for arguments, symbol, comparison, days, filename in cases:
             with self.subTest(arguments=arguments), \
-                    patch.object(self.module.sys, 'argv', ['Option-OGN.py', '--pdf', *arguments]), \
+                    patch.object(self.module.sys, 'argv', ['Option-OGN.py', *arguments]), \
                     patch.object(self.module, 'FnOAnalysis') as analyse:
                 self.module.main()
                 analyse.assert_called_once()
@@ -198,7 +196,7 @@ class TimestampedReportTests(unittest.TestCase):
                 self.assertEqual(options['pdf_path'], str(self.module.CHARTS_DIR / filename))
 
     def test_cli_single_symbol_window_keeps_custom_output_and_estimator(self):
-        arguments = ['Option-OGN.py', '--pdf', 'custom.pdf', '--estimator', 'raw', 'WTI', '250d']
+        arguments = ['Option-OGN.py', 'custom.pdf', '--estimator', 'raw', 'WTI', '250d']
         with patch.object(self.module.sys, 'argv', arguments), \
                 patch.object(self.module, 'FnOAnalysis') as analyse:
             self.module.main()
@@ -223,6 +221,7 @@ class TimestampedReportTests(unittest.TestCase):
             (['250d'], 'requires a symbol'),
             (['WTI', '--compare-frequency', 'monthly'], 'require a second symbol'),
             (['WTI', '250d', '--compare-aggregation', 'last'], 'require a second symbol'),
+            (['WTI', '--pdf'], "Unknown option '--pdf'"),
         ]
         for arguments, message in cases:
             with self.subTest(arguments=arguments), \
@@ -265,6 +264,85 @@ class TimestampedReportTests(unittest.TestCase):
             first.write_bytes(b'%PDF')
             self.assertEqual(self.module.timestamped_path(base, moment).name,
                              'NIFTY_Analysis_20261022_185149_2.pdf')
+            live = self.module.timestamped_path(base, moment, live_data=True)
+            self.assertEqual(live.name, 'NIFTY_Analysis_20261022_185149-live_data.pdf')
+            live.write_bytes(b'%PDF')
+            self.assertEqual(self.module.timestamped_path(base, moment, live_data=True).name,
+                             'NIFTY_Analysis_20261022_185149_2-live_data.pdf')
+
+    def test_reports_are_pdf_only_and_tag_referenced_live_data(self):
+        frame = VolatilityGuideTests.prices(periods=120).rename_axis('Date').reset_index()
+        fetched = pd.Timestamp('2026-10-22 10:40')
+        expiry = pd.Timestamp('2026-11-24')
+        snapshot = {
+            'points': pd.DataFrame({'Date': [fetched.normalize()], 'Expiry': [expiry],
+                                    'Expiry type': ['Monthly'], 'Option type': ['CE'], 'IV': [0.2],
+                                    'Is outlier': [False], 'RV count': [0], 'Tenor sessions': [23]}),
+            'as_of': fetched.normalize(), 'fetched': fetched, 'priced_at': fetched,
+            'expiries': [expiry], 'diagnostics': {'estimated_iv': 1},
+        }
+        cases = [
+            ('cached', False, None, [None], False, False, False),
+            ('live', True, None, [snapshot], True, False, True),
+            ('unavailable', True, None, [self.module.live_option_chain.LiveSnapshotError('offline')],
+             True, False, False),
+            ('excluded', True, '50d-5d', [snapshot], False, False, False),
+            ('mixed', True, None, [snapshot, None], True, False, True),
+            ('custom', True, None, [snapshot], True, True, True),
+            ('skipped-page', True, None, [snapshot], True, False, True),
+            ('hidden-live', True, None, [snapshot], True, False, False),
+        ]
+        for name, live, window, snapshots, fetch, custom, tagged in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(self.module, 'CHARTS_DIR', Path(directory) / 'charts'), \
+                    patch.object(self.module, 'REPORT_SECTIONS', ['volatility', 'volatility_guide']
+                                 if name == 'skipped-page' else ['volatility']), \
+                    patch.object(self.module, 'VOLATILITY_PANELS',
+                                 [panel for panel in self.module.VOLATILITY_PANELS if panel != 'cone']
+                                 if name == 'hidden-live' else self.module.VOLATILITY_PANELS), \
+                    patch.object(self.module, 'load_analysis_frame', return_value=(frame, 'test')), \
+                    patch.object(self.module, 'build_live_option_overlay', side_effect=snapshots) as take, \
+                    patch.object(self.module, 'plot_volatility_guide', side_effect=KeyError('guide unavailable')), \
+                    patch.object(self.module.plt, 'show', side_effect=AssertionError('Interactive output')), \
+                    patch.object(self.module.sys, 'stdout', new_callable=io.StringIO) as output:
+                base = Path(directory) / 'custom' / 'report.pdf' if custom else None
+                saved = self.module.FnOAnalysis(
+                    single_scrip=None if name == 'mixed' else 'NIFTY',
+                    scrip_list=['NIFTY', 'BANKNIFTY'], pdf_path=base, days=window, live=live)
+                saved = Path(saved)
+                prefix = 'report' if custom else 'FnO_Analysis' if name == 'mixed' else 'NIFTY_Analysis'
+                if window:
+                    prefix = f'NIFTY_{window}_Analysis'
+                suffix = '-live_data' if tagged else ''
+                self.assertRegex(saved.name, rf'^{prefix}_\d{{8}}_\d{{6}}{suffix}\.pdf$')
+                self.assertEqual(saved.parent, base.parent if custom else Path(directory) / 'charts')
+                content = saved.read_bytes()
+                self.assertTrue(content.startswith(b'%PDF'))
+                self.assertTrue(content.rstrip().endswith(b'%%EOF'))
+                self.assertEqual(b'/Keywords (live_data)' in content, tagged)
+                self.assertEqual(list(Path(directory).rglob('*.pdf')), [saved])
+                self.assertEqual(take.call_count, len(snapshots) if fetch else 0)
+                self.assertIn(f'PDF saved: {saved}', output.getvalue())
+                if name == 'unavailable':
+                    self.assertIn('[live unavailable] LiveSnapshotError: offline', output.getvalue())
+                if name == 'skipped-page':
+                    self.assertIn("[volatility skipped] 'guide unavailable'", output.getvalue())
+                self.assertFalse(self.module.plt.get_fignums())
+
+    def test_pdf_write_failure_closes_the_figure_and_document(self):
+        self.addCleanup(self.module.plt.close, 'all')
+        frame = VolatilityGuideTests.prices(periods=120).rename_axis('Date').reset_index()
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(self.module, 'REPORT_SECTIONS', ['volatility']), \
+                patch.object(self.module, 'load_analysis_frame', return_value=(frame, 'test')), \
+                patch.object(self.module, 'PdfPages') as document, \
+                patch.object(self.module.sys, 'stdout', new_callable=io.StringIO) as output:
+            document.return_value.savefig.side_effect = OSError('disk full')
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                self.module.FnOAnalysis(single_scrip='NIFTY', pdf_path=Path(directory) / 'report.pdf')
+        document.return_value.close.assert_called_once()
+        self.assertFalse(self.module.plt.get_fignums())
+        self.assertNotIn('PDF saved:', output.getvalue())
 
     def test_report_pdf_is_saved_under_a_timestamped_name(self):
         with tempfile.TemporaryDirectory() as directory, \
@@ -277,18 +355,24 @@ class TimestampedReportTests(unittest.TestCase):
         self.assertEqual(Path(saved).parent, Path(directory))
         document.assert_called_once_with(saved)
 
-    def test_standalone_comparison_pdf_is_timestamped(self):
+    def test_standalone_comparison_defaults_to_a_timestamped_pdf(self):
         dates = pd.bdate_range('2024-01-01', periods=120)
         generator = np.random.default_rng(5)
         first = pd.Series(100 + generator.normal(size=120).cumsum(), index=dates)
         second = pd.Series(50 + generator.normal(size=120).cumsum(), index=dates)
-        with tempfile.TemporaryDirectory() as directory, \
-                patch.object(self.module, 'resolve_comp_series',
-                             side_effect=[(first, 'A', 'Test A'), (second, 'B', 'Test B')]), \
-                patch.object(self.module, 'plot_comparison'), \
-                patch.object(self.module, 'PdfPages') as document:
-            self.module.compare_series('A', 'B', pdf_path=str(Path(directory) / 'COMP_A_vs_B.pdf'))
-        self.assertRegex(Path(document.call_args.args[0]).name, r'^COMP_A_vs_B_\d{8}_\d{6}\.pdf$')
+        with tempfile.TemporaryDirectory() as directory:
+            for base in (None, Path(directory) / 'COMP_A_vs_B.pdf'):
+                with self.subTest(base=base), \
+                        patch.object(self.module, 'CHARTS_DIR', Path(directory)), \
+                        patch.object(self.module, 'resolve_comp_series',
+                                     side_effect=[(first, 'A', 'Test A'), (second, 'B', 'Test B')]), \
+                        patch.object(self.module, 'plot_comparison') as render, \
+                        patch.object(self.module, 'PdfPages') as document:
+                    self.module.compare_series('A', 'B', pdf_path=base)
+                prefix = 'COMP_A_vs_B' if base else 'A_vs_B_Analysis'
+                self.assertRegex(Path(document.call_args.args[0]).name, rf'^{prefix}_\d{{8}}_\d{{6}}\.pdf$')
+                self.assertEqual(render.call_args.kwargs['pdf_pages'], document.return_value)
+                document.return_value.close.assert_called_once()
 
     def test_relative_pdf_names_are_saved_and_printed_as_full_paths(self):
         moment = datetime.datetime(2026, 10, 22, 18, 51, 49)
@@ -353,19 +437,16 @@ class ParquetListTests(unittest.TestCase):
         rows = [line.split()[2] for line in output.splitlines() if line.strip()[:1].isdigit()]
         self.assertEqual(rows, ['TODAY', 'FUTURE'])
         self.assertNotIn('OLDEST', output)
-        self.assertNotIn('PDF saved', output)
-        self.assertFalse((self.root / 'charts').exists())
+        self.assertIn('PDF saved:', output)
 
     def test_list_pdf_is_timestamped_and_its_full_path_printed(self):
-        for arguments in (['--pdf', 'List', str(self.source), '2'], ['List', str(self.source), '2', '--pdf']):
-            with self.subTest(arguments=arguments):
-                output = self.run_cli(*arguments)
-                saved = Path(re.search(r'PDF saved: (.+\.pdf)', output).group(1))
-                self.assertEqual(saved.parent, self.root / 'charts')
-                self.assertRegex(saved.name, r'^ABB_latest2_rows_\d{8}_\d{6}(_\d+)?\.pdf$')
-                self.assertTrue(saved.read_bytes().startswith(b'%PDF'))
+        output = self.run_cli('List', str(self.source), '2')
+        saved = Path(re.search(r'PDF saved: (.+\.pdf)', output).group(1))
+        self.assertEqual(saved.parent, self.root / 'charts')
+        self.assertRegex(saved.name, r'^ABB_latest2_rows_\d{8}_\d{6}(_\d+)?\.pdf$')
+        self.assertTrue(saved.read_bytes().startswith(b'%PDF'))
         custom = self.root / 'listings' / 'abb.pdf'
-        output = self.run_cli('--pdf', 'List', str(self.source), str(custom))
+        output = self.run_cli('List', str(self.source), str(custom))
         self.assertIn('Showing the latest 3 by Date', output)
         saved = Path(re.search(r'PDF saved: (.+\.pdf)', output).group(1))
         self.assertEqual(saved.parent, custom.parent)
@@ -375,13 +456,13 @@ class ParquetListTests(unittest.TestCase):
     def test_list_reports_usage_and_errors_without_writing(self):
         missing = self.root / 'missing.parquet'
         cases = [
-            (['List'], 'Usage: python Option-OGN.py [--pdf] List'),
+            (['List'], 'Usage: python Option-OGN.py List'),
             (['List', str(self.source), str(self.source)], 'Usage:'),
             (['List', str(self.source), '2', '3'], 'Usage:'),
             (['List', str(self.source), '--rows', '2'], 'Usage:'),
-            (['--pdf', 'List', str(self.source), '0'], 'rows must be positive'),
-            (['List', str(self.source), 'abb.pdf'], 'Add --pdf to save the listing as abb.pdf'),
-            (['--pdf', 'List', str(missing)], f'No such file: {missing}'),
+            (['List', str(self.source), '0'], 'rows must be positive'),
+            (['List', str(self.source), 'abb.pdf', 'other.pdf'], 'Usage:'),
+            (['List', str(missing)], f'No such file: {missing}'),
             (['List', str(self.root)], 'is a folder'),
         ]
         for arguments, message in cases:
@@ -410,7 +491,7 @@ class ParquetListTests(unittest.TestCase):
         self.assertIn('Showing the 2 rows on 1 trading day in window 1d, by Date (2026-10-12 to 2026-10-12)', output)
         self.assertIn('LATEST-PE', output)
         self.assertNotIn('OLDER', output)
-        output = self.run_cli('--pdf', 'List', str(source), 'oct2026')
+        output = self.run_cli('List', str(source), 'oct2026')
         self.assertIn('Showing the 4 rows on 2 trading days in window Oct2026', output)
         self.assertRegex(Path(re.search(r'PDF saved: (.+\.pdf)', output).group(1)).name,
                          r'^FO_Oct2026_rows_\d{8}_\d{6}\.pdf$')
@@ -549,7 +630,7 @@ class MaxPainPageTests(unittest.TestCase):
         with patch.object(self.module, 'load_derivatives', side_effect=FileNotFoundError('none')), \
                 patch.object(self.module, 'plot_max_pain') as plot, \
                 patch.object(self.module.sys, 'stdout', new_callable=io.StringIO) as output:
-            self.assertIsNone(self.module.max_pain_analysis('WTI', '2026-01-30'))
+            self.assertIsNone(self.module.max_pain_analysis('WTI', '2026-01-30', pdf_pages=Mock()))
         plot.assert_not_called()
         self.assertIn('No stored derivatives for WTI', output.getvalue())
 
@@ -579,7 +660,7 @@ class MaxPainPageTests(unittest.TestCase):
         with patch.object(self.module, 'load_derivatives', self.loader(unpriced)), \
                 patch.object(self.module, 'plot_max_pain') as plot, \
                 patch.object(self.module.sys, 'stdout', new_callable=io.StringIO) as output:
-            positioning = self.module.max_pain_analysis('ABB', '2026-01-31')
+            positioning = self.module.max_pain_analysis('ABB', '2026-01-31', pdf_pages=Mock())
         self.assertTrue(np.isnan(positioning['expired']['close']))
         plot.assert_called_once()
         self.assertIn('2026-01-26, the day before the 2026-01-27 expiry: max pain 100, no expiry-day close stored',

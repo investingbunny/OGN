@@ -2,6 +2,7 @@
 
 import warnings
 import math
+import textwrap
 
 import numpy as np
 import pandas as pd
@@ -31,6 +32,7 @@ OPTION_SERIES_EXPIRIES = 5      # Upcoming expiries of any kind, when weekly con
 OPTION_PARITY_STRIKES = 3       # Call/put pairs nearest the money behind a parity forward
 OPTION_PARITY_MAX_GAP = 0.10    # Parity forwards this far from the underlying price are rejected
 OPTION_EXPIRY_CLOSE = pd.Timedelta(hours=15, minutes=30)  # NSE F&O close (IST); intraday tenors end here
+SMILE_PERCENTILE_COLOUR = '#6b7280'  # Realized-volatility percentile lines on each expiry's IV smile
 
 
 def classify_expiries(expiries):
@@ -339,14 +341,19 @@ def option_point_label(row):
     return label
 
 
-def attach_realized_benchmarks(points, price_data, estimator_function):
+def attach_realized_benchmarks(points, price_data, estimator_function, quantiles=(0.25, 0.75)):
     """Compare IV to same-tenor realized history available on the observation date.
 
     RV percentile ranks each IV among those realized readings: the share at or below it, in percent.
+    RV lower / median / upper are those readings' lower quantile, median and upper quantile.
     """
+    lower, upper = quantiles
     result = points.copy()
     result['RV mean'] = np.nan
     result['RV std'] = np.nan
+    result['RV lower'] = np.nan
+    result['RV median'] = np.nan
+    result['RV upper'] = np.nan
     result['RV count'] = 0
     result['RV percentile'] = np.nan
     result['IV minus RV'] = np.nan
@@ -371,6 +378,8 @@ def attach_realized_benchmarks(points, price_data, estimator_function):
             continue
         result.loc[group.index, ['RV mean', 'RV std', 'RV count']] = [
             float(values.mean()), float(values.std()), len(values)]
+        result.loc[group.index, ['RV lower', 'RV median', 'RV upper']] = [
+            float(values.quantile(level)) for level in (lower, 0.5, upper)]
         readings = np.sort(values.to_numpy(dtype=float))
         implied = group['IV'].to_numpy(dtype=float)
         result.loc[group.index, 'RV percentile'] = np.where(
@@ -446,6 +455,118 @@ def plot_option_markers(axes, points, x_column, fontsize=10, legend_columns=1):
     return texts
 
 
+def _smile_curve(rows):
+    """(strikes, IV) along one side's fitted smile between its plotted strikes, or None.
+
+    Every Smile IV of one date, expiry and side lies on the same quadratic in log strike,
+    so three distinct strikes recover the whole curve.
+    """
+    if 'Smile IV' not in rows:
+        return None
+    fitted = rows[np.isfinite(pd.to_numeric(rows['Smile IV'], errors='coerce').to_numpy(dtype=float))]
+    fitted = fitted.drop_duplicates('Strike Price')
+    if len(fitted) < 3:
+        return None
+    strikes = fitted['Strike Price'].to_numpy(dtype=float)
+    centre = float(np.median(strikes))
+    coefficients = np.polyfit(np.log(strikes / centre), fitted['Smile IV'].to_numpy(dtype=float), 2)
+    grid = np.linspace(strikes.min(), strikes.max(), 200)
+    return grid, np.polyval(coefficients, np.log(grid / centre))
+
+
+def plot_option_smile(axes, points, percentiles=(), fontsize=10):
+    """One expiry's selected strikes on one date, by strike, with fitted smiles and realized percentiles.
+
+    Stored rows are circles on solid smiles; rows with a true `Live` column are diamonds on dashed
+    ones. Smile MAD outliers are outlined and labelled with their price. `percentiles`, top to
+    bottom as (name, level), become horizontal lines labelled beyond the right edge. Returns the
+    outlier labels.
+    """
+    from adjustText import adjust_text
+    from matplotlib.lines import Line2D
+    from matplotlib.ticker import FuncFormatter, MaxNLocator, PercentFormatter
+
+    axes.grid(alpha=0.25)
+    axes.tick_params(labelsize=12)
+    axes.set_xlabel('Strike', fontsize=14)
+    axes.set_ylabel('Annualized volatility', fontsize=14)
+    axes.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+    axes.xaxis.set_major_locator(MaxNLocator(nbins=8))
+    axes.xaxis.set_major_formatter(FuncFormatter(lambda value, _: f'{value:,.0f}'))
+    frame = points.reset_index(drop=True)
+    if frame.empty:
+        axes.text(0.5, 0.5, 'No eligible contracts with valid IV', transform=axes.transAxes,
+                  ha='center', va='center', fontsize=fontsize + 5)
+        return []
+    live = frame['Live'].eq(True) if 'Live' in frame else pd.Series(False, index=frame.index)
+    flagged = frame['Is outlier'].eq(True) if 'Is outlier' in frame else pd.Series(False, index=frame.index)
+    levels = [frame['IV'].to_numpy(dtype=float)]
+    styles = set()
+    for is_live, marker, style in [(False, 'o', '-'), (True, 'D', '--')]:
+        source = frame[live.eq(is_live)]
+        for side, colour in OPTION_COLOURS.items():
+            rows = source[source['Option type'].eq(side)]
+            if rows.empty:
+                continue
+            curve = _smile_curve(rows)
+            if curve is not None:
+                axes.plot(*curve, color=colour, linestyle=style, linewidth=1.4, alpha=0.75, zorder=3)
+                levels.append(curve[1])
+                styles.add(style)
+            axes.scatter(rows['Strike Price'], rows['IV'], s=38, color=colour, marker=marker, zorder=5,
+                         label=f"{side} IV{' (live)' if is_live else ''}")
+        outliers = frame[live.eq(is_live) & flagged]
+        if not outliers.empty:
+            axes.scatter(outliers['Strike Price'], outliers['IV'], s=100, marker=marker, facecolors='none',
+                         edgecolors='#202020', linewidths=1.4, zorder=6,
+                         label='Live Smile MAD outlier' if is_live else 'Smile MAD outlier')
+    for (_, level), style in zip(percentiles, ['--', '-', ':']):
+        axes.axhline(level, color=SMILE_PERCENTILE_COLOUR, linestyle=style, linewidth=1.2, zorder=2)
+        levels.append([level])
+
+    values = np.concatenate([np.asarray(level, dtype=float).ravel() for level in levels])
+    values = values[np.isfinite(values)]
+    low, high = values.min(), values.max()
+    spread = max(high - low, 0.02)
+    axes.set_ylim(max(0.0, low - 0.12 * spread), high + 0.30 * spread)  # Headroom for labels and legend
+    strikes = frame['Strike Price'].to_numpy(dtype=float)
+    margin = max(float(np.ptp(strikes)) * 0.04, float(strikes.max()) * 0.002)
+    axes.set_xlim(strikes.min() - margin, strikes.max() + margin)
+
+    if percentiles:
+        # Keep close percentile labels a line apart instead of overprinting.
+        gap = (fontsize + 1) * axes.figure.dpi / 72.0
+        heights = axes.transData.transform([[0.0, level] for _, level in percentiles])[:, 1]
+        placed = heights.copy()
+        for index in range(1, len(placed)):
+            placed[index] = min(placed[index], placed[index - 1] - gap)
+        for (name, level), target, height in zip(percentiles, heights, placed):
+            axes.annotate(f'{name} {level * 100:.0f}%', xy=(1.0, level), xycoords=('axes fraction', 'data'),
+                          xytext=(5, (height - target) * 72.0 / axes.figure.dpi), textcoords='offset points',
+                          ha='left', va='center', fontsize=fontsize, color=SMILE_PERCENTILE_COLOUR,
+                          annotation_clip=False)
+
+    handles, labels = axes.get_legend_handles_labels()
+    for style, name in [('-', 'Fitted smile'), ('--', 'Live fitted smile')]:
+        if style in styles:
+            handles.append(Line2D([], [], color='#444444', linestyle=style, linewidth=1.4))
+            labels.append(name)
+    legend = axes.legend(handles, labels, fontsize=fontsize - 1, loc='best', ncol=4)
+    marked = frame[flagged]
+    texts = [axes.text(row['Strike Price'], row['IV'], option_point_label(row), fontsize=fontsize,
+                       color=OPTION_COLOURS[row['Option type']], ha='center', va='center', zorder=7,
+                       bbox={'facecolor': 'white', 'edgecolor': 'none', 'alpha': 0.75, 'pad': 0.25})
+             for _, row in marked.iterrows()]
+    if texts:
+        adjust_text(texts, x=strikes, y=frame['IV'].to_numpy(dtype=float),
+                    target_x=marked['Strike Price'].to_numpy(dtype=float),
+                    target_y=marked['IV'].to_numpy(dtype=float), objects=[legend], ax=axes,
+                    ensure_inside_axes=True, expand=(1.15, 1.30), force_text=(0.3, 0.6),
+                    force_pull=(0.005, 0.005), max_move=(20, 20), iter_lim=500,
+                    arrowprops={'arrowstyle': '-', 'color': '#777777', 'lw': 0.5})
+    return texts
+
+
 def option_page_notes(latest):
     """One how-to-use line each for the CE chart, the PE chart and the table, quoting the latest date."""
     top = latest[latest['Selection'].eq('Top volume')] if 'Selection' in latest else latest
@@ -481,13 +602,21 @@ def option_page_notes(latest):
     }
 
 
-def plot_option_history(overlay, ticker, pdf_pages=None):
-    """One page per expiry keeps changing daily top-volume selections readable."""
+def plot_option_history(overlay, ticker, pdf_pages, live=None):
+    """Save PDF pages per expiry, keeping changing daily top-volume selections readable.
+
+    Each page ends with the latest selected contracts beside their IV smile. `live`, a snapshot
+    overlay, adds its strikes as diamonds to the smile of each expiry it covers, on the latest page.
+    """
     import matplotlib.pyplot as plt
     from matplotlib.dates import DateFormatter, DayLocator
     from matplotlib.ticker import PercentFormatter
 
     points = overlay['points']
+    quantiles = overlay.get('quantiles', (0.25, 0.75))
+    newest = points['Date'].max()
+    live_points = (live['points'].assign(Live=True) if live is not None and not live['points'].empty
+                   else pd.DataFrame())
     pages = 0
     page_groups = []
     for expiry, group in points.groupby('Expiry', sort=True):
@@ -537,22 +666,22 @@ def plot_option_history(overlay, ticker, pdf_pages=None):
         for _, contract in latest.iterrows():
             rows.append([
                 contract['Option type'], format(contract['Strike Price'], 'g'),
-                f'{expiry.day} {expiry:%b}', f"{contract['Contracts']:,.0f}",
-                f"{contract['IV'] * 100:.2f}", contract['IV source'],
-                '--' if pd.isna(contract['RV mean']) else f"{contract['RV mean'] * 100:.2f}",
+                f"{contract['Contracts']:,.0f}", f"{contract['IV'] * 100:.2f}",
                 '--' if pd.isna(contract['IV minus RV']) else f"{contract['IV minus RV'] * 100:+.2f}",
                 '--' if pd.isna(contract['MAD score']) else f"{contract['MAD score']:+.2f}",
                 contract['Selection'],
             ])
-        table_axes = figure.add_axes((0.05, 0.145, 0.90, 0.225))
+        realized = pd.to_numeric(latest.get('RV mean', pd.Series(dtype=float)), errors='coerce').dropna()
+        mean_text = f'RV mean {realized.median() * 100:.2f}%' if len(realized) else 'RV mean --'
+        # A narrow table on the left leaves the right for the smile.
+        table_axes = figure.add_axes((0.05, 0.145, 0.38, 0.225))
         table_axes.axis('off')
-        table_axes.set_title(f'Latest selected contracts | {last_date:%d %b %Y}',
+        table_axes.set_title(f'Latest selected contracts | {last_date:%d %b %Y} ({mean_text})',
                               fontsize=18, fontweight='bold', pad=14)
         table = table_axes.table(
             cellText=rows,
-            colLabels=['Side', 'Strike', 'Expiry', 'Contracts', 'IV (%)', 'IV source',
-                       'RV mean (%)', 'IV - mean (pp)', 'Smile MAD', 'Selection'],
-            colWidths=[0.045, 0.08, 0.075, 0.08, 0.07, 0.17, 0.10, 0.13, 0.09, 0.16],
+            colLabels=['Side', 'Strike', 'Contracts', 'IV (%)', 'IV - mean (pp)', 'Smile MAD', 'Selection'],
+            colWidths=[0.08, 0.12, 0.16, 0.11, 0.19, 0.15, 0.19],
             cellLoc='left', bbox=(0, 0, 1, 1))
         table.auto_set_font_size(False)
         table.set_fontsize(11)
@@ -561,7 +690,30 @@ def plot_option_history(overlay, ticker, pdf_pages=None):
             if row_number == 0:
                 cell.set_facecolor('#4472c4')
                 cell.set_text_props(color='white', fontweight='bold')
-        figure.text(0.05, 0.133, notes['table'], fontsize=12.5, color='#1f3864', va='top')
+        figure.text(0.05, 0.133, textwrap.fill(notes['table'], 118), fontsize=12.5, color='#1f3864', va='top')
+
+        page_live = (live_points[live_points['Expiry'].eq(expiry)]
+                     if not live_points.empty and last_date == newest else pd.DataFrame())
+        bands = ['RV upper', 'RV median', 'RV lower']
+        banded = latest.dropna(subset=bands) if set(bands).issubset(latest.columns) else latest.iloc[:0]
+        percentiles = []
+        if not banded.empty:
+            lower, upper = (round(level * 100) for level in quantiles)
+            percentiles = list(zip([f'{upper}th', 'Median', f'{lower}th'], banded[bands].iloc[0].astype(float)))
+        smile_axes = figure.add_axes((0.50, 0.172, 0.45, 0.198))
+        stamp = f'{last_date:%d %b %Y}' + (f" + live {live['fetched']:%d %b %H:%M} IST" if not page_live.empty else '')
+        smile_axes.set_title(f'IV smile | {stamp}', fontsize=18, fontweight='bold', pad=14)
+        plot_option_smile(smile_axes, pd.concat([latest.assign(Live=False), page_live], ignore_index=True),
+                          percentiles=percentiles)
+        smile_note = ('How to use: dots above their fitted curve are richer than nearby strikes (Smile MAD > 0), '
+                      'below it cheaper; outlined dots are Smile MAD outliers.')
+        if percentiles:
+            tenor = pd.to_numeric(banded.get('Tenor sessions', pd.Series(dtype=float)), errors='coerce').dropna()
+            span = f' over {int(tenor.iloc[0])} sessions' if len(tenor) else ''
+            smile_note += f" Grey lines: realized volatility percentiles{span} (this expiry's remaining life)."
+        if not page_live.empty:
+            smile_note += ' Diamonds, dashed curves: live.'
+        figure.text(0.50, 0.133, textwrap.fill(smile_note, 135), fontsize=12.5, color='#1f3864', va='top')
         diagnostics = overlay['diagnostics']
         figure.text(0.05, 0.088,
                     f"Full overlay window, all expiries: {diagnostics['reported_iv']} reported IV, "
@@ -582,12 +734,11 @@ def plot_option_history(overlay, ticker, pdf_pages=None):
                     'Outlier labels add quote-date option Close (N/A if missing). '
                     'An IV-minus-realized gap is not itself an outlier, mispricing or a trade signal.',
                     fontsize=11, color='#555555')
-        if pdf_pages is not None:
-            try:
-                pdf_pages.savefig(figure)
-            finally:
-                plt.close(figure)
-        else:
-            plt.show()
+        try:
+            pdf_pages.savefig(figure)
+            if not page_live.empty:
+                pdf_pages.infodict()['Keywords'] = 'live_data'  # The report's file name follows this
+        finally:
+            plt.close(figure)
         pages += 1
     return pages

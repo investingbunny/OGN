@@ -11,8 +11,8 @@ pandas-ta-classic and swingtrend are optional; py5paisa and pyotp are needed onl
 pip install -r requirements.txt
 python "OGN v2.0-download.py"
 python OGN.py                              # store summary
-python Option-OGN.py --pdf WTI 250d         # latest 250 trading days
-python Option-OGN.py List "<file>.parquet" 20 # latest 20 rows of any Parquet file
+python Option-OGN.py WTI 250d               # PDF, latest 250 trading days
+python Option-OGN.py List "<file>.parquet" 20 # PDF, latest 20 rows of any Parquet file
 python diagnose_store.py --deep 10 --timing # read-only health/cost report
 ```
 
@@ -36,7 +36,7 @@ online-only files; JSON and `--timing` rewrite copies go to the temp folder.
 |---|---|
 | [OGN v2.0-download.py](OGN%20v2.0-download.py) | Downloads, incremental merges, deduplication and recovery. |
 | [OGN.py](OGN.py) | Parquet loaders and store summary. |
-| [Option-OGN.py](Option-OGN.py) | Interactive/PDF reports and Max Pain helpers. |
+| [Option-OGN.py](Option-OGN.py) | Timestamped PDF reports and Max Pain helpers. |
 | [japan_macro.py](japan_macro.py) | Japan macro/carry-trade registry and downloads. |
 | [schiller_macro.py](schiller_macro.py) | US-only Shiller/Multpl valuations. |
 | [nifty_macro.py](nifty_macro.py) | Indian-only NIFTY valuations/CAPE estimate. |
@@ -48,19 +48,21 @@ online-only files; JSON and `--timing` rewrite copies go to the temp folder.
 ## Analysis CLI
 
 ```text
-python Option-OGN.py [--pdf] [options] [symbol] [compare_symbol] [window]
+python Option-OGN.py [options] [symbol] [compare_symbol] [window] [output.pdf]
 ```
 
 ```powershell
-python Option-OGN.py                       # interactive, all FnO
+python Option-OGN.py                       # PDF, all FnO
 python Option-OGN.py RELIANCE               # any stored source
 python Option-OGN.py WTI 250d               # last 250 trading days
-python Option-OGN.py --pdf WTI 350d-25d     # 350 back to 25 back: 325 days, latest 25 excluded
-python Option-OGN.py --pdf WTI Jan2026      # January 2026; ranges such as Jan2026-Mar2026 too
+python Option-OGN.py WTI 350d-25d           # 350 back to 25 back: 325 days, latest 25 excluded
+python Option-OGN.py WTI Jan2026            # January 2026; ranges such as Jan2026-Mar2026 too
 python Option-OGN.py WTI US02Y__US10Y 250d  # first-symbol analysis + ratio comparison
-python Option-OGN.py --pdf WTI JP10Y --periods 120 # 120 aligned months
-python Option-OGN.py --pdf output.pdf       # custom output base name
+python Option-OGN.py WTI JP10Y --periods 120 # 120 aligned months
+python Option-OGN.py output.pdf             # custom output base name
 ```
+
+All reports are PDFs; no chart windows or image files are generated.
 
 - **Window** (last argument): `Nd` = latest N trading days (observations at the analysed cadence);
   `Nd-Md` = N back to M back, excluding the latest M; `MonYYYY` or `MonYYYY-MonYYYY` = calendar
@@ -86,12 +88,16 @@ python Option-OGN.py --pdf output.pdf       # custom output base name
 | `--compare-aggregation METHOD` | `auto` (series-specific), `mean`, `last`, `sum`; downsampled legs only. |
 
 Comparison overrides require two symbols. Example:
-`python Option-OGN.py --pdf WTI JP10Y 120d --compare-frequency quarterly --compare-aggregation last`.
+`python Option-OGN.py WTI JP10Y 120d --compare-frequency quarterly --compare-aggregation last`.
 
 Default PDF bases: `charts\FnO_Analysis.pdf`, `charts\WTI_Analysis.pdf`,
 `charts\WTI_350d-25d_Analysis.pdf`, `charts\WTI_vs_US10Y_Jan2026_Analysis.pdf`.
 Explicit comparison settings enter filenames. **Every PDF**, including custom names, gains
 `_YYYYMMDD_HHMMSS` before `.pdf`; same-second collisions gain `_2`, preventing overwrites.
+Reports referencing a live snapshot add `-live_data` immediately before `.pdf`, after the
+timestamp/collision counter, including custom names. Ignored, unavailable or historical-window
+live overlays do not add it; a snapshot with no outliers still counts when referenced on the page.
+PDF metadata also records this provenance as `Keywords: live_data`.
 The console prints each saved PDF's full path, including custom relative names.
 
 Page order: technical/audit -> candlesticks -> swing structure -> pivots -> formations -> max pain & PCR
@@ -108,11 +114,11 @@ Unavailable sections print a reason without removing other pages.
 ### List Parquet Rows
 
 ```powershell
-python Option-OGN.py List "<path>\ABB.parquet"            # latest 10 rows
-python Option-OGN.py List "<path>\ABB.parquet" 50         # latest 50 rows
-python Option-OGN.py List "<path>\ABB.parquet" 5d         # every row on the latest 5 trading days
-python Option-OGN.py --pdf List "<path>\NIFTY.parquet" 100d  # also charts\NIFTY_100d_rows_<stamp>.pdf
-python Option-OGN.py --pdf List "<path>\ABB.parquet" 50 abb.pdf # custom PDF base name
+python Option-OGN.py List "<path>\ABB.parquet"             # PDF, latest 10 rows
+python Option-OGN.py List "<path>\ABB.parquet" 50           # PDF, latest 50 rows
+python Option-OGN.py List "<path>\ABB.parquet" 5d           # every row on the latest 5 trading days
+python Option-OGN.py List "<path>\NIFTY.parquet" 100d       # charts\NIFTY_100d_rows_<stamp>.pdf
+python Option-OGN.py List "<path>\ABB.parquet" 50 abb.pdf   # custom PDF base name
 ```
 
 Works on any Parquet file. A bare number counts rows; a [window](#analysis-cli) (`100d`, `350d-25d`,
@@ -122,7 +128,7 @@ option-chain file holds all its contracts. With a `Date` column (any case), rows
 usable dates, the last rows in file order are shown. All columns are printed, wrapped to the console
 width; the first column is the row's 0-based file position. Only row groups holding those rows are read.
 A header line counts corrected dates; rows dated after today trigger a warning.
-`--pdf` (before or after `List`) also saves the table as a timestamped PDF and prints its full path.
+The table is always saved as a timestamped PDF and its full path is printed.
 Quote paths containing spaces.
 
 ### Correct Dates
@@ -282,6 +288,10 @@ Expiry pages: next three monthly expiries (last listed per month), plus next fiv
 any kind where weeklies exist; deduplicate overlap, use stored holiday-adjusted dates, exclude
 expired/expiry-day contracts. Monthly/Weekly titles, CE/PE panels, latest-contract tables and
 how-to-read lines accompany up to five dates/page; longer windows paginate.
+Beside each page's narrowed table, an *IV smile* plots the latest date's selected strikes by strike:
+each side's fitted smile, outlined and price-labelled Smile MAD outliers, and grey lines at the 25th
+percentile, median and 75th percentile of realized volatility over the expiry's remaining sessions
+(`VOLATILITY_QUANTILES`). With `--live`, the monthly expiries in the snapshot add diamonds on dashed smiles.
 Counts: `OPTION_MONTHLY_EXPIRIES`, `OPTION_SERIES_EXPIRIES` in [option_overlay.py](option_overlay.py).
 
 | Option | Default | Meaning |
@@ -293,7 +303,7 @@ Counts: `OPTION_MONTHLY_EXPIRIES`, `OPTION_SERIES_EXPIRIES` in [option_overlay.p
 | `--option-iv-unit UNIT` | `percent` | Explicit `percent`/`decimal`, never magnitude-inferred |
 | `--live` | off | Also overlay live Smile MAD outliers from a 5paisa snapshot on the cone; see below |
 
-Example: `python Option-OGN.py --pdf BANKNIFTY --option-dates 10 --option-min-contracts 50`.
+Example: `python Option-OGN.py BANKNIFTY --option-dates 10 --option-min-contracts 50`.
 Moments, monthly/quarterly data, duplicate underlying dates and flat-bar range estimators exclude IV.
 Missing derivatives/valid IV leave historical charts usable.
 
@@ -320,8 +330,8 @@ Missing derivatives/valid IV leave historical charts usable.
 - Realized references use history through each option's date, its remaining tenor >=2 sessions,
   and >=30 valid estimator observations. Mean +/- SD is descriptive, not a confidence interval;
   `RV percentile` is the share of those readings at or below the IV; volume leaders can change daily.
-  Tables show contracts, IV/source, realized mean,
-  IV-minus-mean (percentage points), MAD score and selection reason.
+  Tables show side, strike, contracts, IV,
+  IV-minus-mean (percentage points), MAD score and selection reason; the realized mean is in the title.
 - Per date/expiry/side, fit a Huber quadratic to centered/scaled log strike across >=12 distinct
   eligible strikes. Median-center residuals; normally adjusted MAD floor: 0.005 annualized IV
   (0.5 percentage points). Flag absolute score >=3.5, excluding two lowest/highest strikes.
@@ -338,8 +348,9 @@ No market-outlier claim is made.
 
 ### Live Smile MAD Outliers (`--live`)
 
-`python Option-OGN.py --pdf NIFTY --live` adds, on each volatility cone, the Smile MAD outliers of a
-real-time 5paisa option-chain snapshot, next to the stored end-of-day ones.
+`python Option-OGN.py NIFTY --live` adds, on each volatility cone, the Smile MAD outliers of a
+real-time 5paisa option-chain snapshot, next to the stored end-of-day ones. PDFs referencing the
+snapshot end in `-live_data.pdf`.
 
 - **Setup:** `pip install py5paisa pyotp "requests>=2.34.2"`, then fill in the `FILL IN` placeholders at the top of
   [live_option_chain.py](live_option_chain.py): `APP_NAME`, `APP_SOURCE`, `USER_ID`, `PASSWORD`,
@@ -367,6 +378,7 @@ real-time 5paisa option-chain snapshot, next to the stored end-of-day ones.
 - **Page:** live outliers are diamonds labelled with LTP; stored ones stay circles labelled with Close.
   The cone title and a footer line stamp the snapshot; the guide adds a *Live option IV on the cone*
   block. A live tenor within one session of a cone window adds no window, keeping ticks legible.
+  The snapshot's selected strikes also join each covered expiry page's IV smile as diamonds.
 - **Limits:** a window ending before the latest stored day skips the live overlay (it would look past
   the window). A thin strike's LTP can be stale, so check its quote. py5paisa disables TLS certificate
   checks on its requests; this code resends no login fields and hides the SDK's request-token line.
@@ -522,7 +534,7 @@ due to licensing; older local history remains. Add ratios as `(symbol, numerator
 
 ### Japan Macro & Carry Trade
 
-Example: `python "OGN v2.0-download.py" --japan-only`; `python Option-OGN.py --pdf JPUSDJPY`.
+Example: `python "OGN v2.0-download.py" --japan-only`; `python Option-OGN.py JPUSDJPY`.
 Three appendix groups: funding/carry; growth/inflation/wages; positioning/capital flows.
 `JPUSDJPY` leaves FRED `USDJPY` unchanged.
 
@@ -567,7 +579,7 @@ API use does not imply Government of Japan guarantees. ESRI XLSX requires openpy
 
 **US Schiller** means Robert **Shiller**, S&P DJI/Multpl; no Indian inputs.
 Example: `python "OGN v2.0-download.py" --schiller-only`;
-`python Option-OGN.py --pdf WTI SCHCAPE --periods 120`.
+`python Option-OGN.py WTI SCHCAPE --periods 120`.
 
 | Ticker | Metric / Source | Frequency | History |
 |---|---|---|---|

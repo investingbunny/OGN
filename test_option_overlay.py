@@ -130,6 +130,11 @@ class OptionBenchmarkTests(unittest.TestCase):
         readings = pd.Series(np.linspace(0.10, 0.40, 40))
         result = overlay.attach_realized_benchmarks(points, prices, lambda history, window: readings)
         np.testing.assert_allclose(result['RV percentile'], [0.0, 50.0, 100.0])
+        np.testing.assert_allclose(result[['RV lower', 'RV median', 'RV upper']].iloc[0],
+                                   readings.quantile([0.25, 0.5, 0.75]))
+        custom = overlay.attach_realized_benchmarks(points, prices, lambda history, window: readings,
+                                                    quantiles=(0.1, 0.9))
+        np.testing.assert_allclose(custom[['RV lower', 'RV upper']].iloc[0], readings.quantile([0.1, 0.9]))
 
     def test_too_short_or_expiry_day_baseline_is_unavailable(self):
         dates = pd.bdate_range('2024-01-01', periods=40)
@@ -263,8 +268,66 @@ class OptionPlotTests(unittest.TestCase):
         self.assertIn('CE IV', [collection.get_label() for collection in calls.collections])
         self.assertIn('PE IV', [collection.get_label() for collection in puts.collections])
         self.assertIn('Smile MAD outlier', [collection.get_label() for collection in calls.collections])
-        self.assertTrue(any('IV - mean (pp)' in cell.get_text().get_text()
-                            for cell in figure.axes[2].tables[0].get_celld().values()))
+        table_axes, smile = figure.axes[2:]
+        self.assertEqual(table_axes.get_title(), 'Latest selected contracts | 02 Sep 2026 (RV mean 16.00%)')
+        cells = table_axes.tables[0].get_celld()
+        self.assertEqual([cells[0, column].get_text().get_text() for column in range(7)],
+                         ['Side', 'Strike', 'Contracts', 'IV (%)', 'IV - mean (pp)', 'Smile MAD', 'Selection'])
+        self.assertEqual(smile.get_title(), 'IV smile | 02 Sep 2026')
+        latest = selected[selected['Date'].eq(selected['Date'].max())]
+        offsets = np.concatenate([collection.get_offsets() for collection in smile.collections
+                                  if collection.get_label() in ('CE IV', 'PE IV')])
+        np.testing.assert_allclose(sorted(offsets[:, 0]), sorted(latest['Strike Price']))
+        strike = format(latest.loc[latest['Is outlier'], 'Strike Price'].iloc[0], 'g')
+        self.assertEqual([text.get_text() for text in smile.texts], [f'({strike}, 22 Sep)\nClose: 123.45'] * 2)
+        document.infodict.assert_not_called()
+        self.assertFalse(plt.get_fignums())
+
+    def test_expiry_smile_adds_live_diamonds_outliers_and_realized_percentiles(self):
+        import matplotlib.pyplot as plt
+        fixture = OptionSelectionTests()
+
+        def selected(date, close, bump):
+            frames = []
+            for side in ['CE', 'PE']:
+                chain = fixture.chain().assign(**{'Option type': side, 'Date': pd.Timestamp(date), 'Close': close})
+                chain.loc[10, 'IV'] += bump
+                frames.append(chain)
+            points = overlay.select_option_points(pd.concat(frames, ignore_index=True))
+            return points.assign(**{'Tenor sessions': 14, 'RV mean': 0.16, 'RV std': 0.02, 'RV lower': 0.12,
+                                    'RV median': 0.15, 'RV upper': 0.19, 'IV minus RV': points['IV'] - 0.16})
+
+        stored, snapshot = selected('2026-09-01', 123.45, 0.17), selected('2026-09-02', 99.0, -0.12)
+        profile = {'points': stored, 'top_count': 5, 'outlier_count': 2, 'rate': 0.065, 'min_contracts': 10,
+                   'estimator': 'YangZhang', 'quantiles': [0.25, 0.75],
+                   'diagnostics': {'reported_iv': len(stored), 'estimated_iv': 0,
+                                   'missing_forward': 0, 'invalid_premium': 0, 'solver_failures': 0}}
+        info = {}
+        document = Mock(infodict=Mock(return_value=info))
+        overlay.plot_option_history(profile, 'NIFTY', pdf_pages=document,
+                                    live={'points': snapshot, 'fetched': pd.Timestamp('2026-09-02 11:05')})
+        smile = document.savefig.call_args.args[0].axes[3]
+        self.assertEqual(smile.get_title(), 'IV smile | 01 Sep 2026 + live 02 Sep 11:05 IST')
+        self.assertEqual([collection.get_label() for collection in smile.collections],
+                         ['CE IV', 'PE IV', 'Smile MAD outlier', 'CE IV (live)', 'PE IV (live)',
+                          'Live Smile MAD outlier'])
+        diamonds = next(item for item in smile.collections if item.get_label() == 'CE IV (live)')
+        np.testing.assert_allclose(sorted(diamonds.get_offsets()[:, 0]),
+                                   sorted(snapshot.loc[snapshot['Option type'].eq('CE'), 'Strike Price']))
+        strike = format(fixture.chain().loc[10, 'Strike Price'], 'g')
+        self.assertCountEqual([text.get_text() for text in smile.texts],
+                              [f'({strike}, 22 Sep)\nClose: 123.45'] * 2 + [f'({strike}, 22 Sep)\nLTP: 99.00'] * 2
+                              + ['75th 19%', 'Median 15%', '25th 12%'])
+        percentile_lines = sorted(line.get_ydata()[0] for line in smile.lines if len(line.get_ydata()) == 2)
+        np.testing.assert_allclose(percentile_lines, [0.12, 0.15, 0.19])
+        calls = stored[stored['Option type'].eq('CE')]
+        curve = next(line for line in smile.lines if len(line.get_xdata()) == 200 and line.get_linestyle() == '-'
+                     and line.get_color() == overlay.OPTION_COLOURS['CE'])
+        np.testing.assert_allclose(np.interp(calls['Strike Price'], curve.get_xdata(), curve.get_ydata()),
+                                   calls['Smile IV'], atol=1e-5)
+        self.assertEqual(sum(line.get_linestyle() == '--' and len(line.get_xdata()) == 200
+                             for line in smile.lines), 2)
+        self.assertEqual(info, {'Keywords': 'live_data'})
         self.assertFalse(plt.get_fignums())
 
     def test_dense_five_date_labels_stay_inside_axes_without_overlaps(self):
@@ -450,7 +513,7 @@ class OptionIntegrationTests(unittest.TestCase):
         profile['live_overlay'] = {'points': live_points, 'as_of': fetched.normalize(), 'fetched': fetched,
                                    'priced_at': fetched, 'expiries': [monthly['Expiry']],
                                    'diagnostics': {'estimated_iv': 120}}
-        document = Mock()
+        document = Mock(infodict=Mock(return_value={}))
         self.module.plot_volatility(profile, 'ABC', pdf_pages=document)
         figure = document.savefig.call_args.args[0]
         table_axes = next(axes for axes in figure.axes if axes.get_title() == 'Smile MAD outliers vs the cone')
@@ -491,6 +554,30 @@ class OptionIntegrationTests(unittest.TestCase):
         self.assertEqual(profile['points']['Expiry'].nunique(), 2)
         self.assertTrue(profile['points']['RV count'].ge(30).all())
         loader.assert_called_once_with('NIFTY', start='2026-09-01', end='2026-09-02')
+        with patch.object(self.module, 'load_derivatives', return_value=chain), \
+                patch.object(self.module, 'VOLATILITY_QUANTILES', [0.1, 0.9]):
+            banded = self.module.build_volatility_option_overlay(self.prices(), 'NIFTY', 'YangZhang', date_count=2)
+        self.assertEqual(banded['quantiles'], [0.1, 0.9])
+        row = banded['points'].iloc[0]
+        readings = self.module.get_volatility_estimator(self.prices().loc[:row['Date']], 'YangZhang',
+                                                        int(row['Tenor sessions']))
+        readings = readings[np.isfinite(readings) & (readings >= 0)]
+        np.testing.assert_allclose(row[['RV lower', 'RV median', 'RV upper']].astype(float),
+                                   readings.quantile([0.1, 0.5, 0.9]))
+
+    def test_live_snapshot_reaches_the_expiry_pages(self):
+        as_of = pd.Timestamp('2026-09-02')
+        stored, snapshot = [{'as_of': as_of, 'points': pd.DataFrame({
+            'Date': [as_of], 'Expiry type': ['Monthly'], 'Is outlier': [False], 'RV count': [40],
+            'Tenor sessions': [14]})} for _ in range(2)]
+        with patch.object(self.module, 'build_volatility_option_overlay', return_value=stored), \
+                patch.object(self.module, 'build_live_option_overlay', return_value=snapshot), \
+                patch.object(self.module, 'plot_volatility'), \
+                patch.object(self.module, 'plot_volatility_guide'), \
+                patch.object(overlay, 'plot_option_history') as history:
+            self.module.volatility_analysis(self.prices(), 'NIFTY', pdf_pages=Mock(), live=True)
+        self.assertIs(history.call_args.args[0], stored)
+        self.assertIs(history.call_args.kwargs['live'], snapshot)
 
     def test_no_derivatives_or_nonvolatility_estimators_do_not_draw_options(self):
         with patch.object(self.module, 'load_derivatives', side_effect=FileNotFoundError):
@@ -506,7 +593,7 @@ class OptionIntegrationTests(unittest.TestCase):
                 patch.object(self.module, 'plot_volatility', pages.volatility), \
                 patch.object(self.module, 'plot_volatility_guide', pages.guide), \
                 patch.object(overlay, 'plot_option_history', pages.history):
-            result = self.module.volatility_analysis(self.prices(), 'NIFTY')
+            result = self.module.volatility_analysis(self.prices(), 'NIFTY', pdf_pages=Mock())
         self.assertIsNotNone(result['option_overlay'])
         self.assertIn(14, result['cone']['windows'])
         self.assertEqual([call[0] for call in pages.mock_calls], ['volatility', 'guide', 'history'])
@@ -515,11 +602,11 @@ class OptionIntegrationTests(unittest.TestCase):
                 patch.object(self.module, 'plot_volatility'), \
                 patch.object(self.module, 'plot_volatility_guide') as guide, \
                 patch.object(overlay, 'plot_option_history'):
-            self.module.volatility_analysis(self.prices(), 'NIFTY')
+            self.module.volatility_analysis(self.prices(), 'NIFTY', pdf_pages=Mock())
         guide.assert_not_called()
 
     def test_cli_exposes_explicit_pricing_and_selection_settings(self):
-        arguments = ['Option-OGN.py', '--pdf', 'NIFTY', '--option-dates', '10',
+        arguments = ['Option-OGN.py', 'NIFTY', '--option-dates', '10',
                      '--option-min-contracts', '50', '--option-outliers', '0',
                      '--option-rate', '0.055', '--option-iv-unit', 'decimal']
         with patch.object(self.module.sys, 'argv', arguments), patch.object(self.module, 'FnOAnalysis') as analyse:
@@ -534,7 +621,7 @@ class OptionIntegrationTests(unittest.TestCase):
         self.assertFalse(parameters['live'])
 
     def test_cli_live_logs_in_before_the_report_and_stops_when_unconfigured(self):
-        arguments = ['Option-OGN.py', '--pdf', 'NIFTY', '--live']
+        arguments = ['Option-OGN.py', 'NIFTY', '--live']
         with patch.object(self.module.sys, 'argv', arguments), patch.object(self.module, 'FnOAnalysis') as analyse, \
                 patch.object(live, 'connect') as connect:
             self.module.main()
@@ -563,7 +650,7 @@ class OptionIntegrationTests(unittest.TestCase):
         profile['live_overlay'] = {'points': live_points, 'as_of': fetched.normalize(), 'fetched': fetched,
                                    'priced_at': fetched, 'expiries': [monthly['Expiry']],
                                    'diagnostics': {'estimated_iv': 120}}
-        document = Mock()
+        document = Mock(infodict=Mock(return_value={}))
         self.module.plot_volatility(profile, 'NIFTY', pdf_pages=document)
         figure = document.savefig.call_args.args[0]
         axes = figure.axes[0]
@@ -595,7 +682,7 @@ class OptionIntegrationTests(unittest.TestCase):
         with patch.object(live, 'snapshot', return_value=snapshot) as take, \
                 patch.object(self.module, 'REPORT_SECTIONS', ['volatility']), \
                 patch.object(self.module, 'plot_volatility'):
-            profile = self.module.volatility_analysis(self.prices(), 'NIFTY', live=True)
+            profile = self.module.volatility_analysis(self.prices(), 'NIFTY', pdf_pages=Mock(), live=True)
         take.assert_called_once_with('NIFTY', spot=float(self.prices()['Close'].iloc[-1]))
         self.assertIsNone(profile['option_overlay'])
         shown = self.module._cone_option_points(profile['live_overlay'])
@@ -730,11 +817,11 @@ class WeeklyExpiryTests(unittest.TestCase):
         figure.canvas.draw()
         renderer = figure.canvas.get_renderer()
         notes = [text for text in figure.texts if text.get_text().startswith('How to use:')]
-        self.assertEqual(len(notes), 3)
+        self.assertEqual(len(notes), 4)
         others = [text.get_window_extent(renderer) for text in figure.texts if text not in notes]
         table_axes = figure.axes[2]
         others += [table_axes.title.get_window_extent(renderer),
-                   table_axes.tables[0].get_window_extent(renderer)]
+                   table_axes.tables[0].get_window_extent(renderer), figure.axes[3].get_tightbbox(renderer)]
         for axes in figure.axes[:2]:
             others += [label.get_window_extent(renderer) for label in axes.get_xticklabels() if label.get_text()]
         boxes = [note.get_window_extent(renderer) for note in notes]

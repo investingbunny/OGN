@@ -20,30 +20,30 @@ Report pages: technical -> candlesticks -> swing structure -> pivots -> formatio
 per PDF. Edit REPORT_SECTIONS to drop any of them.
 
 Usage:
-    python Option-OGN.py                          # analyse all FnO symbols (interactive)
+    python Option-OGN.py                          # all FnO -> charts/FnO_Analysis_<stamp>.pdf
     python Option-OGN.py WTI                       # full analysis for one series
-    python Option-OGN.py --pdf WTI 250d            # one series, last 250 trading days
-    python Option-OGN.py --pdf WTI 350d-25d        # ... 350 back to 25 back (latest 25 excluded)
-    python Option-OGN.py --pdf WTI Jan2026         # ... January 2026 (also Jan2026-Mar2026)
+    python Option-OGN.py WTI 250d                  # one series, last 250 trading days
+    python Option-OGN.py WTI 350d-25d              # ... 350 back to 25 back (latest 25 excluded)
+    python Option-OGN.py WTI Jan2026               # ... January 2026 (also Jan2026-Mar2026)
     python Option-OGN.py WTI US02Y__US10Y          # ... plus a statistical comparison
     python Option-OGN.py WTI US02Y__US10Y 250d     # ... over the last 250 aligned observations
-    python Option-OGN.py --pdf WTI JP10Y 120d      # last 120 aligned months
-    python Option-OGN.py --pdf WTI JP10Y --compare-aggregation last
-    python Option-OGN.py --pdf WTI JP10Y --compare-frequency quarterly
+    python Option-OGN.py WTI JP10Y 120d           # last 120 aligned months
+    python Option-OGN.py WTI JP10Y --compare-aggregation last
+    python Option-OGN.py WTI JP10Y --compare-frequency quarterly
     python Option-OGN.py --estimator Raw WTI       # pick the volatility estimator
-    python Option-OGN.py --pdf NIFTY --live        # ... plus live 5paisa Smile MAD outliers on the cone
+    python Option-OGN.py NIFTY --live              # ... plus live 5paisa Smile MAD outliers on the cone
     python Option-OGN.py --trend-bars 250 GLD      # widen the trendline lookback
     python Option-OGN.py --trend-distance 20 GLD   # demand 20 bars between pivots
     python Option-OGN.py --trend-prominence 5 GLD  # absolute prominence, in price units
     python Option-OGN.py --trend-prominence-pct 5 GLD  # auto-scale off 5% of the range
-    python Option-OGN.py --pdf                     # all FnO symbols -> charts/FnO_Analysis_<stamp>.pdf
-    python Option-OGN.py --pdf WTI                 # single symbol -> charts/WTI_Analysis_<stamp>.pdf
-    python Option-OGN.py --pdf output.pdf          # custom output file -> output_<stamp>.pdf
-    python Option-OGN.py List "<file>.parquet" 20  # latest 20 rows of any Parquet file
-    python Option-OGN.py --pdf List "<file>.parquet" 100d  # every row on the latest 100 trading days, + PDF
+    python Option-OGN.py output.pdf               # custom output file -> output_<stamp>.pdf
+    python Option-OGN.py List "<file>.parquet" 20  # PDF of the latest 20 rows of any Parquet file
+    python Option-OGN.py List "<file>.parquet" 100d  # PDF of every row on the latest 100 trading days
 
+PDF is the only report output; no chart windows or image files are generated.
 PDF names carry a _YYYYMMDD_HHMMSS stamp (<stamp>), so a rerun never overwrites a report;
-each PDF's full path is printed once it is saved.
+reports referencing a live snapshot also end in -live_data.pdf, after the stamp/collision counter.
+Each PDF's full path is printed once it is saved.
 
 @author: HRTR
 """
@@ -61,6 +61,7 @@ from functools import reduce
 from pathlib import Path
 
 import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches
 from matplotlib.backends.backend_pdf import PdfPages
@@ -305,19 +306,47 @@ def business_days(start, end):
     )
 
 
-def timestamped_path(path, moment=None):
+def timestamped_path(path, moment=None, live_data=False):
     """Absolute `path` with _YYYYMMDD_HHMMSS before its suffix, so a rerun never overwrites a report.
 
     A file already holding that name (two runs in one second) gets a _2, _3 ... counter.
+    Referenced live data adds -live_data after the timestamp/counter.
     """
     path = Path(os.path.abspath(path))
     stamp = (moment or datetime.datetime.now()).strftime('%Y%m%d_%H%M%S')
-    candidate = path.with_name(f'{path.stem}_{stamp}{path.suffix}')
+    live_suffix = '-live_data' if live_data else ''
+    candidate = path.with_name(f'{path.stem}_{stamp}{live_suffix}{path.suffix}')
     counter = 2
     while candidate.exists():
-        candidate = path.with_name(f'{path.stem}_{stamp}_{counter}{path.suffix}')
+        candidate = path.with_name(f'{path.stem}_{stamp}_{counter}{live_suffix}{path.suffix}')
         counter += 1
     return candidate
+
+
+def _analysis_pdf_path(symbol, compare_with=None, window=None, frequency='auto', aggregation='auto'):
+    """Default PDF base shared by CLI and programmatic reports."""
+    suffix = f'_{window.label}' if window is not None else ''
+    if symbol and compare_with:
+        if frequency != 'auto':
+            suffix += f'_{frequency}'
+        if aggregation != 'auto':
+            suffix += f'_{aggregation}'
+        name = f'{symbol}_vs_{compare_with}{suffix}_Analysis.pdf'
+    elif symbol:
+        name = f'{symbol}{suffix}_Analysis.pdf'
+    else:
+        name = 'FnO_Analysis.pdf'
+    return CHARTS_DIR / name
+
+
+def _save_report_page(figure, pdf_pages, live_data=False):
+    try:
+        pdf_pages.savefig(figure)
+        if live_data:
+            # Record provenance now, even if a later page is skipped.
+            pdf_pages.infodict()['Keywords'] = 'live_data'
+    finally:
+        plt.close(figure)
 
 
 # ---------------------------------------------------------------------------
@@ -608,7 +637,7 @@ def _draw_max_pain_chart(ax, snapshot, title, compact=False, xlabel=True):
     ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.0), ncol=2, fontsize=17 * size, frameon=False)
 
 
-def plot_max_pain(positioning, ticker, pdf_pages=None):
+def plot_max_pain(positioning, ticker, pdf_pages):
     """One page of max pain beside PCR gauges for the latest option chain.
 
     With a settled expiry in the report range, the left side splits in two: that expiry's
@@ -660,16 +689,10 @@ def plot_max_pain(positioning, ticker, pdf_pages=None):
     if positioning['date'] != positioning['as_of']:
         notes.append(f"Latest options on or before {positioning['as_of']:%d %b %Y}, the end of the report's range.")
     figure.text(0.055, 0.075, '\n'.join(notes), fontsize=14, color='#454c50', va='top', linespacing=1.5)
-    if pdf_pages is not None:
-        try:
-            pdf_pages.savefig(figure)
-        finally:
-            plt.close(figure)
-    else:
-        plt.show()
+    _save_report_page(figure, pdf_pages)
 
 
-def max_pain_analysis(ticker, as_of, start=None, pdf_pages=None):
+def max_pain_analysis(ticker, as_of, start=None, *, pdf_pages):
     """Compute and render the max pain and put-call ratio page for a report range ending `as_of`."""
     try:
         positioning = option_positioning(ticker, as_of, start=start)
@@ -1188,7 +1211,7 @@ def _label_trading_days(ax, dates, max_ticks=13):
     ax.set_xlim(-1, count)
 
 
-def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
+def plot_chart(DF, n, ticker, Dividend=0, *, pdf_pages):
     """Generate the multi-panel technical analysis chart.
 
     Args:
@@ -1197,7 +1220,7 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
                    (Renko keeps its own last 100 bricks)
         ticker:    Symbol name
         Dividend:  Expected dividend (for futures fair-value calc)
-        pdf_pages: Optional PdfPages object — if set, saves to PDF instead of plt.show()
+        pdf_pages: Open PdfPages object receiving the chart
     """
     data = DF.copy()
     data = data[data['Close'].notna()]  # rows without a price are skipped
@@ -1412,11 +1435,7 @@ def plot_chart(DF, n, ticker, Dividend=0, pdf_pages=None):
                       transform=ax_table.transAxes, ha='center', va='center',
                       fontsize=9, color='red')
 
-    if pdf_pages:
-        pdf_pages.savefig(fig2)
-        plt.close(fig2)
-    else:
-        plt.show()
+    _save_report_page(fig2, pdf_pages)
 
 
 # ---------------------------------------------------------------------------
@@ -1561,7 +1580,7 @@ def _trend_line_summary(line):
     return f"           slope {line['slope']:+.4g}/bar   {change}"
 
 
-def plot_trendlines(profile, ticker, pdf_pages=None):
+def plot_trendlines(profile, ticker, pdf_pages):
     """Render the price page with the two regression trendlines overlaid."""
     window = profile['window']
     resistance_idx = profile['resistance_idx']
@@ -1638,16 +1657,12 @@ def plot_trendlines(profile, ticker, pdf_pages=None):
         bbox=dict(boxstyle='round,pad=0.6', facecolor='white', alpha=0.85,
                   edgecolor='#cccccc'))
 
-    if pdf_pages:
-        pdf_pages.savefig(figure)
-        plt.close(figure)
-    else:
-        plt.show()
+    _save_report_page(figure, pdf_pages)
 
 
 def trendline_analysis(price_data, ticker, bars=TREND_BARS,
                        distance=TREND_DISTANCE, prominence=None,
-                       prominence_pct=TREND_PROMINENCE_PCT, pdf_pages=None):
+                       prominence_pct=TREND_PROMINENCE_PCT, *, pdf_pages):
     """Compute and render the trendline page for one symbol."""
     profile = compute_trendlines(price_data, bars=bars, distance=distance,
                                  prominence=prominence,
@@ -1780,16 +1795,6 @@ def _swing_summary(figure, items):
         y -= body.get_window_extent().height / figure.bbox.height + 0.013
 
 
-def _save_swing_page(figure, pdf_pages):
-    if pdf_pages is not None:
-        try:
-            pdf_pages.savefig(figure)
-        finally:
-            plt.close(figure)
-    else:
-        plt.show()
-
-
 def _follow_through(shown, position, direction):
     """Confirmed or Failed, dated, on the first later close beyond the signal candle; else Pending."""
     if direction == 'Mixed':
@@ -1844,7 +1849,7 @@ def _candle_names(signal):
     return ', '.join(signal['Bullish'] or signal['Bearish'])
 
 
-def plot_candlesticks(profile, ticker, pdf_pages=None):
+def plot_candlesticks(profile, ticker, pdf_pages):
     """Candles with reversal-pattern markers, the latest signal days and how to read them."""
     shown, signals = profile['shown'], profile['signals']
     figure, chart = _swing_page(
@@ -1903,10 +1908,10 @@ def plot_candlesticks(profile, ticker, pdf_pages=None):
                         "candle's high confirms a bullish pattern, below its low a bearish one; the "
                         'opposite close means it failed.'),
         ('Now', now)])
-    _save_swing_page(figure, pdf_pages)
+    _save_report_page(figure, pdf_pages)
 
 
-def candlestick_analysis(price_data, ticker, bars, pdf_pages=None):
+def candlestick_analysis(price_data, ticker, bars, pdf_pages):
     """Compute and render the candlestick reversal page."""
     profile = compute_candlestick_signals(price_data, bars)
     counts = profile['signals']['Direction'].value_counts()
@@ -1968,7 +1973,7 @@ def _swing_level(value, when, close):
     return f'{value:,.2f} on {when:%d %b %Y} ({_level_gap(value, close)})'
 
 
-def plot_swing_structure(profile, ticker, pdf_pages=None):
+def plot_swing_structure(profile, ticker, pdf_pages):
     """Candles shaded by trend with the CoCh and breakout levels, events, current state and notes."""
     shown, state, current = profile['shown'], profile['state'], profile['current']
     figure, chart = _swing_page(
@@ -2051,10 +2056,10 @@ def plot_swing_structure(profile, ticker, pdf_pages=None):
                         f"leave CoCh unchanged. Sideways means no new swing point for {current['sideways_bars']} "
                         'sessions; the trend label holds until a break.'),
         ('Now', now)])
-    _save_swing_page(figure, pdf_pages)
+    _save_report_page(figure, pdf_pages)
 
 
-def swing_structure_analysis(price_data, ticker, bars, pdf_pages=None):
+def swing_structure_analysis(price_data, ticker, bars, pdf_pages):
     """Compute and render the swing-structure page."""
     profile = compute_swing_structure(price_data, bars)
     current = profile['current']
@@ -2138,7 +2143,7 @@ def _mark_pivots(chart, profile, pad, size=190, alpha=1.0, labels=True):
                           label=name if labels else '_nolegend_')
 
 
-def plot_pivots(profile, ticker, pdf_pages=None):
+def plot_pivots(profile, ticker, pdf_pages):
     """Close with confirmed pivot markers above the pivot tables, levels and notes."""
     shown, order, close = profile['shown'], profile['order'], profile['close']
     figure, chart = _swing_page(
@@ -2190,10 +2195,10 @@ def plot_pivots(profile, ticker, pdf_pages=None):
                         'levels carry no look-ahead but lag turns. Rising pivot highs and lows are up-trend '
                         'structure, falling ones down-trend; a close through the nearest level breaks it.'),
         ('Now', f"Close {close:,.2f}: {levels[0]}, {levels[1]}. Latest pivots: {profile['structure']}.")])
-    _save_swing_page(figure, pdf_pages)
+    _save_report_page(figure, pdf_pages)
 
 
-def pivot_analysis(price_data, ticker, bars, pdf_pages=None):
+def pivot_analysis(price_data, ticker, bars, pdf_pages):
     """Compute and render the confirmed-pivot page."""
     profile = compute_pivot_levels(price_data, bars)
     print(f"  [pivots] {len(profile['highs'])} highs / {len(profile['lows'])} lows confirmed in "
@@ -2331,7 +2336,7 @@ def _formation_colour(formation):
     return AUDIT_COLOURS['Hold'] if status.startswith(('Watching', 'Inside')) else '#e7e7e7'
 
 
-def plot_formations(profile, ticker, pdf_pages=None):
+def plot_formations(profile, ticker, pdf_pages):
     """Candles with each detected formation drawn on its pivots, the formation table and notes."""
     shown, close = profile['shown'], profile['close']
     figure, chart = _swing_page(
@@ -2395,10 +2400,10 @@ def plot_formations(profile, ticker, pdf_pages=None):
                         f'are flat, with every pivot within {FORMATION_FIT_ATR:g} ATR of its side. A formation '
                         'is a hypothesis until a close breaks its trigger.'),
         ('Now', now)])
-    _save_swing_page(figure, pdf_pages)
+    _save_report_page(figure, pdf_pages)
 
 
-def formation_analysis(price_data, ticker, bars, pdf_pages=None):
+def formation_analysis(price_data, ticker, bars, pdf_pages):
     """Compute and render the geometric-formation page."""
     profile = compute_formations(price_data, bars)
     found = ', '.join(f"{f['Pattern']} ({f['Status'].split(':')[0].lower()})" for f in profile['formations'])
@@ -2421,15 +2426,16 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
                 option_min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
                 option_outliers=option_overlay.OPTION_OUTLIER_COUNT,
                 option_rate=RiskFreeRate, option_iv_unit='percent', live=False):
-    """Run technical analysis for each symbol in the list.
+    """Run technical analysis for each symbol in the list and save a PDF report.
 
     Sections are driven by REPORT_SECTIONS, so any of them can be commented out.
 
     Args:
         scrip_list:           List of symbols to analyse (default: NSEFnOList)
         single_scrip:         If set, analyse only this one symbol
-        pdf_path:             If set, save all charts to this PDF file, with a
-                              _YYYYMMDD_HHMMSS stamp added before .pdf
+        pdf_path:             Optional PDF base name; defaults to the charts folder.
+                              Adds a _YYYYMMDD_HHMMSS stamp and -live_data when
+                              a live snapshot is referenced, before .pdf
         compare_with:         If set, append a statistical comparison of the
                               analysed symbol against this second series
         days:                 Report window (legacy name): a ReportWindow, text such as
@@ -2454,7 +2460,7 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
                               (live_option_chain.connect)
 
     Returns:
-        The saved PDF path (timestamped), or None for interactive charts.
+        The saved PDF path (timestamped).
     """
     window = as_report_window(days)
     analysis_window = window if not compare_with else None
@@ -2466,178 +2472,181 @@ def FnOAnalysis(scrip_list=None, single_scrip=None, pdf_path=None,
     else:
         symbols = NSEFnOList
 
-    # Set non-interactive backend for PDF output
-    pdf_pages = None
-    if pdf_path:
-        matplotlib.use('Agg')
-        from pathlib import Path
-        pdf_path = str(timestamped_path(pdf_path))
-        Path(pdf_path).parent.mkdir(parents=True, exist_ok=True)
-        pdf_pages = PdfPages(pdf_path)
-        print(f"  Saving charts to: {pdf_path}")
+    report_base = pdf_path or _analysis_pdf_path(
+        single_scrip, compare_with, window, comparison_frequency, comparison_aggregation)
+    report_moment = datetime.datetime.now()
+    pdf_path = str(timestamped_path(report_base, moment=report_moment))
+    Path(pdf_path).parent.mkdir(parents=True, exist_ok=True)
+    pdf_pages = PdfPages(pdf_path)
+    print(f"  Saving charts to: {pdf_path}")
+    uses_live_data = False
 
-    for Scrip in symbols:
-        print(f"\n{'='*60}")
-        print(f"  Analysing: {Scrip}")
-        print(f"{'='*60}")
+    try:
+        for Scrip in symbols:
+            print(f"\n{'='*60}")
+            print(f"  Analysing: {Scrip}")
+            print(f"{'='*60}")
 
-        # ── Load OHLC data from whichever source holds this symbol ─────
-        try:
-            OHLCdf, source_desc = load_analysis_frame(Scrip)
-            print(f"  Source: {source_desc}")
-        except (FileNotFoundError, ValueError) as e:
-            print(f"  [skip] {e}")
-            continue
-
-        if OHLCdf.empty:
-            print(f"  [skip] Empty data for {Scrip}")
-            continue
-
-        # ── Ensure OHLCV columns are numeric (parquet may store as string) ──
-        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-            if col in OHLCdf.columns:
-                OHLCdf[col] = pd.to_numeric(OHLCdf[col], errors='coerce')
-
-        # ── Compute indicators ────────────────────────────────────────
-        Indicatordf = OHLCdf.copy()
-        Indicatordf = Indicatordf.set_index("Date")
-
-        # --- Momentum indicators ---
-        Indicatordf = MACD(Indicatordf, 12, 26, 9)       # MACD (12/26/9)
-        Indicatordf["RSI"] = RSI(Indicatordf, 14)        # RSI (14-period)
-
-        # --- Volatility indicators ---
-        Indicatordf = BollBnd(Indicatordf, 20)            # Bollinger Bands (20-period)
-        Indicatordf = ATR(Indicatordf, 20)                # Average True Range (20-period)
-
-        # --- Trend strength ---
-        ADXdf = ADX(Indicatordf, 20)                      # ADX (20-period Wilder)
-        Indicatordf['ADX'] = ADXdf['ADX']
-        Indicatordf['DIplusN'] = ADXdf['DIplusN']         # Bullish directional indicator
-        Indicatordf['DIminusN'] = ADXdf['DIminusN']       # Bearish directional indicator
-
-        # Smoothed ADX: 5-day and 15-day rolling means
-        Indicatordf['ADXRoll5'] = Indicatordf['ADX'].rolling(5).mean()
-        Indicatordf['ADXRoll10'] = Indicatordf['ADX'].rolling(15).mean()
-
-        # --- Volume indicators ---
-        Indicatordf['VolRoll5'] = Indicatordf['Volume'].rolling(5).mean()   # 5-day avg volume
-        Indicatordf['VolRoll10'] = Indicatordf['Volume'].rolling(10).mean() # 10-day avg volume
-
-        OBVdf = OBV(Indicatordf)                          # On Balance Volume
-        Indicatordf["OBV"] = OBVdf["obv"]
-        Indicatordf["Daily_Ret"] = OBVdf['daily_ret']
-        # Series that can print negative (e.g. WTI in Apr 2020) make 1+r <= 0
-        _daily_ret = OBVdf['daily_ret']
-        Indicatordf["Log_Ret"] = np.log(_daily_ret.where(_daily_ret > -1) + 1)
-
-        # --- Beta via talib (optional) ---
-        if HAS_TALIB:
-            Indicatordf["Beta"] = talib.BETA(
-                Indicatordf["High"], Indicatordf["Low"], timeperiod=14)
-
-        # --- Regression slope (5-bar rolling) ---
-        Indicatordf["Slope"] = slope(Indicatordf["Close"], 5)
-
-        # --- Moving averages ---
-        # Simple Moving Averages (SMA)
-        for w in [20, 50, 200]:
-            Indicatordf[f"{w}DMA"] = Indicatordf["Close"].rolling(window=w).mean()
-        # Exponential Moving Averages (EMA)
-        for w in [5, 9, 13, 21, 48]:
-            Indicatordf[f"{w}DMA-E"] = Indicatordf["Close"].ewm(
-                span=w, adjust=False).mean()
-
-        Indicatordf.reset_index(inplace=True)
-
-        price_data = OHLCdf.set_index('Date')
-        if analysis_window is not None:
-            price_data = analysis_window.select(price_data)
-            if price_data.empty:
-                print(f"  [skip] No {Scrip} observations in window {analysis_window.label}")
+            # ── Load OHLC data from whichever source holds this symbol ─────
+            try:
+                OHLCdf, source_desc = load_analysis_frame(Scrip)
+                print(f"  Source: {source_desc}")
+            except (FileNotFoundError, ValueError) as e:
+                print(f"  [skip] {e}")
                 continue
-            scope = f"{len(price_data):,} observations"
-            if analysis_window.size and len(price_data) < analysis_window.size:
-                scope += f" - fewer than the {analysis_window.size:,} requested"
-            print(f"  Window {analysis_window.label}: {scope} "
-                  f"({price_data.index[0]:%Y-%m-%d} to {price_data.index[-1]:%Y-%m-%d})")
-            # Nothing after the window's last bar reaches the indicators, audit or Renko.
-            Indicatordf = Indicatordf[Indicatordf['Date'] <= price_data.index[-1]].reset_index(drop=True)
 
-        # ── Plot ──────────────────────────────────────────────────────
-        if 'technical' in REPORT_SECTIONS:
-            display_bars = (technical_window_bars(Indicatordf['Date'])
-                            if analysis_window is None else len(price_data))
-            plot_chart(Indicatordf, display_bars, Scrip, 0, pdf_pages=pdf_pages)
+            if OHLCdf.empty:
+                print(f"  [skip] Empty data for {Scrip}")
+                continue
 
-        # ── Swing-trading pages, on all history up to the range end ───
-        swing_pages = [(name, page) for name, page in (
-            ('candlesticks', candlestick_analysis), ('swing_structure', swing_structure_analysis),
-            ('pivots', pivot_analysis), ('formations', formation_analysis)) if name in REPORT_SECTIONS]
-        if swing_pages:
-            swing_history = OHLCdf.set_index('Date')
-            swing_history = swing_history[swing_history.index <= price_data.index[-1]]
-            swing_bars = (len(price_data) if analysis_window is not None else technical_window_bars(
-                swing_history.index, years=0, months=SWING_WINDOW_MONTHS))
-            for name, page in swing_pages:
+            # ── Ensure OHLCV columns are numeric (parquet may store as string) ──
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                if col in OHLCdf.columns:
+                    OHLCdf[col] = pd.to_numeric(OHLCdf[col], errors='coerce')
+
+            # ── Compute indicators ────────────────────────────────────────
+            Indicatordf = OHLCdf.copy()
+            Indicatordf = Indicatordf.set_index("Date")
+
+            # --- Momentum indicators ---
+            Indicatordf = MACD(Indicatordf, 12, 26, 9)       # MACD (12/26/9)
+            Indicatordf["RSI"] = RSI(Indicatordf, 14)        # RSI (14-period)
+
+            # --- Volatility indicators ---
+            Indicatordf = BollBnd(Indicatordf, 20)            # Bollinger Bands (20-period)
+            Indicatordf = ATR(Indicatordf, 20)                # Average True Range (20-period)
+
+            # --- Trend strength ---
+            ADXdf = ADX(Indicatordf, 20)                      # ADX (20-period Wilder)
+            Indicatordf['ADX'] = ADXdf['ADX']
+            Indicatordf['DIplusN'] = ADXdf['DIplusN']         # Bullish directional indicator
+            Indicatordf['DIminusN'] = ADXdf['DIminusN']       # Bearish directional indicator
+
+            # Smoothed ADX: 5-day and 15-day rolling means
+            Indicatordf['ADXRoll5'] = Indicatordf['ADX'].rolling(5).mean()
+            Indicatordf['ADXRoll10'] = Indicatordf['ADX'].rolling(15).mean()
+
+            # --- Volume indicators ---
+            Indicatordf['VolRoll5'] = Indicatordf['Volume'].rolling(5).mean()   # 5-day avg volume
+            Indicatordf['VolRoll10'] = Indicatordf['Volume'].rolling(10).mean() # 10-day avg volume
+
+            OBVdf = OBV(Indicatordf)                          # On Balance Volume
+            Indicatordf["OBV"] = OBVdf["obv"]
+            Indicatordf["Daily_Ret"] = OBVdf['daily_ret']
+            # Series that can print negative (e.g. WTI in Apr 2020) make 1+r <= 0
+            _daily_ret = OBVdf['daily_ret']
+            Indicatordf["Log_Ret"] = np.log(_daily_ret.where(_daily_ret > -1) + 1)
+
+            # --- Beta via talib (optional) ---
+            if HAS_TALIB:
+                Indicatordf["Beta"] = talib.BETA(
+                    Indicatordf["High"], Indicatordf["Low"], timeperiod=14)
+
+            # --- Regression slope (5-bar rolling) ---
+            Indicatordf["Slope"] = slope(Indicatordf["Close"], 5)
+
+            # --- Moving averages ---
+            # Simple Moving Averages (SMA)
+            for w in [20, 50, 200]:
+                Indicatordf[f"{w}DMA"] = Indicatordf["Close"].rolling(window=w).mean()
+            # Exponential Moving Averages (EMA)
+            for w in [5, 9, 13, 21, 48]:
+                Indicatordf[f"{w}DMA-E"] = Indicatordf["Close"].ewm(
+                    span=w, adjust=False).mean()
+
+            Indicatordf.reset_index(inplace=True)
+
+            price_data = OHLCdf.set_index('Date')
+            if analysis_window is not None:
+                price_data = analysis_window.select(price_data)
+                if price_data.empty:
+                    print(f"  [skip] No {Scrip} observations in window {analysis_window.label}")
+                    continue
+                scope = f"{len(price_data):,} observations"
+                if analysis_window.size and len(price_data) < analysis_window.size:
+                    scope += f" - fewer than the {analysis_window.size:,} requested"
+                print(f"  Window {analysis_window.label}: {scope} "
+                      f"({price_data.index[0]:%Y-%m-%d} to {price_data.index[-1]:%Y-%m-%d})")
+                # Nothing after the window's last bar reaches the indicators, audit or Renko.
+                Indicatordf = Indicatordf[Indicatordf['Date'] <= price_data.index[-1]].reset_index(drop=True)
+
+            # ── Plot ──────────────────────────────────────────────────────
+            if 'technical' in REPORT_SECTIONS:
+                display_bars = (technical_window_bars(Indicatordf['Date'])
+                                if analysis_window is None else len(price_data))
+                plot_chart(Indicatordf, display_bars, Scrip, 0, pdf_pages=pdf_pages)
+
+            # ── Swing-trading pages, on all history up to the range end ───
+            swing_pages = [(name, page) for name, page in (
+                ('candlesticks', candlestick_analysis), ('swing_structure', swing_structure_analysis),
+                ('pivots', pivot_analysis), ('formations', formation_analysis)) if name in REPORT_SECTIONS]
+            if swing_pages:
+                swing_history = OHLCdf.set_index('Date')
+                swing_history = swing_history[swing_history.index <= price_data.index[-1]]
+                swing_bars = (len(price_data) if analysis_window is not None else technical_window_bars(
+                    swing_history.index, years=0, months=SWING_WINDOW_MONTHS))
+                for name, page in swing_pages:
+                    try:
+                        page(swing_history, Scrip, swing_bars, pdf_pages=pdf_pages)
+                    except (ValueError, KeyError) as e:
+                        print(f"  [{name.replace('_', ' ')} skipped] {e}")
+
+            # ── Max pain and put-call ratio of the range's latest options ─
+            if 'max_pain' in REPORT_SECTIONS:
                 try:
-                    page(swing_history, Scrip, swing_bars, pdf_pages=pdf_pages)
+                    max_pain_analysis(Scrip, price_data.index[-1], start=price_data.index[0], pdf_pages=pdf_pages)
                 except (ValueError, KeyError) as e:
-                    print(f"  [{name.replace('_', ' ')} skipped] {e}")
+                    print(f"  [max pain skipped] {e}")
 
-        # ── Max pain and put-call ratio of the range's latest options ─
-        if 'max_pain' in REPORT_SECTIONS:
-            try:
-                max_pain_analysis(Scrip, price_data.index[-1], start=price_data.index[0], pdf_pages=pdf_pages)
-            except (ValueError, KeyError) as e:
-                print(f"  [max pain skipped] {e}")
+            # ── Support / resistance trendlines ───────────────────────────
+            if 'trendlines' in REPORT_SECTIONS:
+                try:
+                    trendline_analysis(price_data, Scrip,
+                                       bars=trend_bars, distance=trend_distance,
+                                       prominence=trend_prominence,
+                                       prominence_pct=trend_prominence_pct,
+                                       pdf_pages=pdf_pages)
+                except (ValueError, KeyError) as e:
+                    print(f"  [trendlines skipped] {e}")
 
-        # ── Support / resistance trendlines ───────────────────────────
-        if 'trendlines' in REPORT_SECTIONS:
-            try:
-                trendline_analysis(price_data, Scrip,
-                                   bars=trend_bars, distance=trend_distance,
-                                   prominence=trend_prominence,
-                                   prominence_pct=trend_prominence_pct,
-                                   pdf_pages=pdf_pages)
-            except (ValueError, KeyError) as e:
-                print(f"  [trendlines skipped] {e}")
+            # ── Volatility profile ────────────────────────────────────────
+            if 'volatility' in REPORT_SECTIONS:
+                live_now = live and price_data.index[-1] >= OHLCdf['Date'].max()
+                if live and not live_now:
+                    print(f"  [live] Skipped: the window ends {price_data.index[-1]:%Y-%m-%d}, before the latest "
+                          "stored day, and a live snapshot would look past it.")
+                try:
+                    volatility_analysis(price_data, Scrip,
+                                        estimator=estimator, pdf_pages=pdf_pages,
+                                        option_dates=option_dates, option_min_contracts=option_min_contracts,
+                                        option_outliers=option_outliers, option_rate=option_rate,
+                                        option_iv_unit=option_iv_unit, live=live_now)
+                except (ValueError, KeyError) as e:
+                    print(f"  [volatility skipped] {e}")
 
-        # ── Volatility profile ────────────────────────────────────────
-        if 'volatility' in REPORT_SECTIONS:
-            live_now = live and price_data.index[-1] >= OHLCdf['Date'].max()
-            if live and not live_now:
-                print(f"  [live] Skipped: the window ends {price_data.index[-1]:%Y-%m-%d}, before the latest "
-                      "stored day, and a live snapshot would look past it.")
-            try:
-                volatility_analysis(price_data, Scrip,
-                                    estimator=estimator, pdf_pages=pdf_pages,
-                                    option_dates=option_dates, option_min_contracts=option_min_contracts,
-                                    option_outliers=option_outliers, option_rate=option_rate,
-                                    option_iv_unit=option_iv_unit, live=live_now)
-            except (ValueError, KeyError) as e:
-                print(f"  [volatility skipped] {e}")
+            # ── Appended statistical comparison ───────────────────────────
+            if compare_with and 'comparison' in REPORT_SECTIONS:
+                try:
+                    compare_series(Scrip, compare_with, days=days,
+                                   pdf_pages=pdf_pages, frequency=comparison_frequency,
+                                   aggregation=comparison_aggregation)
+                except (ValueError, FileNotFoundError) as e:
+                    print(f"  [comparison skipped] {e}")
 
-        # ── Appended statistical comparison ───────────────────────────
-        if compare_with and 'comparison' in REPORT_SECTIONS:
-            try:
-                compare_series(Scrip, compare_with, days=days,
-                               pdf_pages=pdf_pages, frequency=comparison_frequency,
-                               aggregation=comparison_aggregation)
-            except (ValueError, FileNotFoundError) as e:
-                print(f"  [comparison skipped] {e}")
-
-    if pdf_pages:
-        try:
-            if 'japan_macro' in REPORT_SECTIONS:
-                plot_japan_macro(pdf_pages=pdf_pages)
-            if 'schiller_macro' in REPORT_SECTIONS:
-                plot_schiller_macro(pdf_pages=pdf_pages)
-            if 'india_schiller' in REPORT_SECTIONS:
-                plot_india_schiller(pdf_pages=pdf_pages)
-        finally:
-            pdf_pages.close()
-        print(f"\n  PDF saved: {pdf_path}")
+        if 'japan_macro' in REPORT_SECTIONS:
+            plot_japan_macro(pdf_pages=pdf_pages)
+        if 'schiller_macro' in REPORT_SECTIONS:
+            plot_schiller_macro(pdf_pages=pdf_pages)
+        if 'india_schiller' in REPORT_SECTIONS:
+            plot_india_schiller(pdf_pages=pdf_pages)
+        uses_live_data = pdf_pages.infodict().get('Keywords') == 'live_data'
+    finally:
+        pdf_pages.close()
+    if uses_live_data:
+        live_path = timestamped_path(report_base, moment=report_moment, live_data=True)
+        Path(pdf_path).rename(live_path)
+        pdf_path = str(live_path)
+    print(f"\n  PDF saved: {pdf_path}")
     return pdf_path
 
 
@@ -3406,7 +3415,7 @@ def _comp_alignment_note(results):
     return ' | '.join(notes)
 
 
-def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
+def plot_comparison(results, table, desc_a, desc_b, pdf_pages):
     """Render the COMP figure: series, spread, cross-correlation and table."""
     aligned = results['aligned']
     label_a = results['label_a']
@@ -3561,11 +3570,7 @@ def plot_comparison(results, table, desc_a, desc_b, pdf_pages=None):
                 'Macro releases lag their periods and histories are revised; lags do not establish causation.',
                 fontsize=11, color='#555555')
 
-    if pdf_pages:
-        pdf_pages.savefig(figure)
-        plt.close(figure)
-    else:
-        plt.show()
+    _save_report_page(figure, pdf_pages)
 
 
 def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None,
@@ -3573,11 +3578,9 @@ def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None,
     """Resolve, align, measure, and render a comparison of two series.
 
     Pass `pdf_pages` to append the comparison onto a report that is already
-    open; the caller keeps ownership and closes it.
+    open; the caller keeps ownership and closes it. Otherwise save a timestamped
+    PDF, using `pdf_path` or a default name in the charts folder.
     """
-    if pdf_path and pdf_pages is None:
-        matplotlib.use('Agg')
-
     series_a, label_a, desc_a = resolve_comp_series(token_a)
     series_b, label_b, desc_b = resolve_comp_series(token_b)
 
@@ -3622,18 +3625,20 @@ def compare_series(token_a, token_b, days=None, pdf_path=None, pdf_pages=None,
         print(table.drop(columns='Definition').to_string(index=False))
     print()
 
-    owns_pdf = False
-    if pdf_pages is None and pdf_path:
-        from pathlib import Path
-        pdf_path = str(timestamped_path(pdf_path))
+    owns_pdf = pdf_pages is None
+    if owns_pdf:
+        base = pdf_path or _analysis_pdf_path(token_a, token_b, window, frequency, aggregation)
+        pdf_path = str(timestamped_path(base))
         Path(pdf_path).parent.mkdir(parents=True, exist_ok=True)
         pdf_pages = PdfPages(pdf_path)
-        owns_pdf = True
 
-    plot_comparison(results, table, desc_a, desc_b, pdf_pages=pdf_pages)
+    try:
+        plot_comparison(results, table, desc_a, desc_b, pdf_pages=pdf_pages)
+    finally:
+        if owns_pdf:
+            pdf_pages.close()
 
     if owns_pdf:
-        pdf_pages.close()
         print(f"  PDF saved: {pdf_path}\n")
 
     return results, table
@@ -3707,7 +3712,8 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
         print('  [options] No upcoming expiries with valid IV points.')
         return None
     points = option_overlay.attach_realized_benchmarks(
-        points, history, lambda available, tenor: get_volatility_estimator(available, estimator, tenor))
+        points, history, lambda available, tenor: get_volatility_estimator(available, estimator, tenor),
+        quantiles=VOLATILITY_QUANTILES)
     kinds = points.drop_duplicates('Expiry')['Expiry type'].value_counts()
     print(f"  [options] {len(points)} selected points across {len(expiries)} upcoming expiries "
           f"({kinds.get('Monthly', 0)} monthly, {kinds.get('Weekly', 0)} weekly) and "
@@ -3717,7 +3723,8 @@ def build_volatility_option_overlay(price_data, ticker, estimator,
     return {'points': points, 'diagnostics': diagnostics, 'as_of': dates[-1],
             'estimator': estimator, 'top_count': option_overlay.OPTION_TOP_COUNT,
             'outlier_count': outlier_count, 'min_contracts': min_contracts, 'rate': rate,
-            'reported_iv_unit': reported_iv_unit, 'expiries': expiries}
+            'reported_iv_unit': reported_iv_unit, 'expiries': expiries,
+            'quantiles': list(VOLATILITY_QUANTILES)}
 
 
 def build_live_option_overlay(price_data, ticker, estimator,
@@ -3739,7 +3746,8 @@ def build_live_option_overlay(price_data, ticker, estimator,
     points = option_overlay.select_option_points(chain, outlier_count=outlier_count,
                                                  min_contracts=min_contracts)
     points = option_overlay.attach_realized_benchmarks(
-        points, history, lambda available, tenor: get_volatility_estimator(available, estimator, tenor))
+        points, history, lambda available, tenor: get_volatility_estimator(available, estimator, tenor),
+        quantiles=VOLATILITY_QUANTILES)
     lots = '/'.join(str(lot) for lot in sorted(set(snapshot['lot sizes'].values())))
     found = int(points['Is outlier'].sum())
     print(f"  [live] 5paisa {snapshot['fetched']:%d %b %H:%M} IST: priced {diagnostics['estimated_iv']} of "
@@ -3983,7 +3991,7 @@ def _plot_cone_extremes(figure, shown, quantiles):
         f'{_ordinal(lower)}, lowest first.', 125), fontsize=11, color='#555555', va='top')
 
 
-def plot_volatility(profile, ticker, pdf_pages=None):
+def plot_volatility(profile, ticker, pdf_pages):
     """Render the volatility page: cone, box, rolling series and distribution."""
     cone = profile['cone']
     estimator = profile['estimator']
@@ -4134,11 +4142,7 @@ def plot_volatility(profile, ticker, pdf_pages=None):
         figure.text(0.05, 0.017, ' '.join(notes), fontsize=11, color='#555555')
     if live is not None and has('cone'):
         figure.text(0.05, 0.035, _live_note(live), fontsize=11, color='#1f3864')
-    if pdf_pages:
-        pdf_pages.savefig(figure)
-        plt.close(figure)
-    else:
-        plt.show()
+    _save_report_page(figure, pdf_pages, live_data=live is not None and has('cone'))
 
 
 def _volatility_guide_blocks(profile, ticker):
@@ -4284,7 +4288,7 @@ def _volatility_guide_blocks(profile, ticker):
     return blocks
 
 
-def plot_volatility_guide(profile, ticker, pdf_pages=None):
+def plot_volatility_guide(profile, ticker, pdf_pages):
     """Page after the volatility profile: what each graph shows, using this report's numbers."""
     blocks = _volatility_guide_blocks(profile, ticker)
     if not blocks:
@@ -4308,16 +4312,13 @@ def plot_volatility_guide(profile, ticker, pdf_pages=None):
             body = figure.text(left + 0.055, y, textwrap.fill(text, wrap), fontsize=size,
                                va='top', linespacing=1.3)
             y -= body.get_window_extent().height / figure.bbox.height + 0.01
-    if pdf_pages:
-        pdf_pages.savefig(figure)
-        plt.close(figure)
-    else:
-        plt.show()
+    _save_report_page(figure, pdf_pages,
+                      live_data=profile.get('live_overlay') is not None and 'cone' in VOLATILITY_PANELS)
     return len(blocks)
 
 
 def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
-                        pdf_pages=None, option_dates=option_overlay.OPTION_HISTORY_DATES,
+                        *, pdf_pages, option_dates=option_overlay.OPTION_HISTORY_DATES,
                         option_min_contracts=option_overlay.OPTION_MIN_CONTRACTS,
                         option_outliers=option_overlay.OPTION_OUTLIER_COUNT,
                         option_rate=RiskFreeRate, option_iv_unit='percent', live=False):
@@ -4376,11 +4377,11 @@ def volatility_analysis(price_data, ticker, estimator=DEFAULT_ESTIMATOR,
     if 'volatility_guide' in REPORT_SECTIONS:
         plot_volatility_guide(profile, ticker, pdf_pages=pdf_pages)
     if options is not None:
-        option_overlay.plot_option_history(options, ticker, pdf_pages=pdf_pages)
+        option_overlay.plot_option_history(options, ticker, pdf_pages=pdf_pages, live=live_options)
     return profile
 
 
-def _plot_macro_group_pages(group_label, registry, report_groups, subtitle, footer, pdf_pages=None):
+def _plot_macro_group_pages(group_label, registry, report_groups, subtitle, footer, pdf_pages):
     """Render a macro group using the shared metadata and missing-data layout."""
     today = pd.Timestamp(datetime.date.today())
     cutoff = today - pd.DateOffset(years=5)
@@ -4472,17 +4473,11 @@ def _plot_macro_group_pages(group_label, registry, report_groups, subtitle, foot
                     fontsize=11, color='#555b60')
         figure.text(0.945, 0.025, f'{group_label} {page_number}/{len(report_groups)}',
                     fontsize=11, color='#555b60', ha='right')
-        if pdf_pages is not None:
-            try:
-                pdf_pages.savefig(figure)
-            finally:
-                plt.close(figure)
-        else:
-            plt.show()
+        _save_report_page(figure, pdf_pages)
     return summaries
 
 
-def plot_japan_macro(pdf_pages=None):
+def plot_japan_macro(pdf_pages):
     """Render cached Japan indicators with definitions, dates and explicit gaps."""
     return _plot_macro_group_pages(
         'Japan', japan_macro.JAPAN_SERIES, japan_macro.JAPAN_REPORT_GROUPS,
@@ -4492,7 +4487,7 @@ def plot_japan_macro(pdf_pages=None):
         pdf_pages=pdf_pages)
 
 
-def plot_schiller_macro(pdf_pages=None):
+def plot_schiller_macro(pdf_pages):
     """Render the US-only Schiller valuation group from cached history."""
     return _plot_macro_group_pages(
         'US Schiller', schiller_macro.SCHILLER_SERIES, schiller_macro.SCHILLER_REPORT_GROUPS,
@@ -4502,7 +4497,7 @@ def plot_schiller_macro(pdf_pages=None):
         pdf_pages=pdf_pages)
 
 
-def plot_india_schiller(pdf_pages=None):
+def plot_india_schiller(pdf_pages):
     """Render Indian-only valuations, distinguishing published CAPE from estimates."""
     return _plot_macro_group_pages(
         'India Schiller', nifty_macro.NIFTY_SERIES, nifty_macro.NIFTY_REPORT_GROUPS,
@@ -4582,7 +4577,6 @@ def _listing_pages(lines, per_page):
 
 def plot_listing(summary, latest, source, pdf_path, window=None):
     """Save a List result as a timestamped PDF and return its full path."""
-    matplotlib.use('Agg')
     pdf_path = str(timestamped_path(pdf_path))
     Path(pdf_path).parent.mkdir(parents=True, exist_ok=True)
     lines = _listing_text(latest, LIST_PDF_CHARACTERS).splitlines() if len(latest) else ['No rows.']
@@ -4610,12 +4604,12 @@ def plot_listing(summary, latest, source, pdf_path, window=None):
     return pdf_path
 
 
-def list_parquet(arguments, use_pdf=False):
-    """`List <file> [rows|window] [output.pdf]`: print the latest rows of any Parquet file.
+def list_parquet(arguments):
+    """`List <file> [rows|window] [output.pdf]`: print and save the latest rows as a PDF.
 
     `rows` counts rows. A window - 100d, 350d-25d, Jan2026 or Jan2026-Mar2026 - takes every
-    row on its trading days instead, by Date (BizDt where present). With --pdf the listing is
-    also saved, by default as charts/<file name>_latest<rows>_rows_<stamp>.pdf or
+    row on its trading days instead, by Date (BizDt where present). The listing is always
+    saved, by default as charts/<file name>_latest<rows>_rows_<stamp>.pdf or
     charts/<file name>_<window>_rows_<stamp>.pdf. Returns the PDF path, or None.
     """
     counts = [argument for argument in arguments if argument.lstrip('+-').isdigit()]
@@ -4635,12 +4629,11 @@ def list_parquet(arguments, use_pdf=False):
              if argument not in counts + outputs + [token for token, _ in windows]]
     if (len(files) != 1 or len(counts) + len(windows) > 1 or len(outputs) > 1
             or files[0].startswith('--')):
-        print('Usage: python Option-OGN.py [--pdf] List <file.parquet> [rows|window] [output.pdf]')
+        print('Usage: python Option-OGN.py List <file.parquet> [rows|window] [output.pdf]')
         print(f'  rows        optional - latest N rows (default {LATEST_ROWS}), by Date when the file has one')
         print('  window      optional - every row on 100d (latest 100 trading days), 350d-25d,')
         print('              Jan2026 or Jan2026-Mar2026, instead of a row count')
-        print('  --pdf       also save the listing as a PDF, by default in the charts folder')
-        print('  output.pdf  optional - custom PDF name; needs --pdf')
+        print('  output.pdf  optional - custom PDF name (default: charts folder)')
         print('  Quote paths that contain spaces.')
         return None
     window = windows[0][1] if windows else None
@@ -4648,10 +4641,6 @@ def list_parquet(arguments, use_pdf=False):
     if window is None and rows <= 0:
         print(f'  [error] rows must be positive, got {rows}.')
         return None
-    if outputs and not use_pdf:
-        print(f'  [error] Add --pdf to save the listing as {outputs[0]}.')
-        return None
-
     source = Path(os.path.abspath(files[0]))
     try:
         latest, total, order = latest_parquet_rows(source, rows, window=window)
@@ -4664,8 +4653,6 @@ def list_parquet(arguments, use_pdf=False):
     if len(latest):
         print()
         print(_listing_text(latest, shutil.get_terminal_size((160, 24)).columns))
-    if not use_pdf:
-        return None
     name = (f'{source.stem}_latest{rows}_rows.pdf' if window is None
             else f'{source.stem}_{window.label}_rows.pdf')
     pdf_path = plot_listing(summary, latest, source, outputs[0] if outputs else str(CHARTS_DIR / name),
@@ -4705,35 +4692,30 @@ def main():
     """CLI entry point.
 
     Usage:
-        python Option-OGN.py                          # interactive, all FnO
+        python Option-OGN.py                          # PDF, all FnO
         python Option-OGN.py WTI                      # full analysis, one symbol
-        python Option-OGN.py --pdf WTI 250d           # one symbol, last 250 trading days
-        python Option-OGN.py --pdf WTI 350d-25d       # ... 350 back to 25 back (latest 25 excluded)
-        python Option-OGN.py --pdf WTI Jan2026        # ... January 2026 (also Jan2026-Mar2026)
+        python Option-OGN.py WTI 250d                 # one symbol, last 250 trading days
+        python Option-OGN.py WTI 350d-25d             # ... 350 back to 25 back (latest 25 excluded)
+        python Option-OGN.py WTI Jan2026              # ... January 2026 (also Jan2026-Mar2026)
         python Option-OGN.py WTI US02Y__US10Y         # ... plus a comparison
         python Option-OGN.py WTI US02Y__US10Y 250d    # ... over the last 250 aligned observations
-        python Option-OGN.py --pdf WTI JP10Y --periods 120  # monthly alignment
-        python Option-OGN.py --pdf WTI JP10Y --compare-frequency quarterly
+        python Option-OGN.py WTI JP10Y --periods 120  # monthly alignment
+        python Option-OGN.py WTI JP10Y --compare-frequency quarterly
         python Option-OGN.py --estimator Raw WTI      # choose the volatility estimator
-        python Option-OGN.py --pdf NIFTY --live       # ... plus live 5paisa Smile MAD outliers on the cone
+        python Option-OGN.py NIFTY --live             # ... plus live 5paisa Smile MAD outliers on the cone
         python Option-OGN.py --trend-bars 250 GLD     # widen the trendline lookback
         python Option-OGN.py --trend-distance 20 GLD  # demand 20 bars between pivots
         python Option-OGN.py --trend-prominence 5 GLD # absolute prominence, price units
         python Option-OGN.py --trend-prominence-pct 5 GLD  # auto-scale off 5% of range
-        python Option-OGN.py --pdf                    # all FnO -> charts/FnO_Analysis_<stamp>.pdf
-        python Option-OGN.py --pdf WTI                # -> charts/WTI_Analysis_<stamp>.pdf
-        python Option-OGN.py --pdf WTI US02Y__US10Y   # -> charts/WTI_vs_US02Y__US10Y_Analysis_<stamp>.pdf
-        python Option-OGN.py --pdf output.pdf         # custom output file -> output_<stamp>.pdf
-        python Option-OGN.py List "<file>.parquet" 20 # latest 20 rows of any Parquet file
-        python Option-OGN.py --pdf List "<file>.parquet" 100d  # -> charts/<file>_100d_rows_<stamp>.pdf
+        python Option-OGN.py output.pdf               # custom output file -> output_<stamp>.pdf
+        python Option-OGN.py List "<file>.parquet" 20 # PDF of the latest 20 rows of any Parquet file
+        python Option-OGN.py List "<file>.parquet" 100d  # -> charts/<file>_100d_rows_<stamp>.pdf
 
     <stamp> is the run time as YYYYMMDD_HHMMSS, so reruns never overwrite a report.
-    Each PDF's full path is printed once it is saved.
+    Referenced live snapshots add -live_data before .pdf. Reports are PDF-only,
+    and each PDF's full path is printed once it is saved.
     """
     args = sys.argv[1:]
-    use_pdf = '--pdf' in args
-    if use_pdf:
-        args.remove('--pdf')
     live = '--live' in args
     if live:
         args.remove('--live')
@@ -4746,7 +4728,7 @@ def main():
         if live:
             print('  [error] --live overlays the volatility cone; List does not take it.')
             return
-        list_parquet(args[1:], use_pdf=use_pdf)
+        list_parquet(args[1:])
         return
 
     try:
@@ -4839,6 +4821,8 @@ def main():
             raise ValueError(f"Write the window as {tokens[-1].lstrip('+-')}d (trading days), "
                              f"350d-25d or Jan2026.")
         for token in tokens:
+            if token.startswith('--'):
+                raise ValueError(f"Unknown option '{token}'. Reports are always saved as PDFs.")
             try:
                 misplaced = parse_report_window(token) is not None
             except ValueError:
@@ -4850,17 +4834,17 @@ def main():
         return
 
     if len(tokens) > 2:
-        print("Usage: python Option-OGN.py [--pdf] [--live] [--estimator NAME] "
+        print("Usage: python Option-OGN.py [--live] [--estimator NAME] "
               "[--trend-bars N] [--trend-distance N] [--trend-prominence X] "
               "[--compare-frequency FREQ] [--compare-aggregation METHOD] "
-              "[symbol] [compare_symbol] [window]")
+              "[symbol] [compare_symbol] [window] [output.pdf]")
         print("  symbol            full technical analysis for this series")
         print("  compare_symbol    optional - append a statistical comparison")
         print("  window            optional - 250d (last 250 trading days), 350d-25d (latest 25 excluded),")
         print("                    Jan2026 or Jan2026-Mar2026; also --periods N. Counts are observations")
         print("                    at the analysed cadence, e.g. aligned months for a monthly comparison")
         print(f"  List <file> [rows|window]  latest rows (default {LATEST_ROWS}) or every row in a window"
-              f" (100d, Jan2026) of any Parquet file; --pdf also saves a PDF")
+              f" (100d, Jan2026) of any Parquet file, saved as a PDF")
         print("  --compare-frequency   auto (slower source), daily, weekly, monthly, quarterly, annual")
         print("  --compare-aggregation auto (series-specific), mean, last, sum")
         print('  --option-dates N          recent trading dates for IV overlays (default 5)')
@@ -4891,18 +4875,9 @@ def main():
         print('  [error] Comparison options require a second symbol.')
         return
 
-    if use_pdf and not pdf_path:
-        suffix = f"_{days.label}" if days is not None else ""
-        if symbol and compare_with:
-            if comparison_frequency != 'auto':
-                suffix += f'_{comparison_frequency}'
-            if comparison_aggregation != 'auto':
-                suffix += f'_{comparison_aggregation}'
-            pdf_path = str(CHARTS_DIR / f"{symbol}_vs_{compare_with}{suffix}_Analysis.pdf")
-        elif symbol:
-            pdf_path = str(CHARTS_DIR / f"{symbol}{suffix}_Analysis.pdf")
-        else:
-            pdf_path = str(CHARTS_DIR / "FnO_Analysis.pdf")
+    if not pdf_path:
+        pdf_path = str(_analysis_pdf_path(symbol, compare_with, days,
+                                          comparison_frequency, comparison_aggregation))
 
     if live and 'volatility' not in REPORT_SECTIONS:
         print("  [live] Ignored: 'volatility' is off in REPORT_SECTIONS, so there is no cone to overlay.")
@@ -4916,7 +4891,7 @@ def main():
 
     try:
         FnOAnalysis(single_scrip=symbol,
-                    pdf_path=pdf_path if use_pdf else None,
+                    pdf_path=pdf_path,
                     compare_with=compare_with,
                     days=days,
                     estimator=estimator,

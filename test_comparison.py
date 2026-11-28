@@ -237,7 +237,7 @@ class ComparisonTests(unittest.TestCase):
             self.module.compute_comparison(first, second, 'First', 'Second', days='Jan2030')
 
     def test_cli_passes_sampling_choices_and_uses_observation_filename(self):
-        arguments = ['Option-OGN.py', '--pdf', '--periods', '72',
+        arguments = ['Option-OGN.py', '--periods', '72',
                      '--compare-frequency', 'quarterly', '--compare-aggregation', 'last',
                      'WTI', 'JP10Y']
         with patch.object(self.module.sys, 'argv', arguments), \
